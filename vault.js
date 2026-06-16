@@ -210,11 +210,68 @@ export async function getTradeBlockTeams() {
   return [...new Set(entries.map((e) => e.team_name).filter(Boolean))].sort();
 }
 
+// Cache the full player list briefly so autocomplete (which fires on every
+// keystroke) doesn't hit the API repeatedly.
+let _playerCache = { at: 0, rows: [] };
+const PLAYER_TTL_MS = 60_000; // 1 minute
+
+async function getAllPlayers() {
+  const now = Date.now();
+  if (now - _playerCache.at < PLAYER_TTL_MS && _playerCache.rows.length) {
+    return _playerCache.rows;
+  }
+  const rows = await list("Player", { cycle: CYCLE });
+  _playerCache = { at: now, rows };
+  return rows;
+}
+
+// Suggestions for autocomplete. Returns up to `limit` players ranked by how
+// well they match the partial query, each as { name, value } where value is a
+// stable, unambiguous identifier (the Base44 record id when available).
+export async function suggestPlayers(partial, limit = 25) {
+  const all = await getAllPlayers();
+  const q = (partial ?? "").trim().toLowerCase();
+
+  const scored = all
+    .map((p) => {
+      const n = (p.player_fullName ?? "").toLowerCase();
+      const words = n.split(/\s+/);
+      let tier = 0;
+      if (!q) tier = 1; // empty query -> show top players
+      else if (n === q) tier = 4;
+      else if (n.startsWith(q)) tier = 3;
+      else if (words.some((w) => w.startsWith(q))) tier = 2;
+      else if (n.includes(q)) tier = 1;
+      return { p, tier };
+    })
+    .filter((x) => x.tier > 0)
+    .sort(
+      (a, b) => b.tier - a.tier || (b.p.player_ovr ?? 0) - (a.p.player_ovr ?? 0)
+    )
+    .slice(0, limit);
+
+  return scored.map(({ p }) => {
+    const team = p.team_abbrName ? ` · ${p.team_abbrName}` : "";
+    const label =
+      `${p.player_fullName} (${p.player_position ?? "?"} · ${p.player_ovr ?? "?"} OVR${team})`.slice(
+        0,
+        100 // Discord caps choice names at 100 chars
+      );
+    return { name: label, value: p.id || p.player_fullName };
+  });
+}
+
+// Fetch a single player by Base44 record id (what autocomplete sends).
+export async function getPlayerById(id) {
+  const all = await getAllPlayers();
+  return all.find((p) => p.id === id) ?? null;
+}
+
 // Look up players by (partial) name. Returns a ranked list of matches plus a
 // flag for whether the result is unambiguous (a single clear player) so the
 // caller can either show the card directly or present a chooser.
 export async function getPlayer(name) {
-  const all = await list("Player", { cycle: CYCLE });
+  const all = await getAllPlayers();
   if (!all.length) return { matches: [], unambiguous: false };
 
   const q = name.trim().toLowerCase();
