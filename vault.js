@@ -27,7 +27,15 @@ async function list(entity, filter = {}, opts = {}) {
   let res;
   try {
     res = await fetch(url, {
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // Base44 identifies the app via this header; without it anonymous
+        // reads of public entities are rejected with 403.
+        "X-App-Id": APP_ID,
+        ...(process.env.BASE44_API_KEY
+          ? { Authorization: `Bearer ${process.env.BASE44_API_KEY}` }
+          : {}),
+      },
     });
   } catch (err) {
     console.error(`Network error reading ${entity}:`, err.message);
@@ -202,21 +210,25 @@ export async function getTradeBlockTeams() {
   return [...new Set(entries.map((e) => e.team_name).filter(Boolean))].sort();
 }
 
-// Look up a single player by (partial) name. Returns the best match, plus a
-// list of other near-matches so the caller can disambiguate if needed.
+// Look up players by (partial) name. Returns a ranked list of matches plus a
+// flag for whether the result is unambiguous (a single clear player) so the
+// caller can either show the card directly or present a chooser.
 export async function getPlayer(name) {
   const all = await list("Player", { cycle: CYCLE });
-  if (!all.length) return { match: null, others: [] };
+  if (!all.length) return { matches: [], unambiguous: false };
 
   const q = name.trim().toLowerCase();
 
-  // Rank: exact > startsWith > includes. Prefer higher OVR within a tier.
+  // Rank each player: exact full-name match > starts-with > word match >
+  // substring. Within a tier, prefer higher OVR.
   const scored = all
     .map((p) => {
       const n = (p.player_fullName ?? "").toLowerCase();
-      let tier = -1;
-      if (n === q) tier = 3;
-      else if (n.startsWith(q)) tier = 2;
+      const words = n.split(/\s+/);
+      let tier = 0;
+      if (n === q) tier = 4;
+      else if (n.startsWith(q)) tier = 3;
+      else if (words.includes(q)) tier = 2; // exact word (e.g. last name)
       else if (n.includes(q)) tier = 1;
       return { p, tier };
     })
@@ -225,10 +237,15 @@ export async function getPlayer(name) {
       (a, b) => b.tier - a.tier || (b.p.player_ovr ?? 0) - (a.p.player_ovr ?? 0)
     );
 
-  return {
-    match: scored.length ? scored[0].p : null,
-    others: scored.slice(1, 6).map((x) => x.p),
-  };
+  const matches = scored.map((x) => x.p);
+
+  // Unambiguous only when there's exactly one match, or the top match is an
+  // exact full-name hit that nothing else ties.
+  const exact = scored.filter((x) => x.tier === 4);
+  const unambiguous =
+    matches.length === 1 || exact.length === 1;
+
+  return { matches, unambiguous };
 }
 
 // Look up a Roster row for a player (gives team name + abbreviation for the
