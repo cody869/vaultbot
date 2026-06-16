@@ -36,8 +36,9 @@ export const commands = [
     .addStringOption((o) =>
       o
         .setName("name")
-        .setDescription("Player name (full or partial)")
+        .setDescription("Start typing a player name, then pick from the list")
         .setRequired(true)
+        .setAutocomplete(true)
     ),
 
   new SlashCommandBuilder()
