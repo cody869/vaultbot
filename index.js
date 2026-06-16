@@ -58,13 +58,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       case "player": {
         const name = interaction.options.getString("name");
-        const { match, others } = await getPlayer(name);
-        if (!match) {
+        const { matches, unambiguous } = await getPlayer(name);
+        if (!matches.length) {
+          // No matches at all.
           await interaction.editReply({
-            embeds: [playerChoicesEmbed(name, others)],
+            embeds: [playerChoicesEmbed(name, [])],
           });
           break;
         }
+        if (!unambiguous) {
+          // Several players matched (e.g. a shared last name) — list them.
+          await interaction.editReply({
+            embeds: [playerChoicesEmbed(name, matches)],
+          });
+          break;
+        }
+        const match = matches[0];
         const team = await getRosterFor(match.player_fullName);
         await interaction.editReply({ embeds: [playerEmbed(match, team)] });
         break;
