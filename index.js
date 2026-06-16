@@ -10,6 +10,8 @@ import {
   getTradeBlockTeams,
   getTrades,
   getPlayer,
+  getPlayerById,
+  suggestPlayers,
   getRosterFor,
 } from "./vault.js";
 import {
@@ -36,6 +38,24 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  // Autocomplete: respond with player suggestions as the user types.
+  if (interaction.isAutocomplete()) {
+    if (interaction.commandName === "player") {
+      try {
+        const focused = interaction.options.getFocused();
+        const choices = await suggestPlayers(focused, 25);
+        await interaction.respond(choices);
+      } catch (err) {
+        console.error("Autocomplete error:", err.message);
+        // Respond with an empty list so the client doesn't hang.
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
+    }
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   // Vault calls can take a moment — defer so we don't time out (3s limit).
@@ -57,19 +77,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
         break;
       }
       case "player": {
-        const name = interaction.options.getString("name");
-        const { matches, unambiguous } = await getPlayer(name);
+        const input = interaction.options.getString("name");
+
+        // If the value looks like a Base44 record id (picked from the
+        // autocomplete dropdown), fetch that exact player.
+        const byId = await getPlayerById(input);
+        if (byId) {
+          const team = await getRosterFor(byId.player_fullName);
+          await interaction.editReply({ embeds: [playerEmbed(byId, team)] });
+          break;
+        }
+
+        // Otherwise treat it as a free-text name search.
+        const { matches, unambiguous } = await getPlayer(input);
         if (!matches.length) {
-          // No matches at all.
           await interaction.editReply({
-            embeds: [playerChoicesEmbed(name, [])],
+            embeds: [playerChoicesEmbed(input, [])],
           });
           break;
         }
         if (!unambiguous) {
-          // Several players matched (e.g. a shared last name) — list them.
           await interaction.editReply({
-            embeds: [playerChoicesEmbed(name, matches)],
+            embeds: [playerChoicesEmbed(input, matches)],
           });
           break;
         }
