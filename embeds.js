@@ -210,14 +210,22 @@ export function playerEmbed(p, team = null) {
 }
 
 // When a name is ambiguous, list the alternatives.
-export function playerChoicesEmbed(name, others) {
-  const e = base(`🔍 No exact match for "${name}"`);
-  const lines = others.map(
-    (p) =>
-      `• **${p.player_fullName}** (${p.player_position ?? "?"}, ${p.player_ovr ?? "?"} OVR)`
-  );
+export function playerChoicesEmbed(name, matches) {
+  if (!matches.length) {
+    return base(`🔍 No player found for "${name}"`).setDescription(
+      "No players matched. Check the spelling or try a first name."
+    );
+  }
+  const e = base(`🔍 Multiple players match "${name}"`);
+  const lines = matches.slice(0, 15).map((p) => {
+    const gem = devEmoji(p.player_devTrait);
+    const team = p.team_abbrName ? ` — ${p.team_abbrName}` : "";
+    return `${gem} **${p.player_fullName}** (${p.player_position ?? "?"}, ${p.player_ovr ?? "?"} OVR${team})`;
+  });
+  const more = matches.length > 15 ? `\n…and ${matches.length - 15} more.` : "";
   return e.setDescription(
-    (lines.length ? "Did you mean:\n" + lines.join("\n") : "No players found.") +
-      "\n\nTry a more specific name."
+    "Did you mean one of these? Search the full name:\n" +
+      lines.join("\n") +
+      more
   );
 }
