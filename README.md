@@ -9,7 +9,7 @@ A Discord bot that pulls live league data from your **XCFL Vault** Base44 app an
 | `/standings [season]` | Current standings (defaults to the latest season) |
 | `/leaders <category> [count]` | Stat leaders — passing, rushing, receiving, or defense |
 | `/power` | Latest power rankings, with movement arrows |
-| `/tradeblock` | Players and picks currently on the block |
+| `/tradeblock [team]` | Trade block — all teams, or filter to one (name or abbreviation) |
 | `/trades [status]` | Recent trade submissions (filter by approved/pending/rejected) |
 
 ---
