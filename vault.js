@@ -118,7 +118,7 @@ export async function getStandings(seasonNumber) {
 // Scores for a given week (defaults to the latest week with games) in the
 // latest season. Home team is user1, away is user2 by the export convention.
 export async function getScores(week, seasonNumber) {
-  const games = await list("Game");
+  const games = await list("Game", { cycle: CYCLE });
   if (!games.length) return { season: null, week: null, games: [] };
 
   const season =
@@ -147,7 +147,7 @@ export async function getScores(week, seasonNumber) {
 
 // Weeks available in the latest season (for the /scores week autocomplete).
 export async function getScoreWeeks(seasonNumber) {
-  const games = await list("Game");
+  const games = await list("Game", { cycle: CYCLE });
   if (!games.length) return { season: null, weeks: [] };
   const season =
     seasonNumber ?? Math.max(...games.map((g) => g.season_number ?? 0));
@@ -165,7 +165,7 @@ export async function getScoreWeeks(seasonNumber) {
 // A signature that changes whenever game data changes — the most recent
 // `updated_date` across all games. Used by the scheduler to detect new scores.
 export async function getScoresSignature() {
-  const games = await list("Game");
+  const games = await list("Game", { cycle: CYCLE });
   if (!games.length) return null;
   let latest = "";
   for (const g of games) {
