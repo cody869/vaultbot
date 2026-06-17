@@ -8,6 +8,7 @@ A Discord bot that pulls live league data from your **XCFL Vault** Base44 app an
 |---|---|
 | `/standings [season]` | Current standings (defaults to the latest season) |
 | `/leaders <category> [count]` | Stat leaders — passing, rushing, receiving, or defense |
+| `/scores [week] [season]` | Game scores for a week (defaults to latest); week has autocomplete |
 | `/power` | Latest power rankings, with movement arrows |
 | `/tradeblock [team]` | Trade block — all teams, or filter to one (name or abbreviation) |
 | `/trades [status]` | Recent trade submissions (filter by approved/pending/rejected) |
@@ -50,17 +51,14 @@ Discord values.
 > app ID is enough. If you ever restrict those entities, generate a Base44
 > API token and set `BASE44_AUTH_TOKEN` in `.env`.
 
-### 6. Register the slash commands
-```
-npm run deploy
-```
-If you set `DISCORD_GUILD_ID`, commands appear instantly in that server.
-
-### 7. Start the bot
+### 6. Start the bot
 ```
 npm start
 ```
-You should see `✅ XCFL Vault bot online`.
+You should see `✅ XCFL Vault bot online`. Commands now register
+**automatically on every startup**, so you don't need a separate deploy step —
+just run `npm start` (or let Railway run it). The `npm run deploy` command still
+exists if you ever want to register manually.
 
 ---
 
@@ -95,6 +93,27 @@ emoji it can't find falls back to a plain unicode symbol, so nothing breaks.
 > Team abbreviations come from your Roster/Player data (`team_abbrName`). If an
 > emoji name doesn't match the abbreviation (e.g. data says `JAX` but the emoji
 > is `:jac:`), tell me and I'll add an alias.
+
+## Auto-posting (optional)
+
+The bot can automatically post standings, scores, and/or power rankings to a
+channel on a weekly schedule. It's off unless you set a channel. Configure with
+environment variables (in Railway's Variables tab):
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `AUTOPOST_CHANNEL_ID` | Channel to post into. **Setting this enables auto-posting.** | (off) |
+| `AUTOPOST_DAY` | Day of week, 0=Sun … 6=Sat | `1` (Mon) |
+| `AUTOPOST_HOUR` | Hour 0–23 | `12` |
+| `AUTOPOST_CONTENT` | Comma list of `standings`, `scores`, `power` | `standings,scores` |
+| `TZ` | Timezone, e.g. `America/Los_Angeles` | server default |
+
+To get a channel ID: enable Developer Mode in Discord, right-click the channel
+→ Copy Channel ID. Make sure the bot can see and post in that channel.
+
+Example: post standings + scores every Monday at 10am Pacific →
+`AUTOPOST_CHANNEL_ID=...`, `AUTOPOST_DAY=1`, `AUTOPOST_HOUR=10`,
+`AUTOPOST_CONTENT=standings,scores`, `TZ=America/Los_Angeles`.
 
 ## Customizing
 
