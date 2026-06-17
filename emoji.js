@@ -84,6 +84,15 @@ const NAME_TO_ABBR = {
   seahawks: "sea", buccaneers: "tb", titans: "ten", commanders: "was",
 };
 
+// Resolve a team abbreviation (uppercase) from a full or nickname team name.
+// Returns "" if unknown.
+export function abbrFromName(teamName) {
+  if (!teamName) return "";
+  const key = teamName.toLowerCase().trim();
+  const nick = key.split(/\s+/).pop();
+  return (NAME_TO_ABBR[key] || NAME_TO_ABBR[nick] || "").toUpperCase();
+}
+
 // Resolve a helmet from either an abbreviation or a full/nick team name.
 export function teamEmojiByName(teamName) {
   if (!teamName) return teamEmoji("");
