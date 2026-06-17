@@ -9,22 +9,61 @@
 //
 // If AUTOPOST_CHANNEL_ID is unset, the scheduler does nothing.
 
-import { getStandings, getScores, getPowerRankings } from "./vault.js";
+import { getStandings, getScores, getPowerRankings, getScoresSignature } from "./vault.js";
 import {
   standingsEmbed,
   scoresEmbed,
   powerRankingsEmbed,
 } from "./embeds.js";
+import { readFileSync, writeFileSync } from "node:fs";
+
+// Where we remember the last-posted score signature. Railway's filesystem is
+// ephemeral (resets on redeploy), which is fine: after a redeploy the bot will
+// post once to catch up, then track changes from there.
+const STATE_FILE = process.env.AUTOPOST_STATE_FILE || "/tmp/xcfl-autopost.json";
+
+function loadState() {
+  try {
+    return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function saveState(state) {
+  try {
+    writeFileSync(STATE_FILE, JSON.stringify(state));
+  } catch (err) {
+    console.error("Autopost: could not persist state:", err.message);
+  }
+}
 
 function cfg() {
+  // AUTOPOST_DAY may be a single day ("1") or a comma list ("0,1,2,3,4,5,6").
+  // Empty/unset defaults to Monday. "*" or "all" means every day.
+  const rawDay = (process.env.AUTOPOST_DAY ?? "1").trim();
+  let days;
+  if (rawDay === "*" || rawDay.toLowerCase() === "all") {
+    days = [0, 1, 2, 3, 4, 5, 6];
+  } else {
+    days = rawDay
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6);
+    if (!days.length) days = [1];
+  }
+
   return {
     channelId: process.env.AUTOPOST_CHANNEL_ID,
-    day: Number.isFinite(+process.env.AUTOPOST_DAY) ? +process.env.AUTOPOST_DAY : 1,
+    days,
     hour: Number.isFinite(+process.env.AUTOPOST_HOUR) ? +process.env.AUTOPOST_HOUR : 12,
     content: (process.env.AUTOPOST_CONTENT || "standings,scores")
       .split(",")
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
+    // When true (default), skip posting if there are no new game results since
+    // the last post. Set AUTOPOST_ONLY_ON_CHANGE=false to always post.
+    onlyOnChange:
+      (process.env.AUTOPOST_ONLY_ON_CHANGE ?? "true").toLowerCase() !== "false",
   };
 }
 
@@ -44,8 +83,24 @@ async function buildEmbeds(content) {
 }
 
 async function post(client, content) {
-  const { channelId } = cfg();
+  const { channelId, onlyOnChange } = cfg();
   if (!channelId) return;
+
+  // If gating on change, compare the current score signature to last posted.
+  let currentSig = null;
+  if (onlyOnChange) {
+    try {
+      currentSig = await getScoresSignature();
+      const state = loadState();
+      if (currentSig && state.lastSignature === currentSig) {
+        console.log("⏰ Autopost skipped: no new scores since last post.");
+        return;
+      }
+    } catch (err) {
+      console.error("Autopost: signature check failed, posting anyway:", err.message);
+    }
+  }
+
   try {
     const channel = await client.channels.fetch(channelId);
     if (!channel || !channel.isTextBased()) {
@@ -57,6 +112,15 @@ async function post(client, content) {
       // Discord allows up to 10 embeds per message.
       await channel.send({ embeds: embeds.slice(0, 10) });
       console.log(`📤 Autoposted: ${content.join(", ")}`);
+      // Persist the signature only after a successful send.
+      if (onlyOnChange && currentSig) {
+        const state = loadState();
+        saveState({
+          ...state,
+          lastSignature: currentSig,
+          lastPostedAt: new Date().toISOString(),
+        });
+      }
     }
   } catch (err) {
     console.error("Autopost: send failed:", err.message);
@@ -74,9 +138,9 @@ export function startScheduler(client) {
 
   let lastFiredKey = null;
   const tick = () => {
-    const { day, hour, content } = cfg();
+    const { days, hour, content } = cfg();
     const now = new Date();
-    if (now.getDay() === day && now.getHours() === hour) {
+    if (days.includes(now.getDay()) && now.getHours() === hour) {
       // Only fire once per scheduled hour.
       const key = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}-${hour}`;
       if (key !== lastFiredKey) {
@@ -88,9 +152,9 @@ export function startScheduler(client) {
 
   // Check every minute.
   setInterval(tick, 60_000);
-  const { day, hour } = cfg();
+  const { days, hour, content } = cfg();
   console.log(
-    `⏰ Auto-posting enabled: day ${day}, hour ${hour}, content "${cfg().content.join(",")}".`
+    `⏰ Auto-posting enabled: days [${days.join(",")}], hour ${hour}, content "${content.join(",")}".`
   );
 }
 
