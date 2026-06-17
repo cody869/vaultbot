@@ -4,7 +4,7 @@ import { Client, GatewayIntentBits, Events } from "discord.js";
 import { loadEmoji } from "./emoji.js";
 import { registerCommands } from "./deploy-commands.js";
 import { startScheduler } from "./scheduler.js";
-import { startTradeFlow, handleTradeComponent } from "./tradeflow.js";
+import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.js";
 import {
   getStandings,
   getStatLeaders,
@@ -77,11 +77,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.respond([]);
         } catch {}
       }
+    } else if (interaction.commandName === "submit_trade") {
+      try {
+        const focused = String(interaction.options.getFocused() ?? "");
+        const choices = await suggestTeams(focused, 25);
+        await interaction.respond(choices);
+      } catch (err) {
+        console.error("Autocomplete error:", err.message);
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
     }
     return;
   }
-
-  // Component interactions (buttons, select menus) for the trade builder.
   if (interaction.isButton() || interaction.isStringSelectMenu()) {
     await handleTradeComponent(interaction);
     return;
