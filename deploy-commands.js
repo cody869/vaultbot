@@ -64,7 +64,21 @@ export const commands = [
 
   new SlashCommandBuilder()
     .setName("submit_trade")
-    .setDescription("Build and submit a trade step by step"),
+    .setDescription("Build and submit a trade step by step")
+    .addStringOption((o) =>
+      o
+        .setName("team1")
+        .setDescription("First team in the trade")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("team2")
+        .setDescription("Second team in the trade")
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
 
   new SlashCommandBuilder()
     .setName("power")
