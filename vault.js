@@ -1,5 +1,7 @@
-// vault.js — reads XCFL Vault data from Base44's public REST API.
-// All read entities have open read RLS, so no auth token is required.
+// vault.js — reads XCFL Vault data from Base44.
+// If BOT_EMAIL/BOT_PASSWORD are set, the bot logs in as that user and sends a
+// bearer token (needed once the app requires login). Otherwise it falls back to
+// anonymous reads (works only while the app is public).
 const APP_ID = process.env.BASE44_APP_ID;
 const SERVER = process.env.BASE44_SERVER_URL || "https://base44.app";
 
@@ -10,33 +12,79 @@ if (!APP_ID) {
 
 const CYCLE = process.env.XCFL_CYCLE || "M26";
 
+// --- auth ----------------------------------------------------------------
+
+let _token = null;
+
+// Log in as the bot's dedicated user and cache the access token. Safe to call
+// repeatedly; returns the token or null if no credentials are configured.
+export async function botLogin() {
+  const email = process.env.BOT_EMAIL;
+  const password = process.env.BOT_PASSWORD;
+  // A pre-issued token can be supplied directly instead of email/password.
+  if (process.env.BASE44_TOKEN) {
+    _token = process.env.BASE44_TOKEN;
+    return _token;
+  }
+  if (!email || !password) return null;
+
+  try {
+    const res = await fetch(`${SERVER}/api/apps/${APP_ID}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-App-Id": APP_ID },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`Bot login failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+      _token = null;
+      return null;
+    }
+    const data = await res.json().catch(() => null);
+    _token = data?.access_token || null;
+    if (_token) console.log("🔑 Bot authenticated to the Vault.");
+    else console.error("Bot login returned no access_token.");
+    return _token;
+  } catch (err) {
+    console.error("Bot login error:", err.message);
+    _token = null;
+    return null;
+  }
+}
+
+// Build auth headers for a request, including the bearer token if we have one.
+function authHeaders() {
+  const h = { "Content-Type": "application/json", "X-App-Id": APP_ID };
+  if (_token) h.Authorization = `Bearer ${_token}`;
+  return h;
+}
+
 // --- helpers -------------------------------------------------------------
 
 // Read an entity via the REST endpoint. `filter` is a plain object; it's sent
 // as Base44's query params. Returns an array (possibly empty). Throws only on
-// an actual network/HTTP failure — an empty entity returns [].
+// an actual network/HTTP failure — an empty entity returns []. If a request is
+// rejected for auth (401/403) and we have credentials, it re-logs in once and
+// retries.
 export async function list(entity, filter = {}, opts = {}) {
-  const url = new URL(`${SERVER}/api/apps/${APP_ID}/entities/${entity}`);
-  // Base44 expects each filter field as its own query param.
-  for (const [k, v] of Object.entries(filter)) {
-    if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-  }
-  if (opts.sort) url.searchParams.set("sort", opts.sort);
-  if (opts.limit) url.searchParams.set("limit", String(opts.limit));
+  const doFetch = async () => {
+    const url = new URL(`${SERVER}/api/apps/${APP_ID}/entities/${entity}`);
+    for (const [k, v] of Object.entries(filter)) {
+      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+    }
+    if (opts.sort) url.searchParams.set("sort", opts.sort);
+    if (opts.limit) url.searchParams.set("limit", String(opts.limit));
+    return fetch(url, { headers: authHeaders() });
+  };
 
   let res;
   try {
-    res = await fetch(url, {
-      headers: {
-        "Content-Type": "application/json",
-        // Base44 identifies the app via this header; without it anonymous
-        // reads of public entities are rejected with 403.
-        "X-App-Id": APP_ID,
-        ...(process.env.BASE44_API_KEY
-          ? { Authorization: `Bearer ${process.env.BASE44_API_KEY}` }
-          : {}),
-      },
-    });
+    res = await doFetch();
+    // Token expired or app now requires auth — re-login once and retry.
+    if ((res.status === 401 || res.status === 403) && (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
+      await botLogin();
+      res = await doFetch();
+    }
   } catch (err) {
     console.error(`Network error reading ${entity}:`, err.message);
     throw new Error(`Could not reach the Vault for ${entity}.`);
