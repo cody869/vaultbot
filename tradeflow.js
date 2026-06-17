@@ -33,6 +33,8 @@ function newSession(userId) {
     team2: null,
     team1Players: [],
     team2Players: [],
+    playerSide: "1", // which team's players we're currently choosing
+    playerPage: 0, // which page of position buckets is showing
     team1Picks: [],
     team2Picks: [],
     pickSide: null, // which team we're currently adding picks for
@@ -178,6 +180,111 @@ function teamSelectRows(teams, action, placeholder) {
   return rows;
 }
 
+// Map raw Madden positions into broad buckets so each select menu stays well
+// under Discord's 25-option cap and the UI is easy to scan.
+const POSITION_BUCKETS = [
+  { label: "QB", match: ["QB"] },
+  { label: "RB", match: ["HB", "RB", "FB"] },
+  { label: "WR", match: ["WR"] },
+  { label: "TE", match: ["TE"] },
+  { label: "OL", match: ["LT", "LG", "C", "RG", "RT", "OL", "G", "T"] },
+  { label: "DL", match: ["LE", "RE", "DT", "DE", "DL", "REDGE", "LEDGE", "EDGE"] },
+  { label: "LB", match: ["LOLB", "MLB", "ROLB", "LB", "OLB", "ILB"] },
+  { label: "DB", match: ["CB", "FS", "SS", "S", "DB"] },
+  { label: "ST", match: ["K", "P", "LS"] },
+];
+
+function bucketFor(position) {
+  const pos = (position || "").toUpperCase();
+  for (const b of POSITION_BUCKETS) {
+    if (b.match.includes(pos)) return b.label;
+  }
+  return "Other";
+}
+
+// Group a team's players into position buckets (only non-empty ones), each
+// already sorted by OVR. Returns [{ label, players }] in POSITION_BUCKETS order.
+function groupByPosition(players) {
+  const groups = new Map();
+  for (const p of players) {
+    const b = bucketFor(p.position);
+    if (!groups.has(b)) groups.set(b, []);
+    groups.get(b).push(p);
+  }
+  const order = [...POSITION_BUCKETS.map((b) => b.label), "Other"];
+  return order
+    .filter((label) => groups.has(label))
+    .map((label) => ({ label, players: groups.get(label) }));
+}
+
+// One select menu for a single position bucket on a given side.
+// customId: trade:pos:<side>:<bucket>
+function positionMenuRow(side, bucket, players, selected) {
+  const opts = players.slice(0, 25).map((p) => ({
+    label: `${p.name} (${p.position}, ${p.ovr} OVR)`.slice(0, 100),
+    value: p.name.slice(0, 100),
+    default: selected.includes(p.name),
+  }));
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`trade:pos:${side}:${bucket}`)
+      .setPlaceholder(`${bucket} — select players`)
+      .setMinValues(0)
+      .setMaxValues(Math.min(opts.length, 25))
+      .addOptions(opts)
+  );
+}
+
+// Build the message payload for the current player-selection side/page.
+// Shows up to 4 position menus per page; a "More positions" button appears if
+// the side has more buckets than fit, and a button to switch to the other team.
+const BUCKETS_PER_PAGE = 4;
+
+function renderPlayerStep(session) {
+  const side = session.playerSide;
+  const players = side === "1" ? session._t1 : session._t2;
+  const selected = side === "1" ? session.team1Players : session.team2Players;
+  const teamName = side === "1" ? session.team1 : session.team2;
+  const abbr = abbrFromName(teamName) || teamName;
+
+  const buckets = groupByPosition(players);
+  const pageCount = Math.max(1, Math.ceil(buckets.length / BUCKETS_PER_PAGE));
+  const page = Math.min(session.playerPage, pageCount - 1);
+  const start = page * BUCKETS_PER_PAGE;
+  const pageBuckets = buckets.slice(start, start + BUCKETS_PER_PAGE);
+
+  const rows = pageBuckets.map((b) =>
+    positionMenuRow(side, b.label, b.players, selected)
+  );
+
+  // Navigation row.
+  const nav = new ActionRowBuilder();
+  if (pageCount > 1) {
+    nav.addComponents(
+      new ButtonBuilder()
+        .setCustomId(ID("pPage", String((page + 1) % pageCount)))
+        .setLabel(`More positions (${page + 1}/${pageCount})`)
+        .setStyle(ButtonStyle.Secondary)
+    );
+  }
+  nav.addComponents(
+    new ButtonBuilder()
+      .setCustomId(ID("pSide", side === "1" ? "2" : "1"))
+      .setLabel(side === "1" ? `Switch to ${abbrFromName(session.team2) || session.team2}` : `Switch to ${abbrFromName(session.team1) || session.team1}`)
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(ID("toPicks")).setLabel("Next: Picks ▶").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(ID("cancel")).setLabel("Cancel").setStyle(ButtonStyle.Danger)
+  );
+
+  return {
+    content:
+      `Selecting players for ${teamEmojiByName(teamName)} **${abbr}**.\n` +
+      "Pick from the position menus below. Use **Switch** to do the other team, then **Next: Picks**.",
+    embeds: [summaryEmbed(session)],
+    components: [...rows, nav],
+  };
+}
+
 function playerSelectRow(players, action, placeholder, selected = []) {
   const opts = players.slice(0, 25).map((p) => ({
     label: `${p.name} (${p.position}, ${p.ovr} OVR)`.slice(0, 100),
@@ -321,19 +428,17 @@ export async function startTradeFlow(interaction) {
   }
   session._t1 = t1Players;
   session._t2 = t2Players;
+  session.playerSide = "1";
+  session.playerPage = 0;
 
   const a1 = abbrFromName(team1) || team1;
   const a2 = abbrFromName(team2) || team2;
   await interaction.editReply({
     content:
       `${teamEmojiByName(team1)} **${a1}**  ↔  ${teamEmojiByName(team2)} **${a2}**\n\n` +
-      "**Step 1 of 3 — Select players** from each team (optional — you can trade picks only). Then continue.",
+      "**Step 1 of 3 — Select players.** Players are grouped by position so nothing is cut off.",
     embeds: [summaryEmbed(session)],
-    components: [
-      playerSelectRow(t1Players, "trade:p1", `Players from ${a1}`.slice(0, 100), session.team1Players),
-      playerSelectRow(t2Players, "trade:p2", `Players from ${a2}`.slice(0, 100), session.team2Players),
-      navButtons(session),
-    ],
+    components: renderPlayerStep(session).components,
   });
 }
 
@@ -356,15 +461,33 @@ export async function handleTradeComponent(interaction) {
   const [, action] = id.split(":");
 
   try {
-    // --- player selection ---
-    if (action === "p1") {
-      session.team1Players = interaction.values;
-      await interaction.update({ embeds: [summaryEmbed(session)] });
+    // --- player selection by position bucket ---
+    if (action === "pos") {
+      // customId: trade:pos:<side>:<bucket>
+      const [, , side, bucket] = id.split(":");
+      const allPlayers = side === "1" ? session._t1 : session._t2;
+      const key = side === "1" ? "team1Players" : "team2Players";
+
+      // Names belonging to this bucket (so we only replace this bucket's part).
+      const bucketNames = new Set(
+        allPlayers.filter((p) => bucketFor(p.position) === bucket).map((p) => p.name)
+      );
+      // Keep prior selections from other buckets, then add this bucket's picks.
+      const kept = session[key].filter((n) => !bucketNames.has(n));
+      session[key] = [...kept, ...interaction.values];
+
+      await interaction.update(renderPlayerStep(session));
       return true;
     }
-    if (action === "p2") {
-      session.team2Players = interaction.values;
-      await interaction.update({ embeds: [summaryEmbed(session)] });
+    if (action === "pPage") {
+      session.playerPage = parseInt(id.split(":")[2], 10) || 0;
+      await interaction.update(renderPlayerStep(session));
+      return true;
+    }
+    if (action === "pSide") {
+      session.playerSide = id.split(":")[2];
+      session.playerPage = 0;
+      await interaction.update(renderPlayerStep(session));
       return true;
     }
 
