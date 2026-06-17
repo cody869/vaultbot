@@ -63,6 +63,10 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("submit_trade")
+    .setDescription("Build and submit a trade step by step"),
+
+  new SlashCommandBuilder()
     .setName("power")
     .setDescription("Show the latest power rankings"),
 
