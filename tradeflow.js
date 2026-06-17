@@ -14,7 +14,7 @@ import {
   ButtonStyle,
   EmbedBuilder,
 } from "discord.js";
-import { teamEmojiByName } from "./emoji.js";
+import { teamEmojiByName, abbrFromName } from "./emoji.js";
 import { list } from "./vault.js";
 
 const PUBLIC_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
@@ -72,6 +72,47 @@ const ROSTER_LIMIT = 2000;
 async function getTeams() {
   const rows = await list("Roster", { cycle: CYCLE }, { limit: ROSTER_LIMIT });
   return [...new Set(rows.map((r) => r.team_name).filter(Boolean))].sort();
+}
+
+// Short-lived cache of the team list for autocomplete (fires per keystroke).
+let _teamCache = { at: 0, teams: [] };
+async function getTeamsCached() {
+  const now = Date.now();
+  if (now - _teamCache.at < 60_000 && _teamCache.teams.length) return _teamCache.teams;
+  const teams = await getTeams();
+  _teamCache = { at: now, teams };
+  return teams;
+}
+
+// Autocomplete suggestions for a team option. Matches on name or abbreviation,
+// shows "ABBR — Full Name", and returns the full name as the value.
+export async function suggestTeams(partial, limit = 25) {
+  let teams;
+  try {
+    teams = await getTeamsCached();
+  } catch {
+    return [];
+  }
+  const q = (partial ?? "").trim().toLowerCase();
+  const scored = teams
+    .map((name) => {
+      const abbr = abbrFromName(name);
+      const hay = `${name} ${abbr}`.toLowerCase();
+      let tier = 0;
+      if (!q) tier = 1;
+      else if (abbr.toLowerCase() === q || name.toLowerCase() === q) tier = 3;
+      else if (abbr.toLowerCase().startsWith(q) || name.toLowerCase().startsWith(q)) tier = 2;
+      else if (hay.includes(q)) tier = 1;
+      return { name, abbr, tier };
+    })
+    .filter((x) => x.tier > 0)
+    .sort((a, b) => b.tier - a.tier || a.name.localeCompare(b.name))
+    .slice(0, limit);
+
+  return scored.map(({ name, abbr }) => ({
+    name: abbr ? `${abbr} — ${name}` : name,
+    value: name,
+  }));
 }
 
 // Players on a team, joined with Player for OVR/position, sorted by OVR.
@@ -247,26 +288,52 @@ function submitUrl(session) {
 // ---- entry point: /submit_trade -----------------------------------------
 
 export async function startTradeFlow(interaction) {
-  const session = newSession(interaction.user.id);
-  let teams;
-  try {
-    teams = await getTeams();
-  } catch (err) {
-    console.error("Trade flow getTeams failed:", err.message);
-    await interaction.editReply(`⚠️ Couldn't load teams from the Vault (${err.message}). Try again shortly.`);
-    endSession(interaction.user.id);
-    return;
-  }
-  if (!teams.length) {
-    await interaction.editReply("⚠️ No teams came back from the Vault, so I can't start a trade. This usually means the roster read returned empty — ping the admin.");
-    endSession(interaction.user.id);
-    return;
-  }
-  session.teamsCache = teams;
+  const team1 = interaction.options.getString("team1");
+  const team2 = interaction.options.getString("team2");
 
+  if (team1 === team2) {
+    await interaction.editReply("⚠️ Team 1 and Team 2 must be different.");
+    return;
+  }
+
+  const session = newSession(interaction.user.id);
+  session.team1 = team1;
+  session.team2 = team2;
+  session.step = "players";
+
+  // Load both rosters and render the player step directly.
+  let t1Players, t2Players;
+  try {
+    [t1Players, t2Players] = await Promise.all([
+      getTeamPlayers(team1),
+      getTeamPlayers(team2),
+    ]);
+  } catch (err) {
+    console.error("Trade flow roster load failed:", err.message);
+    await interaction.editReply(`⚠️ Couldn't load rosters (${err.message}). Try again shortly.`);
+    endSession(interaction.user.id);
+    return;
+  }
+  if (!t1Players.length && !t2Players.length) {
+    await interaction.editReply("⚠️ No players found for either team. Check the team names.");
+    endSession(interaction.user.id);
+    return;
+  }
+  session._t1 = t1Players;
+  session._t2 = t2Players;
+
+  const a1 = abbrFromName(team1) || team1;
+  const a2 = abbrFromName(team2) || team2;
   await interaction.editReply({
-    content: "**Step 1 of 4 — Select Team 1** (the first team in the trade).",
-    components: [...teamSelectRows(teams, "trade:team1"), navButtons(session)],
+    content:
+      `${teamEmojiByName(team1)} **${a1}**  ↔  ${teamEmojiByName(team2)} **${a2}**\n\n` +
+      "**Step 1 of 3 — Select players** from each team (optional — you can trade picks only). Then continue.",
+    embeds: [summaryEmbed(session)],
+    components: [
+      playerSelectRow(t1Players, "trade:p1", `Players from ${a1}`.slice(0, 100), session.team1Players),
+      playerSelectRow(t2Players, "trade:p2", `Players from ${a2}`.slice(0, 100), session.team2Players),
+      navButtons(session),
+    ],
   });
 }
 
@@ -289,24 +356,6 @@ export async function handleTradeComponent(interaction) {
   const [, action] = id.split(":");
 
   try {
-    // --- team selection ---
-    if (action === "team1") {
-      session.team1 = interaction.values[0];
-      session.step = "team2";
-      const teams = session.teamsCache.filter((t) => t !== session.team1);
-      await interaction.update({
-        content: `Team 1: **${session.team1}** ${teamEmojiByName(session.team1)}\n\n**Step 2 of 4 — Select Team 2.**`,
-        components: [...teamSelectRows(teams, "trade:team2"), navButtons(session)],
-      });
-      return true;
-    }
-    if (action === "team2") {
-      session.team2 = interaction.values[0];
-      session.step = "players";
-      await showPlayerStep(interaction, session);
-      return true;
-    }
-
     // --- player selection ---
     if (action === "p1") {
       session.team1Players = interaction.values;
@@ -323,7 +372,7 @@ export async function handleTradeComponent(interaction) {
     if (action === "toPicks") {
       session.step = "picks";
       await interaction.update({
-        content: "**Step 3 of 4 — Add draft picks** (optional). Choose which team's pick to add, or go to Review.",
+        content: "**Step 2 of 3 — Add draft picks** (optional). Choose which team's pick to add, or go to Review.",
         embeds: [summaryEmbed(session)],
         components: [navButtons(session)],
       });
@@ -376,7 +425,7 @@ export async function handleTradeComponent(interaction) {
         new ButtonBuilder().setCustomId(ID("cancel")).setLabel("Discard").setStyle(ButtonStyle.Danger)
       );
       await interaction.update({
-        content: "**Step 4 of 4 — Review.** Click **Submit in App** to open the prefilled trade form on the site and finalize it there.",
+        content: "**Step 3 of 3 — Review.** Click **Submit in App** to open the prefilled trade form on the site and finalize it there.",
         embeds: [summaryEmbed(session, { final: true })],
         components: [linkRow],
       });
@@ -402,31 +451,4 @@ export async function handleTradeComponent(interaction) {
   }
 
   return false;
-}
-
-async function showPlayerStep(interaction, session) {
-  let t1Players, t2Players;
-  try {
-    [t1Players, t2Players] = await Promise.all([
-      getTeamPlayers(session.team1),
-      getTeamPlayers(session.team2),
-    ]);
-  } catch (err) {
-    await interaction.update({ content: `⚠️ ${err.message}`, components: [] });
-    return;
-  }
-  session._t1 = t1Players;
-  session._t2 = t2Players;
-
-  await interaction.update({
-    content:
-      `Team 1: **${session.team1}**  •  Team 2: **${session.team2}**\n\n` +
-      "**Step 3 of 4 — Select players** from each team (optional — you can also trade only picks). Pick from both menus, then continue.",
-    embeds: [summaryEmbed(session)],
-    components: [
-      playerSelectRow(t1Players, "trade:p1", `Players from ${session.team1}`.slice(0, 100), session.team1Players),
-      playerSelectRow(t2Players, "trade:p2", `Players from ${session.team2}`.slice(0, 100), session.team2Players),
-      navButtons(session),
-    ],
-  });
 }
