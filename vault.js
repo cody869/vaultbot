@@ -177,10 +177,18 @@ export async function getScoresSignature() {
 
 // Stat leaders for a category. Returns top N sorted by the chosen field.
 const STAT_CONFIG = {
-  passing: { entity: "PassingStat", field: "passTotalYds", label: "Pass Yds" },
-  rushing: { entity: "RushingStat", field: "rushTotalYds", label: "Rush Yds" },
-  receiving: { entity: "ReceivingStat", field: "recTotalYds", label: "Rec Yds" },
-  defense: { entity: "DefenseStat", field: "defTotalSacks", label: "Sacks" },
+  passing_yds: { entity: "PassingStat", field: "passTotalYds", label: "Passing Yds" },
+  passing_tds: { entity: "PassingStat", field: "passTotalTDs", label: "Passing TDs" },
+  passing_ints: { entity: "PassingStat", field: "passTotalInts", label: "Passing INTs" },
+  rushing_yds: { entity: "RushingStat", field: "rushTotalYds", label: "Rushing Yds" },
+  rushing_tds: { entity: "RushingStat", field: "rushTotalTDs", label: "Rushing TDs" },
+  fumbles: { entity: "RushingStat", field: "rushTotalFum", label: "Fumbles" },
+  receptions: { entity: "ReceivingStat", field: "recTotalCatches", label: "Receptions" },
+  receiving_yds: { entity: "ReceivingStat", field: "recTotalYds", label: "Receiving Yds" },
+  receiving_tds: { entity: "ReceivingStat", field: "recTotalTDs", label: "Receiving TDs" },
+  sacks: { entity: "DefenseStat", field: "defTotalSacks", label: "Sacks" },
+  def_ints: { entity: "DefenseStat", field: "defTotalInts", label: "Defensive INTs" },
+  forced_fumbles: { entity: "DefenseStat", field: "defTotalForcedFum", label: "Forced Fumbles" },
 };
 
 export async function getStatLeaders(category, limit = 10, seasonNumber) {
