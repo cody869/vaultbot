@@ -20,10 +20,18 @@ export const commands = [
         .setDescription("Which stat category")
         .setRequired(true)
         .addChoices(
-          { name: "Passing", value: "passing" },
-          { name: "Rushing", value: "rushing" },
-          { name: "Receiving", value: "receiving" },
-          { name: "Defense (sacks)", value: "defense" }
+          { name: "Passing YDs", value: "passing_yds" },
+          { name: "Passing TDs", value: "passing_tds" },
+          { name: "Passing INTs", value: "passing_ints" },
+          { name: "Rushing YDs", value: "rushing_yds" },
+          { name: "Rushing TDs", value: "rushing_tds" },
+          { name: "Fumbles", value: "fumbles" },
+          { name: "Receptions", value: "receptions" },
+          { name: "Receiving YDs", value: "receiving_yds" },
+          { name: "Receiving TDs", value: "receiving_tds" },
+          { name: "Sacks", value: "sacks" },
+          { name: "Defensive INTs", value: "def_ints" },
+          { name: "Forced Fumbles", value: "forced_fumbles" }
         )
     )
     .addIntegerOption((o) =>
