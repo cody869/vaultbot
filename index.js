@@ -2,6 +2,8 @@
 import "dotenv/config";
 import { Client, GatewayIntentBits, Events } from "discord.js";
 import { loadEmoji } from "./emoji.js";
+import { registerCommands } from "./deploy-commands.js";
+import { startScheduler } from "./scheduler.js";
 import {
   getStandings,
   getStatLeaders,
@@ -12,6 +14,8 @@ import {
   getPlayer,
   getPlayerById,
   suggestPlayers,
+  getScores,
+  getScoreWeeks,
   getRosterFor,
 } from "./vault.js";
 import {
@@ -23,6 +27,7 @@ import {
   tradesEmbed,
   playerEmbed,
   playerChoicesEmbed,
+  scoresEmbed,
 } from "./embeds.js";
 
 if (!process.env.DISCORD_TOKEN) {
@@ -34,7 +39,11 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ XCFL Vault bot online as ${c.user.tag}`);
+  // Always re-register on startup so the registered commands match this code
+  // (including autocomplete and option changes). Discord replaces the full set.
+  await registerCommands();
   await loadEmoji(c);
+  startScheduler(c);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -47,7 +56,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.respond(choices);
       } catch (err) {
         console.error("Autocomplete error:", err.message);
-        // Respond with an empty list so the client doesn't hang.
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
+    } else if (interaction.commandName === "scores") {
+      try {
+        const focused = String(interaction.options.getFocused() ?? "");
+        const { weeks } = await getScoreWeeks();
+        const choices = weeks
+          .filter((w) => !focused || String(w).startsWith(focused))
+          .slice(-25) // most recent 25 weeks
+          .reverse()
+          .map((w) => ({ name: `Week ${w}`, value: w }));
+        await interaction.respond(choices);
+      } catch (err) {
+        console.error("Autocomplete error:", err.message);
         try {
           await interaction.respond([]);
         } catch {}
@@ -105,6 +129,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const match = matches[0];
         const team = await getRosterFor(match.player_fullName);
         await interaction.editReply({ embeds: [playerEmbed(match, team)] });
+        break;
+      }
+      case "scores": {
+        const week = interaction.options.getInteger("week") ?? undefined;
+        const season = interaction.options.getInteger("season") ?? undefined;
+        const data = await getScores(week, season);
+        await interaction.editReply({ embeds: [scoresEmbed(data)] });
         break;
       }
       case "power": {
