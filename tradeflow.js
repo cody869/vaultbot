@@ -15,11 +15,10 @@ import {
   EmbedBuilder,
 } from "discord.js";
 import { teamEmojiByName } from "./emoji.js";
+import { list } from "./vault.js";
 
 const PUBLIC_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 const CYCLE = process.env.XCFL_CYCLE || "M26";
-const APP_ID = process.env.BASE44_APP_ID;
-const SERVER = process.env.BASE44_SERVER_URL || "https://base44.app";
 
 // ---- session state ------------------------------------------------------
 
@@ -63,34 +62,26 @@ setInterval(() => {
   }
 }, 60_000);
 
-// ---- Base44 reads (anonymous, same as vault.js) -------------------------
+// ---- Base44 reads (via vault.js, which is the proven reader) ------------
 
-async function readEntity(entity, filter = {}) {
-  const url = new URL(`${SERVER}/api/apps/${APP_ID}/entities/${entity}`);
-  for (const [k, v] of Object.entries(filter)) {
-    if (v != null) url.searchParams.set(k, String(v));
-  }
-  const res = await fetch(url, {
-    headers: { "Content-Type": "application/json", "X-App-Id": APP_ID },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} reading ${entity}`);
-  const data = await res.json().catch(() => null);
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.entities)) return data.entities;
-  return [];
-}
+// Roster has hundreds of rows (one per player); fetch a high limit so every
+// team is represented and player lists are complete.
+const ROSTER_LIMIT = 2000;
 
 // Distinct team names from Roster, sorted.
 async function getTeams() {
-  const rows = await readEntity("Roster", { cycle: CYCLE });
+  const rows = await list("Roster", { cycle: CYCLE }, { limit: ROSTER_LIMIT });
   return [...new Set(rows.map((r) => r.team_name).filter(Boolean))].sort();
 }
 
 // Players on a team, joined with Player for OVR/position, sorted by OVR.
 async function getTeamPlayers(teamName) {
-  const roster = await readEntity("Roster", { cycle: CYCLE, team_name: teamName });
-  // Pull OVR/pos from Player by full name (Roster has names but not OVR).
-  const players = await readEntity("Player", { cycle: CYCLE });
+  const roster = await list(
+    "Roster",
+    { cycle: CYCLE, team_name: teamName },
+    { limit: ROSTER_LIMIT }
+  );
+  const players = await list("Player", { cycle: CYCLE }, { limit: ROSTER_LIMIT });
   const byName = new Map(players.map((p) => [p.player_fullName, p]));
   return roster
     .map((r) => {
@@ -261,7 +252,13 @@ export async function startTradeFlow(interaction) {
   try {
     teams = await getTeams();
   } catch (err) {
-    await interaction.editReply("⚠️ Couldn't load teams from the Vault. Try again shortly.");
+    console.error("Trade flow getTeams failed:", err.message);
+    await interaction.editReply(`⚠️ Couldn't load teams from the Vault (${err.message}). Try again shortly.`);
+    endSession(interaction.user.id);
+    return;
+  }
+  if (!teams.length) {
+    await interaction.editReply("⚠️ No teams came back from the Vault, so I can't start a trade. This usually means the roster read returned empty — ping the admin.");
     endSession(interaction.user.id);
     return;
   }
