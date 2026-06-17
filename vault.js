@@ -115,6 +115,53 @@ export async function getStandings(seasonNumber) {
   return { season, rows };
 }
 
+// Scores for a given week (defaults to the latest week with games) in the
+// latest season. Home team is user1, away is user2 by the export convention.
+export async function getScores(week, seasonNumber) {
+  const games = await list("Game");
+  if (!games.length) return { season: null, week: null, games: [] };
+
+  const season =
+    seasonNumber ?? Math.max(...games.map((g) => g.season_number ?? 0));
+
+  const inSeason = games.filter((g) => g.season_number === season);
+  if (!inSeason.length) return { season, week: null, games: [] };
+
+  const wk =
+    week ?? Math.max(...inSeason.map((g) => g.week ?? 0));
+
+  const wkGames = inSeason
+    .filter((g) => g.week === wk)
+    .map((g) => ({
+      home: g.homeTeam ?? "",
+      away: g.awayTeam ?? "",
+      homeScore: g.user1_score ?? 0,
+      awayScore: g.user2_score ?? 0,
+      status: g.status, // 2=regular, 3=playoff (per export)
+    }))
+    // Final scores first by margin, just for stable ordering.
+    .sort((a, b) => b.homeScore + b.awayScore - (a.homeScore + a.awayScore));
+
+  return { season, week: wk, games: wkGames };
+}
+
+// Weeks available in the latest season (for the /scores week autocomplete).
+export async function getScoreWeeks(seasonNumber) {
+  const games = await list("Game");
+  if (!games.length) return { season: null, weeks: [] };
+  const season =
+    seasonNumber ?? Math.max(...games.map((g) => g.season_number ?? 0));
+  const weeks = [
+    ...new Set(
+      games
+        .filter((g) => g.season_number === season)
+        .map((g) => g.week)
+        .filter((w) => w != null)
+    ),
+  ].sort((a, b) => a - b);
+  return { season, weeks };
+}
+
 // Stat leaders for a category. Returns top N sorted by the chosen field.
 const STAT_CONFIG = {
   passing: { entity: "PassingStat", field: "passTotalYds", label: "Pass Yds" },
