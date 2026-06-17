@@ -103,9 +103,10 @@ environment variables (in Railway's Variables tab):
 | Variable | Meaning | Default |
 |---|---|---|
 | `AUTOPOST_CHANNEL_ID` | Channel to post into. **Setting this enables auto-posting.** | (off) |
-| `AUTOPOST_DAY` | Day of week, 0=Sun … 6=Sat | `1` (Mon) |
+| `AUTOPOST_DAY` | Day(s) of week, 0=Sun … 6=Sat. One (`1`), a list (`0,1,2,3,4,5,6`), or `*` for every day | `1` (Mon) |
 | `AUTOPOST_HOUR` | Hour 0–23 | `12` |
 | `AUTOPOST_CONTENT` | Comma list of `standings`, `scores`, `power` | `standings,scores` |
+| `AUTOPOST_ONLY_ON_CHANGE` | If `true`, only post when there are new game results since the last post | `true` |
 | `TZ` | Timezone, e.g. `America/Los_Angeles` | server default |
 
 To get a channel ID: enable Developer Mode in Discord, right-click the channel
