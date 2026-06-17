@@ -162,6 +162,19 @@ export async function getScoreWeeks(seasonNumber) {
   return { season, weeks };
 }
 
+// A signature that changes whenever game data changes — the most recent
+// `updated_date` across all games. Used by the scheduler to detect new scores.
+export async function getScoresSignature() {
+  const games = await list("Game");
+  if (!games.length) return null;
+  let latest = "";
+  for (const g of games) {
+    const u = g.updated_date || g.created_date || "";
+    if (u > latest) latest = u;
+  }
+  return latest || null;
+}
+
 // Stat leaders for a category. Returns top N sorted by the chosen field.
 const STAT_CONFIG = {
   passing: { entity: "PassingStat", field: "passTotalYds", label: "Pass Yds" },
