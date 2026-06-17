@@ -42,6 +42,19 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("scores")
+    .setDescription("Show game scores for a week")
+    .addIntegerOption((o) =>
+      o
+        .setName("week")
+        .setDescription("Week number (defaults to the latest week)")
+        .setAutocomplete(true)
+    )
+    .addIntegerOption((o) =>
+      o.setName("season").setDescription("Season number (defaults to latest)")
+    ),
+
+  new SlashCommandBuilder()
     .setName("power")
     .setDescription("Show the latest power rankings"),
 
@@ -69,26 +82,34 @@ export const commands = [
     ),
 ].map((c) => c.toJSON());
 
-// Only run the registration when invoked directly (not when imported).
-if (process.argv[1] && process.argv[1].endsWith("deploy-commands.js")) {
+// Registers the current command set with Discord. Safe to call on every
+// startup — Discord does a full replace, so it always reflects this code
+// (including option changes like autocomplete). Returns true on success.
+export async function registerCommands() {
   const { DISCORD_TOKEN, DISCORD_CLIENT_ID, DISCORD_GUILD_ID } = process.env;
   if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID) {
-    console.error("Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in .env");
-    process.exit(1);
+    console.error("Cannot register commands: missing DISCORD_TOKEN or DISCORD_CLIENT_ID");
+    return false;
   }
   const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
   const route = DISCORD_GUILD_ID
     ? Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID)
     : Routes.applicationCommands(DISCORD_CLIENT_ID);
+  try {
+    await rest.put(route, { body: commands });
+    console.log(
+      DISCORD_GUILD_ID
+        ? "✅ Guild commands registered (instant)."
+        : "✅ Global commands registered (can take up to 1 hour)."
+    );
+    return true;
+  } catch (err) {
+    console.error("Command registration failed:", err.message);
+    return false;
+  }
+}
 
-  rest
-    .put(route, { body: commands })
-    .then(() =>
-      console.log(
-        DISCORD_GUILD_ID
-          ? "✅ Guild commands registered (instant)."
-          : "✅ Global commands registered (can take up to 1 hour)."
-      )
-    )
-    .catch(console.error);
+// Only run registration directly when invoked as `node deploy-commands.js`.
+if (process.argv[1] && process.argv[1].endsWith("deploy-commands.js")) {
+  registerCommands();
 }
