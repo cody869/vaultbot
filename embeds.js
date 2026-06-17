@@ -229,3 +229,21 @@ export function playerChoicesEmbed(name, matches) {
       more
   );
 }
+
+// Scores for a week — each game as "Team SCORE vs SCORE Team" with helmets and
+// the winner bolded. No home/away or status distinction.
+export function scoresEmbed({ season, week, games }) {
+  const e = base(`🏟️ Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`);
+  if (!games.length) return e.setDescription("No games found for that week.");
+
+  const lines = games.map((g) => {
+    const e1 = teamEmojiByName(g.home);
+    const e2 = teamEmojiByName(g.away);
+    const oneWon = g.homeScore > g.awayScore;
+    const twoWon = g.awayScore > g.homeScore;
+    const t1 = oneWon ? `**${g.home} ${g.homeScore}**` : `${g.home} ${g.homeScore}`;
+    const t2 = twoWon ? `**${g.awayScore} ${g.away}**` : `${g.awayScore} ${g.away}`;
+    return `${e1} ${t1}  vs  ${t2} ${e2}`;
+  });
+  return e.setDescription(lines.join("\n"));
+}
