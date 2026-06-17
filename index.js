@@ -18,6 +18,7 @@ import {
   getScores,
   getScoreWeeks,
   getRosterFor,
+  botLogin,
 } from "./vault.js";
 import {
   standingsEmbed,
@@ -40,6 +41,8 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ XCFL Vault bot online as ${c.user.tag}`);
+  // Authenticate to Base44 first (needed once the app requires login).
+  await botLogin();
   // Always re-register on startup so the registered commands match this code
   // (including autocomplete and option changes). Discord replaces the full set.
   await registerCommands();
