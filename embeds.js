@@ -36,24 +36,17 @@ export function standingsEmbed({ season, rows }) {
   return e.setDescription(lines.join("\n"));
 }
 
-export function statLeadersEmbed({ label, season, leaders }) {
+export function statLeadersEmbed({ label, field, season, leaders }) {
   const e = base(`🏈 ${label} Leaders — Season ${season ?? "?"}`);
   if (!leaders.length) return e.setDescription("No stats found.");
 
-  const field =
-    label === "Sacks"
-      ? "defTotalSacks"
-      : label === "Pass Yds"
-      ? "passTotalYds"
-      : label === "Rush Yds"
-      ? "rushTotalYds"
-      : "recTotalYds";
-
   const lines = leaders.map((p, i) => {
-    const val = p[field] ?? 0;
+    const raw = p[field] ?? 0;
+    // Sacks come as decimals (e.g. 0.5); show one decimal only when needed.
+    const val = Number.isInteger(raw) ? raw.toLocaleString() : raw.toFixed(1);
     const team = p.team_abbrName ?? "";
     const logo = teamEmoji(team);
-    return `\`${String(i + 1).padStart(2)}\` ${logo} **${val.toLocaleString()}**  ${p.player_fullName} *(${team})*`;
+    return `\`${String(i + 1).padStart(2)}\` ${logo} **${val}**  ${p.player_fullName} *(${team})*`;
   });
   return e.setDescription(lines.join("\n"));
 }
