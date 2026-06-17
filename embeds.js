@@ -3,7 +3,7 @@ import { EmbedBuilder } from "discord.js";
 import { teamEmoji, teamEmojiByName, devEmoji } from "./emoji.js";
 
 const VAULT_COLOR = 0x1d4ed8; // XCFL blue
-const VAULT_URL = "https://app.base44.com/apps/69d09944c8636f39abaa7ef0";
+const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 
 function fmtMoney(m) {
   if (m == null) return "—";
