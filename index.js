@@ -4,6 +4,7 @@ import { Client, GatewayIntentBits, Events } from "discord.js";
 import { loadEmoji } from "./emoji.js";
 import { registerCommands } from "./deploy-commands.js";
 import { startScheduler } from "./scheduler.js";
+import { startTradeFlow, handleTradeComponent } from "./tradeflow.js";
 import {
   getStandings,
   getStatLeaders,
@@ -80,7 +81,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // Component interactions (buttons, select menus) for the trade builder.
+  if (interaction.isButton() || interaction.isStringSelectMenu()) {
+    await handleTradeComponent(interaction);
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
+
+  // The trade builder is private to the user; everything else posts publicly.
+  if (interaction.commandName === "submit_trade") {
+    await interaction.deferReply({ ephemeral: true });
+    await startTradeFlow(interaction);
+    return;
+  }
 
   // Vault calls can take a moment — defer so we don't time out (3s limit).
   await interaction.deferReply();
