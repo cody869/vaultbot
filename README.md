@@ -7,8 +7,9 @@ A Discord bot that pulls live league data from your **XCFL Vault** Base44 app an
 | Command | What it does |
 |---|---|
 | `/standings [season]` | Current standings (defaults to the latest season) |
-| `/leaders <category> [count]` | Stat leaders — passing, rushing, receiving, or defense |
+| `/leaders <category> [count]` | Stat leaders — passing/rushing/receiving yds·tds, ints, fumbles, receptions, sacks, def ints, forced fumbles |
 | `/scores [week] [season]` | Game scores for a week (defaults to latest); week has autocomplete |
+| `/submit_trade` | Build a trade step by step (teams → players → picks), then hand off to the app to finalize |
 | `/power` | Latest power rankings, with movement arrows |
 | `/tradeblock [team]` | Trade block — all teams, or filter to one (name or abbreviation) |
 | `/trades [status]` | Recent trade submissions (filter by approved/pending/rejected) |
@@ -45,6 +46,10 @@ cp .env.example .env
 ```
 Your `BASE44_APP_ID` is already filled in. You only need to add the three
 Discord values.
+
+> **Embed links:** Embed titles link to `https://xcfl-companion.com` by default.
+> To change it (e.g. a different domain), set `VAULT_PUBLIC_URL` in your
+> environment.
 
 > **Base44 access:** The bot reads your league entities (standings, stats,
 > rankings, trades), which all have public read permissions, so just the
