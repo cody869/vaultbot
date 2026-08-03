@@ -15,8 +15,8 @@ export default {
       .setName('bug-status')
       .setDescription('View all bug reports and their status'),
     async execute(interaction) {
-      await interaction.deferReply();
       try {
+        await interaction.deferReply();
         const bugs = await base44.entities.BugReport.list({ limit: 100 });
         
         const stats = {
@@ -72,7 +72,11 @@ export default {
         await interaction.editReply({ embeds: [embed] });
       } catch (err) {
         console.error('Error fetching bug status:', err);
-        await interaction.editReply('❌ Failed to fetch bug reports');
+        try {
+          await interaction.editReply('❌ Failed to fetch bug reports: ' + (err.message || 'Unknown error'));
+        } catch (editErr) {
+          console.error('Could not edit reply:', editErr.message);
+        }
       }
     }
   },
@@ -95,8 +99,8 @@ export default {
           .setRequired(true)
       ),
     async execute(interaction) {
-      await interaction.deferReply();
       try {
+        await interaction.deferReply();
         const bugId = interaction.options.getString('bug_id');
         const resolution = interaction.options.getString('resolution');
 
@@ -144,7 +148,11 @@ export default {
         await interaction.editReply({ embeds: [embed] });
       } catch (err) {
         console.error('Error resolving bug:', err);
-        await interaction.editReply('❌ Failed to resolve bug');
+        try {
+          await interaction.editReply('❌ Failed to resolve bug: ' + (err.message || 'Unknown error'));
+        } catch (editErr) {
+          console.error('Could not edit reply:', editErr.message);
+        }
       }
     }
   }
