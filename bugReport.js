@@ -1,6 +1,7 @@
 import { SlashCommandBuilder } from 'discord.js';
 import { createClient } from '@base44/sdk';
-import { VAULT_COLOR } from './embeds.js';
+
+const VAULT_COLOR = 5198940; // Blue
 
 const base44 = createClient({
   appId: process.env.BASE44_APP_ID,
