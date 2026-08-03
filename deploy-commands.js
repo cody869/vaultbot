@@ -10,26 +10,7 @@ export const commands = [
     .addIntegerOption((o) =>
       o.setName("season").setDescription("Season number (defaults to latest)")
     ),
-new SlashCommandBuilder()
-    .setName('bug-status')
-    .setDescription('View all bug reports and their status'),
 
-  new SlashCommandBuilder()
-    .setName('resolve-bug')
-    .setDescription('Resolve a bug report')
-    .addStringOption(option =>
-      option
-        .setName('bug_id')
-        .setDescription('Bug report ID (from /bug-status)')
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option
-        .setName('resolution')
-        .setDescription('How was this bug fixed?')
-        .setRequired(true)
-    ),
-];
   new SlashCommandBuilder()
     .setName("leaders")
     .setDescription("Show stat leaders")
@@ -124,6 +105,26 @@ new SlashCommandBuilder()
           { name: "Pending", value: "pending" },
           { name: "Rejected", value: "rejected" }
         )
+    ),
+
+  new SlashCommandBuilder()
+    .setName('bug-status')
+    .setDescription('View all bug reports and their status'),
+
+  new SlashCommandBuilder()
+    .setName('resolve-bug')
+    .setDescription('Resolve a bug report')
+    .addStringOption(option =>
+      option
+        .setName('bug_id')
+        .setDescription('Bug report ID (from /bug-status)')
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName('resolution')
+        .setDescription('How was this bug fixed?')
+        .setRequired(true)
     ),
 ].map((c) => c.toJSON());
 
