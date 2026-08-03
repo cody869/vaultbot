@@ -5,6 +5,7 @@ import { loadEmoji } from "./emoji.js";
 import { registerCommands } from "./deploy-commands.js";
 import { startScheduler } from "./scheduler.js";
 import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.js";
+import bugReportCommands from "./bugReport.js";
 import {
   getStandings,
   getStatLeaders,
@@ -187,6 +188,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const status = interaction.options.getString("status") ?? undefined;
         const data = await getTrades(status);
         await interaction.editReply({ embeds: [tradesEmbed(data)] });
+        break;
+      }
+      case "bug-status": {
+        await bugReportCommands.bugStatus.execute(interaction);
+        break;
+      }
+      case "resolve-bug": {
+        await bugReportCommands.resolveBug.execute(interaction);
         break;
       }
       default:
