@@ -1,13 +1,13 @@
-const { SlashCommandBuilder } = require('discord.js');
-const { createClient } = require('@base44/sdk');
-const { VAULT_COLOR } = require('./embeds');
+import { SlashCommandBuilder } from 'discord.js';
+import { createClient } from '@base44/sdk';
+import { VAULT_COLOR } from './embeds.js';
 
 const base44 = createClient({
   appId: process.env.BASE44_APP_ID,
   token: process.env.BASE44_AUTH_TOKEN || '',
 });
 
-module.exports = {
+export default {
   // /bug-status command - shows all bugs and stats
   bugStatus: {
     data: new SlashCommandBuilder()
