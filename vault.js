@@ -17,21 +17,25 @@ const CYCLE_TTL_MS = 60_000;
 async function getCurrentCycle() {
   const now = Date.now();
   if (now - _cycleCache.at < CYCLE_TTL_MS) {
+    console.log(`[CYCLE] Using cached: ${_cycleCache.cycle}`);
     return _cycleCache.cycle;
   }
 
   try {
     const config = await list("AppConfig");
+    console.log(`[CYCLE] Fetched AppConfig:`, config);
     if (config && config.length > 0 && config[0].current_cycle) {
       _cycleCache = { at: now, cycle: config[0].current_cycle };
+      console.log(`[CYCLE] Set cycle to: ${config[0].current_cycle}`);
       return config[0].current_cycle;
     }
   } catch (err) {
-    console.error("Could not fetch current cycle from AppConfig:", err.message);
+    console.error("[CYCLE] Could not fetch current cycle from AppConfig:", err.message);
   }
 
-  // Fall back to env var or M26
-  return process.env.XCFL_CYCLE || "M26";
+  const fallback = process.env.XCFL_CYCLE || "M26";
+  console.log(`[CYCLE] Fell back to: ${fallback}`);
+  return fallback;
 }
 
 // --- auth ----------------------------------------------------------------
@@ -361,7 +365,12 @@ async function getAllPlayers() {
     return _playerCache.rows;
   }
   const cycle = await getCurrentCycle();
-  const rows = await list("Player", { cycle });
+  const allRows = await list("Player", {}, { limit: 5000 }); // fetch all
+  
+  // Filter to current cycle in memory
+  const rows = allRows.filter(p => p.cycle === cycle);
+  
+  console.log(`[PLAYER] Fetched ${allRows.length} total, filtered to ${rows.length} for cycle ${cycle}`);
   _playerCache = { at: now, rows };
   return rows;
 }
