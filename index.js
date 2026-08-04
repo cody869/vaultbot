@@ -21,6 +21,7 @@ import {
   getRosterFor,
   getPlayerWeeklyStats,
   getPlayerSeasonStats,
+  warmPlayerCache,
   botLogin,
 } from "./vault.js";
 import {
@@ -50,6 +51,13 @@ client.once(Events.ClientReady, async (c) => {
   // (including autocomplete and option changes). Discord replaces the full set.
   await registerCommands();
   await loadEmoji(c);
+  // Warm the player cache before anyone can type — Discord gives autocomplete
+  // only 3 seconds, which a cold 10k-row fetch cannot meet.
+  await warmPlayerCache();
+  // Keep it warm so a refresh never lands in the middle of a keystroke.
+  setInterval(() => {
+    warmPlayerCache().catch(() => {});
+  }, 240_000);
   startScheduler(c);
 });
 
