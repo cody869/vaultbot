@@ -427,7 +427,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         console.log(
           `[RIVALRY] ${memberDisplayName(member1)} vs ${memberDisplayName(member2)}`
         );
-        const r = await getRivalry(member1.username, member2.username);
+        // Pass the member records themselves so getRivalry can match on any
+        // known identity (gamertag, discord name, alias), not just username.
+        const r = await getRivalry(member1, member2);
         await interaction.editReply(rivalryEmbed(r));
         break;
       }
