@@ -14,7 +14,7 @@ if (!APP_ID) {
 let _cycleCache = { at: 0, cycle: process.env.XCFL_CYCLE || "M26" };
 const CYCLE_TTL_MS = 60_000;
 
-async function getCurrentCycle() {
+export async function getCurrentCycle() {
   const now = Date.now();
   if (_cycleCache.at && now - _cycleCache.at < CYCLE_TTL_MS) {
     return _cycleCache.cycle;
@@ -988,4 +988,48 @@ export async function getRivalry(user1, user2) {
     ties,
     games: recent,
   };
+}
+
+
+// Distinct team names in the current cycle (for the trade builder + /team).
+export async function getCycleTeams() {
+  const cycle = await getCurrentCycle();
+  const roster = await list("Roster", {}, { limit: 10000 });
+  const names = roster
+    .filter((r) => !r.cycle || r.cycle === cycle)
+    .map((r) => r.team_name)
+    .filter(Boolean);
+  return [...new Set(names)].sort();
+}
+
+// A team's players in the current cycle, joined to Player for position/OVR
+// and sorted by OVR. Shared by /submit_trade so it can't drift from /team.
+// Returns [{ name, position, ovr }].
+export async function getTeamRosterPlayers(teamName) {
+  const cycle = await getCurrentCycle();
+  const roster = await list("Roster", {}, { limit: 10000 });
+
+  const mine = roster.filter(
+    (r) => (!r.cycle || r.cycle === cycle) && teamMatches(r.team_name, teamName)
+  );
+  if (!mine.length) return [];
+
+  // getAllPlayers is already cycle-filtered and cached.
+  const players = await getAllPlayers();
+  const byName = new Map();
+  for (const p of players) {
+    if (p.player_fullName) byName.set(p.player_fullName.toLowerCase(), p);
+  }
+
+  return mine
+    .map((r) => {
+      const p = byName.get(String(r.player_fullName ?? "").toLowerCase());
+      return {
+        name: r.player_fullName,
+        position: p?.player_position || r.player_position || "?",
+        ovr: p?.player_ovr ?? 0,
+      };
+    })
+    .filter((x) => x.name)
+    .sort((a, b) => b.ovr - a.ovr);
 }
