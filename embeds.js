@@ -31,17 +31,41 @@ function safeName(...candidates) {
   return "Unknown member";
 }
 
-function base(title) {
+// Real routes in the app (src/App.jsx). Keep these in sync — a wrong path
+// silently sends people to the 404 page.
+export const ROUTES = {
+  home: "",
+  standings: "/standings",
+  power: "/power-rankings",
+  leaders: "/stat-leaders",
+  schedule: "/schedule",
+  players: "/players",
+  compare: "/compare",
+  tradeBlock: "/trade-block",
+  tradeCommittee: "/trade-committee",
+  tradeTool: "/trade",
+  rivalries: "/rivalries",
+  reportBug: "/report-bug",
+};
+
+export const teamUrl = (teamName) =>
+  `${VAULT_URL}/teams/${encodeURIComponent(teamName ?? "")}`;
+export const playerUrl = (name) =>
+  `${VAULT_URL}/players/${encodeURIComponent(name ?? "")}`;
+export const routeUrl = (route) => `${VAULT_URL}${route}`;
+
+// Embed helper: title links to the given route rather than always the home page.
+function base(title, route = ROUTES.home) {
   return new EmbedBuilder()
     .setColor(VAULT_COLOR)
     .setTitle(title)
-    .setURL(VAULT_URL)
+    .setURL(routeUrl(route))
     .setFooter({ text: "XCFL Vault" })
     .setTimestamp();
 }
 
 export function standingsEmbed({ season, rows }) {
-  const e = base(`Standings — Season ${season ?? "?"}`);
+  const e = base(`Standings — Season ${season ?? "?"}`, ROUTES.standings);
   if (!rows.length) return e.setDescription("No standings data found.");
 
   const lines = rows.slice(0, 32).map((r, i) => {
@@ -54,7 +78,7 @@ export function standingsEmbed({ season, rows }) {
 }
 
 export function statLeadersEmbed({ label, field, season, leaders }) {
-  const e = base(`${label} Leaders — Season ${season ?? "?"}`);
+  const e = base(`${label} Leaders — Season ${season ?? "?"}`, ROUTES.leaders);
   if (!leaders.length) return e.setDescription("No stats found.");
 
   const lines = leaders.map((p, i) => {
@@ -69,7 +93,7 @@ export function statLeadersEmbed({ label, field, season, leaders }) {
 }
 
 export function powerRankingsEmbed({ week, rows }) {
-  const e = base(`Power Rankings — ${week ?? "Latest"}`);
+  const e = base(`Power Rankings — ${week ?? "Latest"}`, ROUTES.power);
   if (!rows.length) return e.setDescription("No power rankings posted yet.");
 
   const lines = rows.slice(0, 32).map((r) => {
@@ -106,7 +130,7 @@ export function tradeBlockEmbed({ team, entries }) {
         : "Nothing on the block right now."
     );
     out.push("");
-    out.push(`-# [View on XCFL Vault](<${VAULT_URL}/trade-block>)`);
+    out.push(`-# [View on XCFL Vault](<${routeUrl(ROUTES.tradeBlock)}>)`);
     return { content: out.join("\n"), embeds: [], components: [] };
   }
 
@@ -143,7 +167,7 @@ export function tradeBlockEmbed({ team, entries }) {
     const lines = [];
 
     for (const t of players) {
-      const url = `${VAULT_URL}/players/${encodeURIComponent(t.player_fullName)}`;
+      const url = playerUrl(t.player_fullName);
       const meta = [
         t.player_position ?? "?",
         t.player_ovr != null ? `${t.player_ovr} OVR` : null,
@@ -179,7 +203,7 @@ export function tradeBlockEmbed({ team, entries }) {
   }
 
   out.push("");
-  out.push(`-# [View the full trade block](<${VAULT_URL}/trade-block>)`);
+  out.push(`-# [View the full trade block](<${routeUrl(ROUTES.tradeBlock)}>)`);
 
   let content = out.join("\n");
   if (content.length > 2000) content = content.slice(0, 1997) + "…";
@@ -189,7 +213,7 @@ export function tradeBlockEmbed({ team, entries }) {
 
 // Shown when a team filter matches nothing — lists teams that do have entries.
 export function tradeBlockNoTeamEmbed(query, teams) {
-  const e = base(`No trade block for "${query}"`);
+  const e = base(`No trade block for "${query}"`, ROUTES.tradeBlock);
   return e.setDescription(
     teams.length
       ? "Teams with entries on the block:\n" +
@@ -199,7 +223,7 @@ export function tradeBlockNoTeamEmbed(query, teams) {
 }
 
 export function tradesEmbed(trades) {
-  const e = base("Recent Trades");
+  const e = base("Recent Trades", ROUTES.tradeCommittee);
   if (!trades.length) return e.setDescription("No trades found.");
 
   for (const t of trades.slice(0, 8)) {
@@ -402,7 +426,7 @@ function seasonStatLines(row) {
 // Returns a message payload; pass it straight to editReply/update.
 export function playerEmbed(p, team = null, view = "overview", data = {}) {
   const teamName = team?.team_name ?? p.team_name ?? "";
-  const playerUrl = `${VAULT_URL}/players/${encodeURIComponent(p.player_fullName)}`;
+  const profileUrl = playerUrl(p.player_fullName);
   const out = playerHeader(p, teamName);
 
   if (view === "overview") {
@@ -482,7 +506,7 @@ export function playerEmbed(p, team = null, view = "overview", data = {}) {
 
   // Angle brackets around the URL stop Discord from unfurling a link preview.
   out.push("");
-  out.push(`-# [View on XCFL Vault](<${playerUrl}>)`);
+  out.push(`-# [View on XCFL Vault](<${profileUrl}>)`);
 
   let content = out.join("\n");
   if (content.length > 2000) content = content.slice(0, 1997) + "…";
@@ -516,7 +540,7 @@ export function playerChoicesEmbed(name, matches) {
 // Scores for a week — each game as "Team SCORE vs SCORE Team" with helmets and
 // the winner bolded. No home/away or status distinction.
 export function scoresEmbed({ season, week, games }) {
-  const e = base(`Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`);
+  const e = base(`Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`, ROUTES.schedule);
   if (!games.length) return e.setDescription("No games found for that week.");
 
   const lines = games.map((g) => {
@@ -698,8 +722,7 @@ export function compareEmbed(a, b, teamA = null, teamB = null, values = {}) {
   out.push(`-# \`<\` favors ${shortName(nameA)} · \`>\` favors ${shortName(nameB)}`);
 
   out.push(
-    `-# [${nameA}](<${VAULT_URL}/players/${encodeURIComponent(nameA)}>) · ` +
-      `[${nameB}](<${VAULT_URL}/players/${encodeURIComponent(nameB)}>)`
+    `-# [${nameA}](<${playerUrl(nameA)}>) · [${nameB}](<${playerUrl(nameB)}>)`
   );
 
   let content = out.join("\n");
@@ -746,7 +769,7 @@ export function teamEmbed(data) {
     out.push("");
     out.push(`**Top Players** *(${roster.length} on roster)*`);
     for (const r of top) {
-      const url = `${VAULT_URL}/players/${encodeURIComponent(r.player_fullName)}`;
+      const url = playerUrl(r.player_fullName);
       out.push(
         `> [**${r.player_fullName}**](<${url}>) — ${r.player_position ?? "?"} · ${r.player_ovr} OVR`
       );
@@ -767,7 +790,7 @@ export function teamEmbed(data) {
   }
 
   out.push("");
-  out.push(`-# [View on XCFL Vault](<${VAULT_URL}/trade-block>)`);
+  out.push(`-# [View ${teamName} on XCFL Vault](<${teamUrl(teamName)}>)`);
 
   let content = out.join("\n");
   if (content.length > 2000) content = content.slice(0, 1997) + "…";
@@ -831,6 +854,9 @@ export function rivalryEmbed(r) {
     out.push("-# Tallied live from game history.");
   }
 
+  out.push("");
+  out.push(`-# [All rivalries on XCFL Vault](<${routeUrl(ROUTES.rivalries)}>)`);
+
   let content = out.join("\n");
   if (content.length > 2000) content = content.slice(0, 1997) + "…";
   return { content, embeds: [], components: [] };
@@ -845,7 +871,7 @@ export function notLinkedEmbed(discordTag) {
     "",
     "An admin can link it by setting **discord_user_id** on your LeagueMember record in the Vault.",
     "",
-    `-# [Open XCFL Vault](<${VAULT_URL}>)`,
+    `-# [Open XCFL Vault](<${routeUrl(ROUTES.home)}>)`,
   ];
   return { content: out.join("\n"), embeds: [], components: [] };
 }
