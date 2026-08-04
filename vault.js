@@ -1151,3 +1151,15 @@ export async function getPlayersByNames(names = []) {
 export async function getAllTrades(limit = 300) {
   return list("TradeSubmission", {}, { sort: "-created_date", limit });
 }
+
+// Find a member by any identity they're known by (username, discord name,
+// avatar name, alias). Returns null when nothing matches — callers should
+// then omit the name rather than fall back to the raw value, which may be a
+// real name or an email.
+export async function findMemberByIdentity(name) {
+  if (!name) return null;
+  const key = String(name).trim().toLowerCase();
+  if (!key) return null;
+  const members = await getLeagueMembers();
+  return members.find((m) => memberIdentities(m).includes(key)) ?? null;
+}
