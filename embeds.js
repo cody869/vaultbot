@@ -18,6 +18,19 @@ function fmtMoney(m) {
   return `$${millions.toFixed(2)}M`;
 }
 
+// Usernames in some entities are email addresses. Never render one.
+function looksLikeEmail(v) {
+  return /\S+@\S+\.\S+/.test(String(v ?? ""));
+}
+
+// Pick the first safe, non-email name from the candidates given.
+function safeName(...candidates) {
+  for (const c of candidates) {
+    if (c && !looksLikeEmail(c)) return String(c);
+  }
+  return "Unknown member";
+}
+
 function base(title) {
   return new EmbedBuilder()
     .setColor(VAULT_COLOR)
@@ -66,7 +79,9 @@ export function powerRankingsEmbed({ week, rows }) {
       move = diff > 0 ? ` 🔺${diff}` : ` 🔻${Math.abs(diff)}`;
     }
     const logo = r.team_name ? `${teamEmojiByName(r.team_name)} ` : "";
-    return `\`${String(r.rank).padStart(2)}\` ${logo}**${r.username}**${move}`;
+    // PowerRanking carries a denormalized display_name; username may be an email.
+    const who = safeName(r.display_name, r.username, r.team_name && `${r.team_name} owner`);
+    return `\`${String(r.rank).padStart(2)}\` ${logo}**${who}**${move}`;
   });
   return e.setDescription(lines.join("\n"));
 }
@@ -698,9 +713,13 @@ export function rivalryEmbed(r) {
     };
   }
 
+  // Usernames can be email addresses — always render the safe display name.
+  const n1 = r.display1 ?? r.user1;
+  const n2 = r.display2 ?? r.user2;
+
   const total = (r.user1_wins ?? 0) + (r.user2_wins ?? 0) + (r.ties ?? 0);
   const out = [];
-  out.push(`# ⚔️ ${r.user1} vs ${r.user2}`);
+  out.push(`# ⚔️ ${n1} vs ${n2}`);
 
   if (!total) {
     out.push("");
@@ -712,9 +731,9 @@ export function rivalryEmbed(r) {
 
   const leader =
     r.user1_wins > r.user2_wins
-      ? `**${r.user1}** leads the all-time series`
+      ? `**${n1}** leads the all-time series`
       : r.user2_wins > r.user1_wins
-        ? `**${r.user2}** leads the all-time series`
+        ? `**${n2}** leads the all-time series`
         : "All square";
   out.push(`${leader} · ${total} meeting${total === 1 ? "" : "s"}`);
 
@@ -732,7 +751,7 @@ export function rivalryEmbed(r) {
       const bWon = g.bScore > g.aScore;
       const left = aWon ? `**${g.aScore}**` : `${g.aScore}`;
       const right = bWon ? `**${g.bScore}**` : `${g.bScore}`;
-      out.push(`> ${label} — ${r.user1} ${left} – ${right} ${r.user2}`);
+      out.push(`> ${label} — ${n1} ${left} – ${right} ${n2}`);
     }
   }
 
