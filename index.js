@@ -53,15 +53,42 @@ client.once(Events.ClientReady, async (c) => {
   startScheduler(c);
 });
 
+// Reject instead of hanging forever if a Vault read stalls.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
+    ),
+  ]);
+}
+
 // Fetch whatever extra data a /player view needs, then render it.
 async function renderPlayerView(player, team, view) {
   const data = {};
   if (view === "weekly") {
-    data.weekly = await getPlayerWeeklyStats(player.player_fullName);
+    console.log(`[PLAYER] fetching weekly stats for ${player.player_fullName}`);
+    data.weekly = await withTimeout(
+      getPlayerWeeklyStats(player.player_fullName),
+      20_000,
+      "Weekly stats"
+    );
+    console.log(`[PLAYER] weekly rows: ${data.weekly?.weeks?.length ?? 0}`);
   } else if (view === "season") {
-    data.season = await getPlayerSeasonStats(player.player_fullName);
+    console.log(`[PLAYER] fetching season stats for ${player.player_fullName}`);
+    data.season = await withTimeout(
+      getPlayerSeasonStats(player.player_fullName),
+      20_000,
+      "Season stats"
+    );
+    console.log(`[PLAYER] season rows: ${Array.isArray(data.season) ? data.season.length : 0}`);
   }
-  return playerEmbed(player, team, view, data);
+  const payload = playerEmbed(player, team, view, data);
+  console.log(
+    `[PLAYER] built "${view}" view — ${payload.content.length} chars, ` +
+      `${payload.components?.length ?? 0} component row(s)`
+  );
+  return payload;
 }
 
 // The Overview / Full Ratings / Weekly / Season dropdown under a player card.
@@ -181,19 +208,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       case "player": {
         const input = interaction.options.getString("name");
+        console.log(`[PLAYER] /player invoked with: ${input}`);
 
         // If the value looks like a Base44 record id (picked from the
         // autocomplete dropdown), fetch that exact player.
-        const byId = await getPlayerById(input);
+        const byId = await withTimeout(getPlayerById(input), 25_000, "Player lookup");
         if (byId) {
-          const team = await getRosterFor(byId.player_fullName);
+          console.log(`[PLAYER] matched by id: ${byId.player_fullName}`);
+          const team = await withTimeout(
+            getRosterFor(byId.player_fullName),
+            15_000,
+            "Roster lookup"
+          );
           // playerEmbed returns a full message payload (markdown + dropdown).
           await interaction.editReply(await renderPlayerView(byId, team, "overview"));
+          console.log(`[PLAYER] reply sent for ${byId.player_fullName}`);
           break;
         }
 
         // Otherwise treat it as a free-text name search.
-        const { matches, unambiguous } = await getPlayer(input);
+        const { matches, unambiguous } = await withTimeout(
+          getPlayer(input),
+          25_000,
+          "Player search"
+        );
+        console.log(`[PLAYER] name search matches: ${matches.length}, unambiguous: ${unambiguous}`);
         if (!matches.length) {
           await interaction.editReply({
             embeds: [playerChoicesEmbed(input, [])],
@@ -207,8 +246,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           break;
         }
         const match = matches[0];
-        const team = await getRosterFor(match.player_fullName);
+        const team = await withTimeout(
+          getRosterFor(match.player_fullName),
+          15_000,
+          "Roster lookup"
+        );
         await interaction.editReply(await renderPlayerView(match, team, "overview"));
+        console.log(`[PLAYER] reply sent for ${match.player_fullName}`);
         break;
       }
       case "scores": {
@@ -255,10 +299,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.editReply("Unknown command.");
     }
   } catch (err) {
-    console.error(err);
-    await interaction.editReply(
-      `⚠️ ${err.message || "Something went wrong reaching the Vault."}`
-    );
+    console.error(`[ERROR] /${interaction.commandName} failed:`, err);
+    const msg = `⚠️ ${err.message || "Something went wrong reaching the Vault."}`;
+    // editReply can itself fail (e.g. an invalid payload) — fall back to a
+    // follow-up so the user never sees an endless "thinking" spinner.
+    try {
+      await interaction.editReply({ content: msg, embeds: [], components: [] });
+    } catch (replyErr) {
+      console.error("[ERROR] editReply also failed:", replyErr.message);
+      try {
+        await interaction.followUp({ content: msg, ephemeral: true });
+      } catch (followErr) {
+        console.error("[ERROR] followUp also failed:", followErr.message);
+      }
+    }
   }
 });
 
