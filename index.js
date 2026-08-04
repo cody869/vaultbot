@@ -24,6 +24,8 @@ import {
   getTeamOverview,
   getRivalry,
   getMemberByDiscordId,
+  getMemberByIdOrUsername,
+  memberDisplayName,
   suggestMembers,
   playerTradeValue,
   warmPlayerCache,
@@ -375,7 +377,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         if (!member.team_name) {
           await interaction.editReply(
-            `⚠️ **${member.username}** isn't assigned to a team right now.`
+            `⚠️ **${memberDisplayName(member)}** isn't assigned to a team right now.`
           );
           break;
         }
@@ -385,26 +387,47 @@ client.on(Events.InteractionCreate, async (interaction) => {
         break;
       }
       case "rivalry": {
-        const m1 = interaction.options.getString("member1");
-        let m2 = interaction.options.getString("member2");
+        // Autocomplete sends LeagueMember record ids, not usernames, so no
+        // email ever travels through the interaction payload.
+        const in1 = interaction.options.getString("member1");
+        const in2 = interaction.options.getString("member2");
+
+        const member1 = await getMemberByIdOrUsername(in1);
+        if (!member1?.username) {
+          await interaction.editReply(
+            "⚠️ Couldn't find that member — pick from the dropdown."
+          );
+          break;
+        }
 
         // member2 is optional — default to the caller's linked member.
-        if (!m2) {
-          const me = await getMemberByDiscordId(interaction.user.id);
-          if (!me?.username) {
+        let member2 = in2 ? await getMemberByIdOrUsername(in2) : null;
+        if (!member2) {
+          if (in2) {
+            await interaction.editReply(
+              "⚠️ Couldn't find the second member — pick from the dropdown."
+            );
+            break;
+          }
+          member2 = await getMemberByDiscordId(interaction.user.id);
+          if (!member2?.username) {
             await interaction.editReply(
               "⚠️ Name a second member — your Discord isn't linked to a league member yet."
             );
             break;
           }
-          m2 = me.username;
         }
-        if (m1.toLowerCase() === m2.toLowerCase()) {
+
+        if (member1.username.toLowerCase() === member2.username.toLowerCase()) {
           await interaction.editReply("⚠️ Pick two different members.");
           break;
         }
-        console.log(`[RIVALRY] ${m1} vs ${m2}`);
-        const r = await getRivalry(m1, m2);
+
+        // Log display names only — usernames may be emails.
+        console.log(
+          `[RIVALRY] ${memberDisplayName(member1)} vs ${memberDisplayName(member2)}`
+        );
+        const r = await getRivalry(member1.username, member2.username);
         await interaction.editReply(rivalryEmbed(r));
         break;
       }
