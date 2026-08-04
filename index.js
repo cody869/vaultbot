@@ -129,6 +129,15 @@ async function handlePlayerViewSelect(interaction) {
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  // Probe: fires for EVERY interaction type before any routing happens.
+  // If nothing appears here when you use a command, interactions are not
+  // reaching the bot at all and the problem is upstream of this code.
+  console.log(
+    `[INTERACTION] type=${interaction.type} ` +
+      `command=${interaction.commandName ?? "-"} ` +
+      `user=${interaction.user?.tag ?? "-"}`
+  );
+
   // Autocomplete: respond with player suggestions as the user types.
   if (interaction.isAutocomplete()) {
     if (interaction.commandName === "player") {
