@@ -144,22 +144,21 @@ export function tradesEmbed(trades) {
   return e;
 }
 
-// Full player card — snallabot-style design with excellent visual hierarchy.
+// Full player card — snallabot-style plain-markdown message (NOT an embed).
+// Uses a large `#` heading, block-quoted (`>`) Contract and Ratings sections,
+// and no embed box, matching snallabot's look. Returns a message payload
+// object: pass it directly to interaction.editReply(...).
 export function playerEmbed(p, team = null) {
   const teamName = team?.team_name ?? p.team_name ?? "";
   const pos = p.player_position ?? "?";
   const gem = devEmoji(p.player_devTrait);
-
   const playerUrl = `${VAULT_URL}/players/${encodeURIComponent(p.player_fullName)}`;
-  const e = new EmbedBuilder()
-    .setColor(VAULT_COLOR)
-    .setTitle(`${teamEmojiByName(teamName)} ${pos} ${p.player_fullName}`)
-    .setURL(playerUrl)
-    .setFooter({ text: "XCFL Vault" })
-    .setTimestamp();
 
-  // OVR with dev trait in description
-  e.setDescription(`${gem} **${p.player_ovr ?? "?"} OVR**`);
+  const out = [];
+
+  // Big title with team logo, then OVR line
+  out.push(`# ${teamEmojiByName(teamName)} ${pos} ${p.player_fullName}`);
+  out.push(`### ${gem} ${p.player_ovr ?? "?"} OVR`);
 
   // Bio line: age | season | height, weight
   const bits = [];
@@ -178,24 +177,19 @@ export function playerEmbed(p, team = null) {
     .filter(Boolean)
     .join(", ");
   if (hw) bits.push(hw);
-  if (bits.length) {
-    e.addFields({ name: "\u200b", value: bits.join(" | ") });
-  }
+  if (bits.length) out.push(`**${bits.join(" | ")}**`);
 
-  // Contract block — clean three-line format
+  // Contract — bold header + block-quoted lines (the gray bar)
   const cl = p.player_contractLength;
   const yl = p.player_contractYrsLeft;
   const lengthStr = cl != null && yl != null ? `${yl}/${cl} yrs` : cl != null ? `${cl} yrs` : "—";
-  e.addFields({
-    name: "Contract",
-    value:
-      `**Length:** ${lengthStr} | **Salary:** ${fmtMoney(p.player_contractSalary)}\n` +
-      `**Cap Hit:** ${fmtMoney(p.player_capHit)} | **Bonus:** ${fmtMoney(p.player_contractBonus)}\n` +
-      `**Savings:** ${fmtMoney(p.player_capSavings)} | **Penalty:** ${fmtMoney(p.player_capPenalty)}`,
-    inline: false
-  });
+  out.push("");
+  out.push("**Contract**");
+  out.push(`> **Length**: ${lengthStr} | **Salary**: ${fmtMoney(p.player_contractSalary)}`);
+  out.push(`> **Cap Hit**: ${fmtMoney(p.player_capHit)} | **Bonus**: ${fmtMoney(p.player_contractBonus)}`);
+  out.push(`> **Savings**: ${fmtMoney(p.player_capSavings)} | **Penalty**: ${fmtMoney(p.player_capPenalty)}`);
 
-  // Ratings — clean two-per-line format
+  // Ratings — bold header + block-quoted, two per line
   const RATINGS = [
     ["Speed", "spd"], ["Accel", "acc"], ["Agility", "agi"], ["Awareness", "awa"],
     ["Injury", "inj"], ["Break Tackle", "breakTackle"], ["Carrying", "carry"],
@@ -212,34 +206,35 @@ export function playerEmbed(p, team = null) {
   ];
   const present = RATINGS.filter(([, k]) => p[k] != null);
   if (present.length) {
-    const lines = [];
+    out.push("");
+    out.push("**Ratings**");
     for (let i = 0; i < present.length; i += 2) {
       const a = present[i];
       const b = present[i + 1];
-      let line = `**${a[0]}:** ${p[a[1]]}`;
+      let line = `> **${a[0]}:** ${p[a[1]]}`;
       if (b) line += ` | **${b[0]}:** ${p[b[1]]}`;
-      lines.push(line);
+      out.push(line);
     }
-    e.addFields({
-      name: "Ratings",
-      value: lines.join("\n").slice(0, 1024),
-      inline: false
-    });
   }
 
-  // Abilities
+  // Abilities — inline bold label, comma-separated
   if (Array.isArray(p.abilities) && p.abilities.length) {
     const names = p.abilities.map((a) => a.title).filter(Boolean).join(", ");
     if (names) {
-      e.addFields({
-        name: "Abilities",
-        value: names,
-        inline: false
-      });
+      out.push("");
+      out.push(`**Abilities:** ${names}`);
     }
   }
 
-  return e;
+  // Footer link to the player's profile page
+  out.push("");
+  out.push(`-# [View on XCFL Vault](${playerUrl})`);
+
+  // Message content caps at 2000 chars — trim safely if a player somehow exceeds it.
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+
+  return { content, embeds: [] };
 }
 
 // When a name is ambiguous, list the alternatives.
