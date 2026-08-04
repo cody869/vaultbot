@@ -15,10 +15,9 @@ import {
   EmbedBuilder,
 } from "discord.js";
 import { teamEmojiByName, abbrFromName } from "./emoji.js";
-import { list } from "./vault.js";
+import { getCycleTeams, getTeamRosterPlayers } from "./vault.js";
 
 const PUBLIC_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
-const CYCLE = process.env.XCFL_CYCLE || "M26";
 
 // ---- session state ------------------------------------------------------
 
@@ -65,15 +64,14 @@ setInterval(() => {
 }, 60_000);
 
 // ---- Base44 reads (via vault.js, which is the proven reader) ------------
+//
+// Cycle scoping lives in vault.js: it reads the current cycle from AppConfig
+// and filters in memory, because the server-side `cycle` query param is not
+// reliably applied. Never hardcode a cycle here.
 
-// Roster has hundreds of rows (one per player); fetch a high limit so every
-// team is represented and player lists are complete.
-const ROSTER_LIMIT = 2000;
-
-// Distinct team names from Roster, sorted.
+// Distinct team names in the current cycle.
 async function getTeams() {
-  const rows = await list("Roster", { cycle: CYCLE }, { limit: ROSTER_LIMIT });
-  return [...new Set(rows.map((r) => r.team_name).filter(Boolean))].sort();
+  return getCycleTeams();
 }
 
 // Short-lived cache of the team list for autocomplete (fires per keystroke).
@@ -117,26 +115,11 @@ export async function suggestTeams(partial, limit = 25) {
   }));
 }
 
-// Players on a team, joined with Player for OVR/position, sorted by OVR.
+// Players on a team in the current cycle, joined with Player for OVR and
+// position, sorted by OVR. Delegates to vault.js so /submit_trade can never
+// drift out of sync with /team and /player on cycle handling.
 async function getTeamPlayers(teamName) {
-  const roster = await list(
-    "Roster",
-    { cycle: CYCLE, team_name: teamName },
-    { limit: ROSTER_LIMIT }
-  );
-  const players = await list("Player", { cycle: CYCLE }, { limit: ROSTER_LIMIT });
-  const byName = new Map(players.map((p) => [p.player_fullName, p]));
-  return roster
-    .map((r) => {
-      const p = byName.get(r.player_fullName) || {};
-      return {
-        name: r.player_fullName,
-        position: r.player_position || p.player_position || "?",
-        ovr: p.player_ovr ?? 0,
-      };
-    })
-    .filter((x) => x.name)
-    .sort((a, b) => b.ovr - a.ovr);
+  return getTeamRosterPlayers(teamName);
 }
 
 // ---- UI builders ---------------------------------------------------------
@@ -189,7 +172,7 @@ const POSITION_BUCKETS = [
   { label: "TE", match: ["TE"] },
   { label: "OL", match: ["LT", "LG", "C", "RG", "RT", "OL", "G", "T"] },
   { label: "DL", match: ["LE", "RE", "DT", "DE", "DL", "REDGE", "LEDGE", "EDGE"] },
-  { label: "LB", match: ["LOLB", "MLB", "ROLB", "LB", "OLB", "ILB"] },
+  { label: "LB", match: ["LOLB", "MLB", "ROLB", "LB", "OLB", "ILB", "MIKE", "WILL", "SAM"] },
   { label: "DB", match: ["CB", "FS", "SS", "S", "DB"] },
   { label: "ST", match: ["K", "P", "LS"] },
 ];
@@ -421,6 +404,9 @@ export async function startTradeFlow(interaction) {
     endSession(interaction.user.id);
     return;
   }
+  console.log(
+    `[TRADE] ${team1}: ${t1Players.length} players | ${team2}: ${t2Players.length} players`
+  );
   if (!t1Players.length && !t2Players.length) {
     await interaction.editReply("⚠️ No players found for either team. Check the team names.");
     endSession(interaction.user.id);
