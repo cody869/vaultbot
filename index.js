@@ -21,6 +21,11 @@ import {
   getRosterFor,
   getPlayerWeeklyStats,
   getPlayerSeasonStats,
+  getTeamOverview,
+  getRivalry,
+  getMemberByDiscordId,
+  suggestMembers,
+  playerTradeValue,
   warmPlayerCache,
   botLogin,
 } from "./vault.js";
@@ -34,6 +39,10 @@ import {
   playerEmbed,
   playerChoicesEmbed,
   scoresEmbed,
+  compareEmbed,
+  teamEmbed,
+  rivalryEmbed,
+  notLinkedEmbed,
 } from "./embeds.js";
 
 if (!process.env.DISCORD_TOKEN) {
@@ -164,6 +173,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.respond([]);
         } catch {}
       }
+    } else if (interaction.commandName === "compare") {
+      // Both player1 and player2 use the same player suggestions.
+      try {
+        const focused = interaction.options.getFocused();
+        await interaction.respond(await suggestPlayers(focused, 25));
+      } catch (err) {
+        console.error("[AUTOCOMPLETE] compare failed:", err.message);
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
+    } else if (interaction.commandName === "team") {
+      try {
+        const focused = String(interaction.options.getFocused() ?? "");
+        await interaction.respond(await suggestTeams(focused, 25));
+      } catch (err) {
+        console.error("[AUTOCOMPLETE] team failed:", err.message);
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
+    } else if (interaction.commandName === "rivalry") {
+      try {
+        const focused = String(interaction.options.getFocused() ?? "");
+        await interaction.respond(await suggestMembers(focused, 25));
+      } catch (err) {
+        console.error("[AUTOCOMPLETE] rivalry failed:", err.message);
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
     } else if (interaction.commandName === "scores") {
       try {
         const focused = String(interaction.options.getFocused() ?? "");
@@ -283,6 +323,89 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
         await interaction.editReply(await renderPlayerView(match, team, "overview"));
         console.log(`[PLAYER] reply sent for ${match.player_fullName}`);
+        break;
+      }
+      case "compare": {
+        const in1 = interaction.options.getString("player1");
+        const in2 = interaction.options.getString("player2");
+        console.log(`[COMPARE] ${in1} vs ${in2}`);
+
+        // Autocomplete sends record ids; fall back to a name search.
+        const resolve = async (input) => {
+          const byId = await getPlayerById(input);
+          if (byId) return byId;
+          const { matches } = await getPlayer(input);
+          return matches[0] ?? null;
+        };
+
+        const [p1, p2] = await Promise.all([resolve(in1), resolve(in2)]);
+        if (!p1 || !p2) {
+          const missing = !p1 ? in1 : in2;
+          await interaction.editReply(
+            `⚠️ Couldn't find a player matching **${missing}** — pick from the dropdown for an exact match.`
+          );
+          break;
+        }
+        if (p1.id && p1.id === p2.id) {
+          await interaction.editReply("⚠️ Pick two different players to compare.");
+          break;
+        }
+
+        const [team1, team2] = await Promise.all([
+          getRosterFor(p1.player_fullName),
+          getRosterFor(p2.player_fullName),
+        ]);
+        const values = { a: playerTradeValue(p1), b: playerTradeValue(p2) };
+        await interaction.editReply(compareEmbed(p1, p2, team1, team2, values));
+        break;
+      }
+      case "team": {
+        const query = interaction.options.getString("team");
+        console.log(`[TEAM] lookup: ${query}`);
+        const data = await getTeamOverview(query);
+        await interaction.editReply(teamEmbed(data));
+        break;
+      }
+      case "myteam": {
+        const member = await getMemberByDiscordId(interaction.user.id);
+        if (!member) {
+          console.log(`[MYTEAM] no LeagueMember linked to ${interaction.user.tag}`);
+          await interaction.editReply(notLinkedEmbed(interaction.user.tag));
+          break;
+        }
+        if (!member.team_name) {
+          await interaction.editReply(
+            `⚠️ **${member.username}** isn't assigned to a team right now.`
+          );
+          break;
+        }
+        console.log(`[MYTEAM] ${interaction.user.tag} -> ${member.team_name}`);
+        const data = await getTeamOverview(member.team_name);
+        await interaction.editReply(teamEmbed(data));
+        break;
+      }
+      case "rivalry": {
+        const m1 = interaction.options.getString("member1");
+        let m2 = interaction.options.getString("member2");
+
+        // member2 is optional — default to the caller's linked member.
+        if (!m2) {
+          const me = await getMemberByDiscordId(interaction.user.id);
+          if (!me?.username) {
+            await interaction.editReply(
+              "⚠️ Name a second member — your Discord isn't linked to a league member yet."
+            );
+            break;
+          }
+          m2 = me.username;
+        }
+        if (m1.toLowerCase() === m2.toLowerCase()) {
+          await interaction.editReply("⚠️ Pick two different members.");
+          break;
+        }
+        console.log(`[RIVALRY] ${m1} vs ${m2}`);
+        const r = await getRivalry(m1, m2);
+        await interaction.editReply(rivalryEmbed(r));
         break;
       }
       case "scores": {
