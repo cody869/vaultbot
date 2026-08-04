@@ -144,22 +144,24 @@ export function tradesEmbed(trades) {
   return e;
 }
 
-// Full player card — mirrors the snallabot "player get" layout.
+// Full player card — redesigned to match snallabot's cleaner style.
 // `team` is an optional Roster row giving team_abbrName for the helmet/header.
 export function playerEmbed(p, team = null) {
   const abbr = team?.team_abbrName ?? p.team_abbrName ?? "";
-  const teamName = team?.team_name ?? "";
+  const teamName = team?.team_name ?? p.team_name ?? "";
   const pos = p.player_position ?? "?";
   const gem = devEmoji(p.player_devTrait);
 
   const playerUrl = `${VAULT_URL}/players/${encodeURIComponent(p.player_fullName)}`;
   const e = new EmbedBuilder()
     .setColor(VAULT_COLOR)
-    .setTitle(`${teamEmojiByName(teamName || p.team_name || "")} ${pos} ${p.player_fullName}`)
+    .setTitle(`${teamEmojiByName(teamName)} ${pos} ${p.player_fullName}`)
     .setURL(playerUrl)
     .setFooter({ text: "XCFL Vault" })
-    .setTimestamp()
-    .setDescription(`${gem} **${p.player_ovr ?? "?"} OVR**`);
+    .setTimestamp();
+
+  // OVR with dev trait
+  e.setDescription(`${gem} **${p.player_ovr ?? "?"} OVR**`);
 
   // Bio line: age | season | height, weight
   const bits = [];
@@ -169,7 +171,6 @@ export function playerEmbed(p, team = null) {
     const suffix = s === 1 ? "st" : s === 2 ? "nd" : s === 3 ? "rd" : "th";
     bits.push(`${s}${suffix} Season`);
   }
-  // Height may be inches ("73") or already formatted ("6'1\""). Normalize.
   let heightStr = p.player_height;
   if (heightStr != null && /^\d+$/.test(String(heightStr).trim())) {
     const inches = parseInt(heightStr, 10);
@@ -179,7 +180,7 @@ export function playerEmbed(p, team = null) {
     .filter(Boolean)
     .join(", ");
   if (hw) bits.push(hw);
-  if (bits.length) e.addFields({ name: "\u200b", value: `**${bits.join(" | ")}**` });
+  if (bits.length) e.addFields({ name: "\u200b", value: bits.join(" | ") });
 
   // Contract block
   const cl = p.player_contractLength;
@@ -188,9 +189,10 @@ export function playerEmbed(p, team = null) {
   e.addFields({
     name: "Contract",
     value:
-      `**Length**: ${lengthStr} | **Salary**: ${fmtMoney(p.player_contractSalary)}\n` +
-      `**Cap Hit**: ${fmtMoney(p.player_capHit)} | **Bonus**: ${fmtMoney(p.player_contractBonus)}\n` +
-      `**Savings**: ${fmtMoney(p.player_capSavings)} | **Penalty**: ${fmtMoney(p.player_capPenalty)}`,
+      `**Length:** ${lengthStr} | **Salary:** ${fmtMoney(p.player_contractSalary)}\n` +
+      `**Cap Hit:** ${fmtMoney(p.player_capHit)} | **Bonus:** ${fmtMoney(p.player_contractBonus)}\n` +
+      `**Savings:** ${fmtMoney(p.player_capSavings)} | **Penalty:** ${fmtMoney(p.player_capPenalty)}`,
+    inline: false
   });
 
   // Ratings — show the most relevant attributes that are present, two per line.
@@ -218,13 +220,13 @@ export function playerEmbed(p, team = null) {
       if (b) line += ` | **${b[0]}:** ${p[b[1]]}`;
       lines.push(line);
     }
-    e.addFields({ name: "Ratings", value: lines.join("\n").slice(0, 1024) });
+    e.addFields({ name: "Ratings", value: lines.join("\n").slice(0, 1024), inline: false });
   }
 
   // Abilities
   if (Array.isArray(p.abilities) && p.abilities.length) {
     const names = p.abilities.map((a) => a.title).filter(Boolean).join(", ");
-    if (names) e.addFields({ name: "Abilities", value: names });
+    if (names) e.addFields({ name: "Abilities", value: names, inline: false });
   }
 
   return e;
