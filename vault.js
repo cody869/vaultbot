@@ -649,3 +649,263 @@ export async function getTrades(status, limit = 10) {
   });
   return trades;
 }
+
+// --- league members, teams, rivalries (for /team /myteam /rivalry) -------
+
+// Optional: if src/lib/tradeValueEngine.js from the app repo is copied into
+// the bot folder, /compare shows real trade values. Absent, it degrades.
+let _calcPlayerValue = null;
+try {
+  const mod = await import("./tradeValueEngine.js");
+  _calcPlayerValue = mod.calcPlayerValue ?? null;
+  if (_calcPlayerValue) console.log("💰 Trade value engine loaded.");
+} catch {
+  console.log("ℹ️  tradeValueEngine.js not found — /compare will omit trade value.");
+}
+
+export function playerTradeValue(player) {
+  if (!_calcPlayerValue || !player) return null;
+  try {
+    return _calcPlayerValue(player);
+  } catch {
+    return null;
+  }
+}
+
+// League members, cached — small table, read often.
+let _memberCache = { at: 0, rows: [] };
+const MEMBER_TTL_MS = 300_000;
+
+export async function getLeagueMembers() {
+  if (Date.now() - _memberCache.at < MEMBER_TTL_MS && _memberCache.rows.length) {
+    return _memberCache.rows;
+  }
+  const rows = await list("LeagueMember", {}, { limit: 500 });
+  _memberCache = { at: Date.now(), rows };
+  return rows;
+}
+
+// Map a Discord user to their LeagueMember via LeagueMember.discord_user_id.
+export async function getMemberByDiscordId(discordUserId) {
+  if (!discordUserId) return null;
+  const members = await getLeagueMembers();
+  return members.find((m) => String(m.discord_user_id ?? "") === String(discordUserId)) ?? null;
+}
+
+// Autocomplete over league member usernames.
+export async function suggestMembers(partial, limit = 25) {
+  const members = await getLeagueMembers();
+  const q = (partial ?? "").trim().toLowerCase();
+  const scored = members
+    .map((m) => {
+      const n = (m.username ?? "").toLowerCase();
+      let tier = 0;
+      if (!q) tier = 1;
+      else if (n === q) tier = 3;
+      else if (n.startsWith(q)) tier = 2;
+      else if (n.includes(q)) tier = 1;
+      return { m, tier };
+    })
+    .filter((x) => x.tier > 0 && x.m.username)
+    .sort((a, b) => b.tier - a.tier || (a.m.username ?? "").localeCompare(b.m.username ?? ""))
+    .slice(0, limit);
+
+  return scored.map(({ m }) => {
+    const team = m.team_name ? ` · ${m.team_name}` : "";
+    return {
+      name: String(`${m.username}${team}`).slice(0, 100),
+      value: String(m.username).slice(0, 100),
+    };
+  });
+}
+
+// Loose team matching: full name, nickname, or abbreviation.
+function teamMatches(candidate, query) {
+  if (!candidate || !query) return false;
+  const c = String(candidate).toLowerCase().trim();
+  const q = String(query).toLowerCase().trim();
+  if (c === q) return true;
+  const nick = c.split(/\s+/).pop();
+  return nick === q || c.includes(q) || q.includes(nick);
+}
+
+// Everything the /team card needs, assembled in one pass.
+export async function getTeamOverview(teamQuery) {
+  const cycle = await getCurrentCycle();
+
+  // Resolve the query to a canonical team name via TeamMap.
+  let teams = [];
+  try {
+    teams = await list("TeamMap", {}, { limit: 200 });
+  } catch {
+    /* fall through to roster-derived names */
+  }
+  let mapped = teams.find(
+    (t) => teamMatches(t.team_name, teamQuery) || teamMatches(t.team_abbrName, teamQuery)
+  );
+
+  const allRoster = await list("Roster", {}, { limit: 10000 });
+  const inCycle = allRoster.filter((r) => !r.cycle || r.cycle === cycle);
+
+  const teamName = mapped?.team_name ?? null;
+  const roster = inCycle.filter((r) =>
+    teamMatches(r.team_name, teamName ?? teamQuery)
+  );
+
+  if (!roster.length && !mapped) {
+    // Give the caller the list of valid names for a helpful error.
+    const names = [...new Set(inCycle.map((r) => r.team_name).filter(Boolean))].sort();
+    return { found: false, query: teamQuery, teams: names };
+  }
+
+  const resolvedName = teamName ?? roster[0]?.team_name ?? teamQuery;
+  const abbr = mapped?.team_abbrName ?? roster[0]?.team_abbrName ?? "";
+
+  // Join roster -> Player for ratings.
+  const players = await getAllPlayers();
+  const byName = new Map();
+  for (const p of players) {
+    if (p.player_fullName) byName.set(p.player_fullName.toLowerCase(), p);
+  }
+  const enriched = roster
+    .map((r) => {
+      const p = byName.get(String(r.player_fullName ?? "").toLowerCase());
+      return {
+        player_fullName: r.player_fullName,
+        player_position: p?.player_position ?? r.player_position,
+        player_ovr: p?.player_ovr ?? null,
+        player: p ?? null,
+      };
+    })
+    .sort((a, b) => (b.player_ovr ?? 0) - (a.player_ovr ?? 0));
+
+  // Owner: prefer the roster's owner_username, else LeagueMember by team.
+  let owner = roster.find((r) => r.owner_username)?.owner_username ?? null;
+  if (!owner) {
+    const members = await getLeagueMembers();
+    owner = members.find((m) => teamMatches(m.team_name, resolvedName))?.username ?? null;
+  }
+
+  // Record from standings (already derived from TeamStat + TeamMap).
+  let record = null;
+  try {
+    const { season, rows } = await getStandings();
+    const row = rows.find((r) => teamMatches(r.team_name, resolvedName));
+    if (row) record = { ...row, season };
+  } catch {
+    /* record is optional */
+  }
+
+  // Trade block entries for this team.
+  let block = [];
+  try {
+    const entries = await list("TradeBlock", {}, { limit: 5000 });
+    block = entries.filter((e) => teamMatches(e.team_name, resolvedName));
+  } catch {
+    /* optional */
+  }
+
+  // Cap picture from CycleData, keyed by team abbreviation.
+  let cap = null;
+  try {
+    const cd = await list("CycleData", {}, { limit: 200 });
+    cap =
+      cd.find(
+        (c) => (!c.cycle || c.cycle === cycle) && teamMatches(c.team_abbr, abbr)
+      ) ?? null;
+  } catch {
+    /* optional */
+  }
+
+  return {
+    found: true,
+    teamName: resolvedName,
+    abbr,
+    owner,
+    record,
+    roster: enriched,
+    block,
+    cap,
+    cycle,
+  };
+}
+
+// Head-to-head between two league members. Uses the pre-computed Rivalry
+// record when present, otherwise tallies the Game entity directly.
+export async function getRivalry(user1, user2) {
+  const a = String(user1 ?? "").trim();
+  const b = String(user2 ?? "").trim();
+  if (!a || !b) return null;
+
+  const eq = (x, y) => String(x ?? "").toLowerCase() === String(y ?? "").toLowerCase();
+
+  // 1) Pre-computed record (stored with usernames in alphabetical order).
+  try {
+    const rows = await list("Rivalry", {}, { limit: 5000 });
+    const hit = rows.find(
+      (r) =>
+        (eq(r.user1_username, a) && eq(r.user2_username, b)) ||
+        (eq(r.user1_username, b) && eq(r.user2_username, a))
+    );
+    if (hit && (hit.user1_wins || hit.user2_wins || hit.ties)) {
+      const flipped = eq(hit.user1_username, b);
+      return {
+        source: "rivalry",
+        user1: a,
+        user2: b,
+        user1_wins: flipped ? hit.user2_wins ?? 0 : hit.user1_wins ?? 0,
+        user2_wins: flipped ? hit.user1_wins ?? 0 : hit.user2_wins ?? 0,
+        ties: hit.ties ?? 0,
+        games: [],
+      };
+    }
+  } catch {
+    /* fall through to live tally */
+  }
+
+  // 2) Live tally from Game rows.
+  const games = await list("Game", {}, { limit: 20000 });
+  const meetings = games.filter(
+    (g) =>
+      (eq(g.user1_username, a) && eq(g.user2_username, b)) ||
+      (eq(g.user1_username, b) && eq(g.user2_username, a))
+  );
+
+  let w1 = 0;
+  let w2 = 0;
+  let ties = 0;
+  for (const g of meetings) {
+    const aIsUser1 = eq(g.user1_username, a);
+    const aScore = aIsUser1 ? g.user1_score ?? 0 : g.user2_score ?? 0;
+    const bScore = aIsUser1 ? g.user2_score ?? 0 : g.user1_score ?? 0;
+    if (aScore > bScore) w1++;
+    else if (bScore > aScore) w2++;
+    else ties++;
+  }
+
+  const recent = [...meetings]
+    .sort(
+      (x, y) =>
+        (y.season_number ?? 0) - (x.season_number ?? 0) || (y.week ?? 0) - (x.week ?? 0)
+    )
+    .slice(0, 5)
+    .map((g) => {
+      const aIsUser1 = eq(g.user1_username, a);
+      return {
+        season: g.season_number,
+        week: g.week,
+        aScore: aIsUser1 ? g.user1_score ?? 0 : g.user2_score ?? 0,
+        bScore: aIsUser1 ? g.user2_score ?? 0 : g.user1_score ?? 0,
+      };
+    });
+
+  return {
+    source: "games",
+    user1: a,
+    user2: b,
+    user1_wins: w1,
+    user2_wins: w2,
+    ties,
+    games: recent,
+  };
+}
