@@ -24,10 +24,13 @@ async function getCurrentCycle() {
   try {
     const config = await list("AppConfig");
     console.log(`[CYCLE] Fetched AppConfig:`, config);
-    if (config && config.length > 0 && config[0].current_cycle) {
-      _cycleCache = { at: now, cycle: config[0].current_cycle };
-      console.log(`[CYCLE] Set cycle to: ${config[0].current_cycle}`);
-      return config[0].current_cycle;
+    
+    // AppConfig has multiple entries with different keys — find the one with key: 'current_cycle'
+    const cycleEntry = config.find(c => c.key === 'current_cycle');
+    if (cycleEntry && cycleEntry.value) {
+      _cycleCache = { at: now, cycle: cycleEntry.value };
+      console.log(`[CYCLE] Set cycle to: ${cycleEntry.value}`);
+      return cycleEntry.value;
     }
   } catch (err) {
     console.error("[CYCLE] Could not fetch current cycle from AppConfig:", err.message);
