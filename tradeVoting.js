@@ -18,6 +18,7 @@ import {
   getTradeById,
   getPlayersByNames,
   getMemberByDiscordId,
+  findMemberByIdentity,
   memberDisplayName,
   updateEntity,
 } from "./vault.js";
@@ -108,7 +109,11 @@ function fairness(v1, v2) {
 }
 
 // Build the full trade message. `players` is a Map of lowercased name -> Player.
-export function tradeMessage(trade, players = new Map(), { decided = false } = {}) {
+export function tradeMessage(
+  trade,
+  players = new Map(),
+  { decided = false, submitter = null, mention = false } = {}
+) {
   const t1 = trade.team1 ?? "Team 1";
   const t2 = trade.team2 ?? "Team 2";
   const votes = Array.isArray(trade.votes) ? trade.votes : [];
@@ -118,6 +123,9 @@ export function tradeMessage(trade, players = new Map(), { decided = false } = {
 
   const out = [];
 
+  // Ping the channel only on the initial post, never on later edits.
+  if (mention) out.push("@everyone");
+
   // Heading reflects the outcome once decided.
   const status = trade.status ?? "pending";
   if (status === "approved") out.push(`# ✅ Trade Approved`);
@@ -125,7 +133,9 @@ export function tradeMessage(trade, players = new Map(), { decided = false } = {
   else out.push(`# Trade Under Review`);
 
   out.push(`### ${teamEmojiByName(t1)} ${t1}  ↔  ${teamEmojiByName(t2)} ${t2}`);
-  if (trade.submitted_by) out.push(`-# Submitted by ${trade.submitted_by}`);
+  // trade.submitted_by holds a real name, which is private. Show it only
+  // when it resolves to a league gamertag; otherwise omit the line.
+  if (submitter) out.push(`-# Submitted by ${submitter}`);
 
   // Each side's assets.
   const sideBlock = (teamName, playerNames = [], picks = []) => {
@@ -227,6 +237,18 @@ async function playersForTrade(trade) {
   }
 }
 
+// Resolve the submitter to a safe display name, or null if we can't map it
+// to a league member (in which case the name is left off the card).
+async function submitterName(trade) {
+  try {
+    const member = await findMemberByIdentity(trade.submitted_by);
+    return member ? memberDisplayName(member) : null;
+  } catch (err) {
+    console.error("[TRADE VOTE] submitter lookup failed:", err.message);
+    return null;
+  }
+}
+
 // Post a trade to the committee channel and record the message id so the
 // tally can be edited in place later.
 export async function postTrade(client, trade) {
@@ -241,8 +263,13 @@ export async function postTrade(client, trade) {
   }
 
   const players = await playersForTrade(trade);
-  const payload = tradeMessage(trade, players);
-  const msg = await channel.send(payload);
+  const submitter = await submitterName(trade);
+  const payload = tradeMessage(trade, players, { submitter, mention: true });
+  // allowedMentions must opt in explicitly or the ping is inert text.
+  const msg = await channel.send({
+    ...payload,
+    allowedMentions: { parse: ["everyone"] },
+  });
 
   try {
     await updateEntity("TradeSubmission", trade.id, {
@@ -343,7 +370,10 @@ export async function handleTradeVote(interaction) {
 
     const updated = { ...trade, ...patch };
     const players = await playersForTrade(updated);
-    await interaction.editReply(tradeMessage(updated, players));
+    const submitter = await submitterName(updated);
+    await interaction.editReply(
+      tradeMessage(updated, players, { submitter, mention: false })
+    );
 
     // Approvals get announced publicly; rejections resolve silently.
     if (status === "approved") {
