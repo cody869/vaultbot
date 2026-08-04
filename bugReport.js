@@ -1,12 +1,9 @@
 import { SlashCommandBuilder } from 'discord.js';
-import { createClient } from '@base44/sdk';
 
 const VAULT_COLOR = 5198940; // Blue
-
-const base44 = createClient({
-  appId: process.env.BASE44_APP_ID,
-  token: process.env.BASE44_AUTH_TOKEN || '',
-});
+const BASE44_API_URL = 'https://app.base44.com/api';
+const APP_ID = process.env.BASE44_APP_ID;
+const AUTH_TOKEN = process.env.BASE44_AUTH_TOKEN || '';
 
 export default {
   // /bug-status command - shows all bugs and stats
@@ -16,8 +13,25 @@ export default {
       .setDescription('View all bug reports and their status'),
     async execute(interaction) {
       try {
-        // ❌ REMOVE THIS: await interaction.deferReply();
-        const bugs = await base44.entities.BugReport.list({ limit: 100 });
+        // Fetch bugs directly via HTTP (SDK doesn't respect RLS properly)
+        const response = await fetch(`${BASE44_API_URL}/entities/BugReport/list`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(AUTH_TOKEN && { 'Authorization': `Bearer ${AUTH_TOKEN}` })
+          },
+          body: JSON.stringify({
+            app_id: APP_ID,
+            query: {},
+            limit: 100
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`Base44 API error: ${response.status}`);
+        }
+
+        const bugs = await response.json();
         
         const stats = {
           open: bugs.filter(b => b.status === 'open').length,
@@ -72,11 +86,7 @@ export default {
         await interaction.editReply({ embeds: [embed] });
       } catch (err) {
         console.error('Error fetching bug status:', err);
-        try {
-          await interaction.editReply('❌ Failed to fetch bug reports: ' + (err.message || 'Unknown error'));
-        } catch (editErr) {
-          console.error('Could not edit reply:', editErr.message);
-        }
+        await interaction.editReply('❌ Failed to fetch bug reports: ' + (err.message || 'Unknown error'));
       }
     }
   },
@@ -100,28 +110,54 @@ export default {
       ),
     async execute(interaction) {
       try {
-        // ❌ REMOVE THIS: await interaction.deferReply();
         const bugId = interaction.options.getString('bug_id');
         const resolution = interaction.options.getString('resolution');
 
-        // Query for the bug
-        const bugs = await base44.entities.BugReport.list({
-          query: { id: bugId },
-          limit: 1
+        // Fetch the bug first to get its details
+        const listResponse = await fetch(`${BASE44_API_URL}/entities/BugReport/list`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(AUTH_TOKEN && { 'Authorization': `Bearer ${AUTH_TOKEN}` })
+          },
+          body: JSON.stringify({
+            app_id: APP_ID,
+            query: { id: bugId },
+            limit: 1
+          })
         });
 
+        if (!listResponse.ok) {
+          throw new Error(`Base44 API error: ${listResponse.status}`);
+        }
+
+        const bugs = await listResponse.json();
         if (!bugs || bugs.length === 0) {
           return await interaction.editReply('❌ Bug not found with that ID');
         }
 
         const bug = bugs[0];
 
-        // Update the bug status and resolution
-        await base44.entities.BugReport.update(bugId, {
-          status: 'resolved',
-          resolution_notes: resolution,
-          resolved_date: new Date().toISOString()
+        // Update the bug via HTTP
+        const updateResponse = await fetch(`${BASE44_API_URL}/entities/BugReport/${bugId}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(AUTH_TOKEN && { 'Authorization': `Bearer ${AUTH_TOKEN}` })
+          },
+          body: JSON.stringify({
+            app_id: APP_ID,
+            updates: {
+              status: 'resolved',
+              resolution_notes: resolution,
+              resolved_date: new Date().toISOString()
+            }
+          })
         });
+
+        if (!updateResponse.ok) {
+          throw new Error(`Failed to update bug: ${updateResponse.status}`);
+        }
 
         const embed = {
           title: '✅ Bug Resolved',
@@ -148,11 +184,7 @@ export default {
         await interaction.editReply({ embeds: [embed] });
       } catch (err) {
         console.error('Error resolving bug:', err);
-        try {
-          await interaction.editReply('❌ Failed to resolve bug: ' + (err.message || 'Unknown error'));
-        } catch (editErr) {
-          console.error('Could not edit reply:', editErr.message);
-        }
+        await interaction.editReply('❌ Failed to resolve bug: ' + (err.message || 'Unknown error'));
       }
     }
   }
