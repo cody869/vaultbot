@@ -50,6 +50,56 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("compare")
+    .setDescription("Compare two players side by side")
+    .addStringOption((o) =>
+      o
+        .setName("player1")
+        .setDescription("First player — pick from the list")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("player2")
+        .setDescription("Second player — pick from the list")
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("team")
+    .setDescription("Show a team's record, roster, cap outlook, and trade block")
+    .addStringOption((o) =>
+      o
+        .setName("team")
+        .setDescription("Team name or abbreviation")
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("myteam")
+    .setDescription("Show your own team (requires your Discord to be linked)"),
+
+  new SlashCommandBuilder()
+    .setName("rivalry")
+    .setDescription("All-time head-to-head record between two league members")
+    .addStringOption((o) =>
+      o
+        .setName("member1")
+        .setDescription("First league member")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("member2")
+        .setDescription("Second member (defaults to you)")
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName("scores")
     .setDescription("Show game scores for a week")
     .addIntegerOption((o) =>
