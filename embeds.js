@@ -73,6 +73,9 @@ export function tradeBlockEmbed({ team, entries }) {
     ? `${teamEmojiByName(team)} ${team} — Trade Block`
     : "🔁 Trade Block";
   const e = base(title);
+  
+  // Set URL to the trade-block page
+  e.setURL(`${VAULT_URL}/trade-block`);
 
   if (!entries.length) {
     return e.setDescription(
@@ -87,9 +90,13 @@ export function tradeBlockEmbed({ team, entries }) {
     if (t.entry_type === "pick") {
       return `${logo} 📋 **${t.pick_label ?? "Pick"}** — ${t.team_name}${t.pick_notes ? ` *(${t.pick_notes})*` : ""}`;
     }
+    
+    // Player line with OVR, position, and trade value
     const ovr = t.player_ovr ? ` ${t.player_ovr} OVR` : "";
-    return `${logo} **${t.player_fullName}** (${t.player_position ?? "?"}${ovr}) — ${t.team_name}`;
+    const tradeValue = t.trade_value ? ` • TV: ${t.trade_value}` : "";
+    return `${logo} **${t.player_fullName}** (${t.player_position ?? "?"}${ovr}${tradeValue}) — ${t.team_name}`;
   });
+  
   return e.setDescription(lines.join("\n"));
 }
 
