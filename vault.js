@@ -1163,3 +1163,11 @@ export async function findMemberByIdentity(name) {
   const members = await getLeagueMembers();
   return members.find((m) => memberIdentities(m).includes(key)) ?? null;
 }
+
+// The member who owns a team, matched loosely on full name, nickname, or
+// abbreviation ("49ers", "San Francisco 49ers", and "SF" all resolve).
+export async function findMemberByTeam(teamName) {
+  if (!teamName) return null;
+  const members = await getLeagueMembers();
+  return members.find((m) => m.team_name && teamMatches(m.team_name, teamName)) ?? null;
+}
