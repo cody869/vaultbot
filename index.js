@@ -132,12 +132,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // Autocomplete: respond with player suggestions as the user types.
   if (interaction.isAutocomplete()) {
     if (interaction.commandName === "player") {
+      const started = Date.now();
       try {
         const focused = interaction.options.getFocused();
         const choices = await suggestPlayers(focused, 25);
+        console.log(
+          `[AUTOCOMPLETE] "${focused}" -> ${choices.length} choices in ${Date.now() - started}ms`
+        );
+        if (choices.length) {
+          console.log(`[AUTOCOMPLETE] sample: ${JSON.stringify(choices[0])}`);
+        }
         await interaction.respond(choices);
+        console.log(`[AUTOCOMPLETE] responded OK (${Date.now() - started}ms total)`);
       } catch (err) {
-        console.error("Autocomplete error:", err.message);
+        // Log the whole error — Discord's validation failures carry the detail
+        // in err.rawError, not err.message.
+        console.error("[AUTOCOMPLETE] failed after", Date.now() - started, "ms:", err);
+        if (err.rawError) {
+          console.error("[AUTOCOMPLETE] rawError:", JSON.stringify(err.rawError));
+        }
         try {
           await interaction.respond([]);
         } catch {}
