@@ -5,6 +5,7 @@ import { loadEmoji } from "./emoji.js";
 import { registerCommands } from "./deploy-commands.js";
 import { startScheduler } from "./scheduler.js";
 import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.js";
+import { handleTradeVote, startTradeWatcher } from "./tradeVoting.js";
 import bugReportCommands from "./bugReport.js";
 import {
   getStandings,
@@ -70,6 +71,7 @@ client.once(Events.ClientReady, async (c) => {
     warmPlayerCache().catch(() => {});
   }, 240_000);
   startScheduler(c);
+  startTradeWatcher(c);
 });
 
 // Reject instead of hanging forever if a Vault read stalls.
@@ -120,7 +122,7 @@ async function handlePlayerViewSelect(interaction) {
     const player = await getPlayerById(playerId);
     if (!player) {
       await interaction.editReply({
-        content: "⚠️ That player is no longer in the current cycle.",
+        content: "That player is no longer in the current cycle.",
         embeds: [],
         components: [],
       });
@@ -132,7 +134,7 @@ async function handlePlayerViewSelect(interaction) {
     console.error("Player view error:", err);
     try {
       await interaction.followUp({
-        content: `⚠️ ${err.message || "Could not switch views."}`,
+        content: `${err.message || "Could not switch views."}`,
         ephemeral: true,
       });
     } catch {}
@@ -246,6 +248,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // Committee vote buttons — checked before the trade-builder router.
+  if (interaction.isButton() && interaction.customId.startsWith("tvote:")) {
+    await handleTradeVote(interaction);
+    return;
+  }
+
   if (interaction.isButton() || interaction.isStringSelectMenu()) {
     await handleTradeComponent(interaction);
     return;
@@ -344,12 +352,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!p1 || !p2) {
           const missing = !p1 ? in1 : in2;
           await interaction.editReply(
-            `⚠️ Couldn't find a player matching **${missing}** — pick from the dropdown for an exact match.`
+            `Couldn't find a player matching **${missing}** — pick from the dropdown for an exact match.`
           );
           break;
         }
         if (p1.id && p1.id === p2.id) {
-          await interaction.editReply("⚠️ Pick two different players to compare.");
+          await interaction.editReply("Pick two different players to compare.");
           break;
         }
 
@@ -377,7 +385,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         if (!member.team_name) {
           await interaction.editReply(
-            `⚠️ **${memberDisplayName(member)}** isn't assigned to a team right now.`
+            `**${memberDisplayName(member)}** isn't assigned to a team right now.`
           );
           break;
         }
@@ -395,7 +403,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const member1 = await getMemberByIdOrUsername(in1);
         if (!member1?.username) {
           await interaction.editReply(
-            "⚠️ Couldn't find that member — pick from the dropdown."
+            "Couldn't find that member — pick from the dropdown."
           );
           break;
         }
@@ -405,21 +413,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!member2) {
           if (in2) {
             await interaction.editReply(
-              "⚠️ Couldn't find the second member — pick from the dropdown."
+              "Couldn't find the second member — pick from the dropdown."
             );
             break;
           }
           member2 = await getMemberByDiscordId(interaction.user.id);
           if (!member2?.username) {
             await interaction.editReply(
-              "⚠️ Name a second member — your Discord isn't linked to a league member yet."
+              "Name a second member — your Discord isn't linked to a league member yet."
             );
             break;
           }
         }
 
         if (member1.username.toLowerCase() === member2.username.toLowerCase()) {
-          await interaction.editReply("⚠️ Pick two different members.");
+          await interaction.editReply("Pick two different members.");
           break;
         }
 
@@ -479,7 +487,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   } catch (err) {
     console.error(`[ERROR] /${interaction.commandName} failed:`, err);
-    const msg = `⚠️ ${err.message || "Something went wrong reaching the Vault."}`;
+    const msg = `${err.message || "Something went wrong reaching the Vault."}`;
     // editReply can itself fail (e.g. an invalid payload) — fall back to a
     // follow-up so the user never sees an endless "thinking" spinner.
     try {
