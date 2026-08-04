@@ -152,9 +152,14 @@ export function playerEmbed(p, team = null) {
   const pos = p.player_position ?? "?";
   const gem = devEmoji(p.player_devTrait);
 
-  const e = base(`${teamEmoji(abbr)} ${pos} ${p.player_fullName}`).setDescription(
-    `${gem} **${p.player_ovr ?? "?"} OVR**`
-  );
+  const playerUrl = `${VAULT_URL}/players/${encodeURIComponent(p.player_fullName)}`;
+  const e = new EmbedBuilder()
+    .setColor(VAULT_COLOR)
+    .setTitle(`${teamEmoji(abbr)} ${pos} ${p.player_fullName}`)
+    .setURL(playerUrl)
+    .setFooter({ text: "XCFL Vault" })
+    .setTimestamp()
+    .setDescription(`${gem} **${p.player_ovr ?? "?"} OVR**`);
 
   // Bio line: age | season | height, weight
   const bits = [];
