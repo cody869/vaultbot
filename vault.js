@@ -894,66 +894,104 @@ export async function getTeamOverview(teamQuery) {
   };
 }
 
-// Head-to-head between two league members. Uses the pre-computed Rivalry
-// record when present, otherwise tallies the Game entity directly.
-export async function getRivalry(user1, user2) {
-  const a = String(user1 ?? "").trim();
-  const b = String(user2 ?? "").trim();
-  if (!a || !b) return null;
+// Every name a member is known by, lowercased. Rivalry and Game rows store
+// gamertags ("quacks", "chaosrevolver") while LeagueMember.username is often
+// an email, so identity matching has to consider all of these.
+export function memberIdentities(m) {
+  if (!m) return [];
+  const raw = [
+    m.username,
+    m.discord_username,
+    m.avatar_name,
+    ...(Array.isArray(m.aliases) ? m.aliases : []),
+  ];
+  return [
+    ...new Set(
+      raw
+        .filter(Boolean)
+        .map((x) => String(x).trim().toLowerCase())
+        .filter(Boolean)
+    ),
+  ];
+}
 
-  const eq = (x, y) => String(x ?? "").toLowerCase() === String(y ?? "").toLowerCase();
+// Resolve a member object from an id, a username, or any known alias.
+async function resolveMember(input) {
+  if (!input) return null;
+  if (typeof input === "object") return input;
+  const key = String(input).trim().toLowerCase();
+  const members = await getLeagueMembers();
+  return (
+    members.find((m) => String(m.id ?? "").toLowerCase() === key) ??
+    members.find((m) => memberIdentities(m).includes(key)) ??
+    null
+  );
+}
 
-  // Safe display names — usernames may be emails and must not be shown.
-  let display1 = null;
-  let display2 = null;
-  try {
-    const members = await getLeagueMembers();
-    const find = (u) => members.find((m) => eq(m.username, u));
-    display1 = find(a) ? memberDisplayName(find(a)) : null;
-    display2 = find(b) ? memberDisplayName(find(b)) : null;
-  } catch {
-    /* fall back to the raw values below */
-  }
+// Head-to-head between two league members. Accepts member objects, record
+// ids, usernames, or aliases. Uses the pre-computed Rivalry record when
+// present, otherwise tallies the Game entity directly.
+export async function getRivalry(input1, input2) {
+  const m1 = await resolveMember(input1);
+  const m2 = await resolveMember(input2);
 
-  // 1) Pre-computed record (stored with usernames in alphabetical order).
+  // Fall back to the raw strings if a member record is missing.
+  const ids1 = m1 ? memberIdentities(m1) : [String(input1 ?? "").trim().toLowerCase()];
+  const ids2 = m2 ? memberIdentities(m2) : [String(input2 ?? "").trim().toLowerCase()];
+  if (!ids1.length || !ids2.length) return null;
+
+  const display1 = m1 ? memberDisplayName(m1) : String(input1);
+  const display2 = m2 ? memberDisplayName(m2) : String(input2);
+
+  const isA = (v) => ids1.includes(String(v ?? "").trim().toLowerCase());
+  const isB = (v) => ids2.includes(String(v ?? "").trim().toLowerCase());
+
+  console.log(
+    `[RIVALRY] matching ${display1} [${ids1.join("|")}] vs ${display2} [${ids2.join("|")}]`
+  );
+
+  // 1) Pre-computed record.
   try {
     const rows = await list("Rivalry", {}, { limit: 5000 });
     const hit = rows.find(
       (r) =>
-        (eq(r.user1_username, a) && eq(r.user2_username, b)) ||
-        (eq(r.user1_username, b) && eq(r.user2_username, a))
+        (isA(r.user1_username) && isB(r.user2_username)) ||
+        (isB(r.user1_username) && isA(r.user2_username))
     );
-    if (hit && (hit.user1_wins || hit.user2_wins || hit.ties)) {
-      const flipped = eq(hit.user1_username, b);
+    if (hit && ((hit.user1_wins ?? 0) || (hit.user2_wins ?? 0) || (hit.ties ?? 0))) {
+      // Rivalry rows store the pair alphabetically — orient to our arguments.
+      const flipped = isB(hit.user1_username);
+      console.log(`[RIVALRY] matched Rivalry row ${hit.id}`);
       return {
         source: "rivalry",
-        user1: a,
-        user2: b,
-        display1: display1 ?? a,
-        display2: display2 ?? b,
+        user1: display1,
+        user2: display2,
+        display1,
+        display2,
         user1_wins: flipped ? hit.user2_wins ?? 0 : hit.user1_wins ?? 0,
         user2_wins: flipped ? hit.user1_wins ?? 0 : hit.user2_wins ?? 0,
         ties: hit.ties ?? 0,
         games: [],
       };
     }
-  } catch {
-    /* fall through to live tally */
+  } catch (err) {
+    console.error("[RIVALRY] Rivalry read failed:", err.message);
   }
 
   // 2) Live tally from Game rows.
   const games = await list("Game", {}, { limit: 20000 });
   const meetings = games.filter(
     (g) =>
-      (eq(g.user1_username, a) && eq(g.user2_username, b)) ||
-      (eq(g.user1_username, b) && eq(g.user2_username, a))
+      (isA(g.user1_username) && isB(g.user2_username)) ||
+      (isB(g.user1_username) && isA(g.user2_username))
   );
+  console.log(`[RIVALRY] live tally found ${meetings.length} meetings`);
 
   let w1 = 0;
   let w2 = 0;
   let ties = 0;
   for (const g of meetings) {
-    const aIsUser1 = eq(g.user1_username, a);
+    const aIsUser1 = isA(g.user1_username);
     const aScore = aIsUser1 ? g.user1_score ?? 0 : g.user2_score ?? 0;
     const bScore = aIsUser1 ? g.user2_score ?? 0 : g.user1_score ?? 0;
     if (aScore > bScore) w1++;
@@ -968,7 +1006,7 @@ export async function getRivalry(user1, user2) {
     )
     .slice(0, 5)
     .map((g) => {
-      const aIsUser1 = eq(g.user1_username, a);
+      const aIsUser1 = isA(g.user1_username);
       return {
         season: g.season_number,
         week: g.week,
@@ -979,17 +1017,16 @@ export async function getRivalry(user1, user2) {
 
   return {
     source: "games",
-    user1: a,
-    user2: b,
-    display1: display1 ?? a,
-    display2: display2 ?? b,
+    user1: display1,
+    user2: display2,
+    display1,
+    display2,
     user1_wins: w1,
     user2_wins: w2,
     ties,
     games: recent,
   };
 }
-
 
 // Distinct team names in the current cycle (for the trade builder + /team).
 export async function getCycleTeams() {
