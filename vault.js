@@ -692,29 +692,73 @@ export async function getMemberByDiscordId(discordUserId) {
   return members.find((m) => String(m.discord_user_id ?? "") === String(discordUserId)) ?? null;
 }
 
-// Autocomplete over league member usernames.
+// Some LeagueMember.username values are email addresses (from account
+// linking). Emails are private — they must never be shown in Discord or
+// used as searchable text.
+function looksLikeEmail(s) {
+  return /\S+@\S+\.\S+/.test(String(s ?? ""));
+}
+
+// The safe, human-readable name for a member. Falls back through the
+// non-email options and finally to their team, never exposing an email.
+export function memberDisplayName(m) {
+  if (!m) return "Unknown member";
+  const candidates = [
+    m.discord_username,
+    m.avatar_name,
+    m.username,
+    ...(Array.isArray(m.aliases) ? m.aliases : []),
+  ];
+  for (const c of candidates) {
+    if (c && !looksLikeEmail(c)) return String(c);
+  }
+  return m.team_name ? `${m.team_name} owner` : "Unnamed member";
+}
+
+// Look up a member by record id, falling back to a username match so older
+// interactions (which sent usernames) keep working.
+export async function getMemberByIdOrUsername(input) {
+  if (!input) return null;
+  const members = await getLeagueMembers();
+  const key = String(input).toLowerCase();
+  return (
+    members.find((m) => String(m.id ?? "").toLowerCase() === key) ??
+    members.find((m) => String(m.username ?? "").toLowerCase() === key) ??
+    null
+  );
+}
+
+// Autocomplete over league members. Matches and displays only non-email
+// names; the option value is the record id, so no email is ever sent to
+// Discord in either the label or the payload.
 export async function suggestMembers(partial, limit = 25) {
   const members = await getLeagueMembers();
   const q = (partial ?? "").trim().toLowerCase();
+
   const scored = members
     .map((m) => {
-      const n = (m.username ?? "").toLowerCase();
+      const display = memberDisplayName(m);
+      const n = display.toLowerCase();
+      // Search the display name and any non-email aliases only.
+      const searchable = [n, ...(Array.isArray(m.aliases) ? m.aliases : [])
+        .filter((a) => a && !looksLikeEmail(a))
+        .map((a) => String(a).toLowerCase())];
       let tier = 0;
       if (!q) tier = 1;
-      else if (n === q) tier = 3;
-      else if (n.startsWith(q)) tier = 2;
-      else if (n.includes(q)) tier = 1;
-      return { m, tier };
+      else if (searchable.some((t) => t === q)) tier = 3;
+      else if (searchable.some((t) => t.startsWith(q))) tier = 2;
+      else if (searchable.some((t) => t.includes(q))) tier = 1;
+      return { m, display, tier };
     })
-    .filter((x) => x.tier > 0 && x.m.username)
-    .sort((a, b) => b.tier - a.tier || (a.m.username ?? "").localeCompare(b.m.username ?? ""))
+    .filter((x) => x.tier > 0 && x.display)
+    .sort((a, b) => b.tier - a.tier || a.display.localeCompare(b.display))
     .slice(0, limit);
 
-  return scored.map(({ m }) => {
+  return scored.map(({ m, display }) => {
     const team = m.team_name ? ` · ${m.team_name}` : "";
     return {
-      name: String(`${m.username}${team}`).slice(0, 100),
-      value: String(m.username).slice(0, 100),
+      name: String(`${display}${team}`).slice(0, 100),
+      value: String(m.id ?? m.username ?? display).slice(0, 100),
     };
   });
 }
@@ -780,10 +824,30 @@ export async function getTeamOverview(teamQuery) {
     .sort((a, b) => (b.player_ovr ?? 0) - (a.player_ovr ?? 0));
 
   // Owner: prefer the roster's owner_username, else LeagueMember by team.
-  let owner = roster.find((r) => r.owner_username)?.owner_username ?? null;
-  if (!owner) {
+  // owner_username can be an email, so always resolve a safe display name
+  // and never return the raw value.
+  let ownerMember = null;
+  let owner = null;
+  try {
     const members = await getLeagueMembers();
-    owner = members.find((m) => teamMatches(m.team_name, resolvedName))?.username ?? null;
+    const rawOwner = roster.find((r) => r.owner_username)?.owner_username ?? null;
+    if (rawOwner) {
+      ownerMember =
+        members.find(
+          (m) => String(m.username ?? "").toLowerCase() === String(rawOwner).toLowerCase()
+        ) ?? null;
+    }
+    if (!ownerMember) {
+      ownerMember = members.find((m) => teamMatches(m.team_name, resolvedName)) ?? null;
+    }
+    if (ownerMember) {
+      owner = memberDisplayName(ownerMember);
+    } else if (rawOwner && !looksLikeEmail(rawOwner)) {
+      // No member record, but the raw value is safe to show.
+      owner = rawOwner;
+    }
+  } catch {
+    /* owner is optional */
   }
 
   // Record from standings (already derived from TeamStat + TeamMap).
@@ -839,6 +903,18 @@ export async function getRivalry(user1, user2) {
 
   const eq = (x, y) => String(x ?? "").toLowerCase() === String(y ?? "").toLowerCase();
 
+  // Safe display names — usernames may be emails and must not be shown.
+  let display1 = null;
+  let display2 = null;
+  try {
+    const members = await getLeagueMembers();
+    const find = (u) => members.find((m) => eq(m.username, u));
+    display1 = find(a) ? memberDisplayName(find(a)) : null;
+    display2 = find(b) ? memberDisplayName(find(b)) : null;
+  } catch {
+    /* fall back to the raw values below */
+  }
+
   // 1) Pre-computed record (stored with usernames in alphabetical order).
   try {
     const rows = await list("Rivalry", {}, { limit: 5000 });
@@ -853,6 +929,8 @@ export async function getRivalry(user1, user2) {
         source: "rivalry",
         user1: a,
         user2: b,
+        display1: display1 ?? a,
+        display2: display2 ?? b,
         user1_wins: flipped ? hit.user2_wins ?? 0 : hit.user1_wins ?? 0,
         user2_wins: flipped ? hit.user1_wins ?? 0 : hit.user2_wins ?? 0,
         ties: hit.ties ?? 0,
@@ -903,6 +981,8 @@ export async function getRivalry(user1, user2) {
     source: "games",
     user1: a,
     user2: b,
+    display1: display1 ?? a,
+    display2: display2 ?? b,
     user1_wins: w1,
     user2_wins: w2,
     ties,
