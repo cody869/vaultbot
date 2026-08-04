@@ -10,34 +10,32 @@ if (!APP_ID) {
   process.exit(1);
 }
 
-// Cache the current cycle from AppConfig (refresh every minute)
+// Current cycle comes from AppConfig (key/value rows), cached for a minute.
 let _cycleCache = { at: 0, cycle: process.env.XCFL_CYCLE || "M26" };
 const CYCLE_TTL_MS = 60_000;
 
 async function getCurrentCycle() {
   const now = Date.now();
-  if (now - _cycleCache.at < CYCLE_TTL_MS) {
-    console.log(`[CYCLE] Using cached: ${_cycleCache.cycle}`);
+  if (_cycleCache.at && now - _cycleCache.at < CYCLE_TTL_MS) {
     return _cycleCache.cycle;
   }
 
   try {
     const config = await list("AppConfig");
-    console.log(`[CYCLE] Fetched AppConfig:`, config);
-    
-    // AppConfig has multiple entries with different keys — find the one with key: 'current_cycle'
-    const cycleEntry = config.find(c => c.key === 'current_cycle');
-    if (cycleEntry && cycleEntry.value) {
-      _cycleCache = { at: now, cycle: cycleEntry.value };
-      console.log(`[CYCLE] Set cycle to: ${cycleEntry.value}`);
-      return cycleEntry.value;
+    // AppConfig stores key/value rows — find the current_cycle row.
+    const row = config.find((c) => c.key === "current_cycle");
+    if (row && row.value) {
+      _cycleCache = { at: now, cycle: row.value };
+      console.log(`[CYCLE] current_cycle = ${row.value}`);
+      return row.value;
     }
+    console.warn("[CYCLE] No current_cycle row found in AppConfig.");
   } catch (err) {
-    console.error("[CYCLE] Could not fetch current cycle from AppConfig:", err.message);
+    console.error("[CYCLE] Could not read AppConfig:", err.message);
   }
 
   const fallback = process.env.XCFL_CYCLE || "M26";
-  console.log(`[CYCLE] Fell back to: ${fallback}`);
+  console.log(`[CYCLE] Falling back to ${fallback}`);
   return fallback;
 }
 
@@ -130,6 +128,41 @@ export async function list(entity, filter = {}, opts = {}) {
   if (Array.isArray(data)) return data;
   if (data && Array.isArray(data.entities)) return data.entities;
   return [];
+}
+
+// Server-side filters aren't always honored, so every read that matters is
+// verified in memory. Tries the narrow (filtered) request first and falls back
+// to a broad fetch when that comes back with nothing usable.
+async function listMatching(entity, filter, matchFn, opts = {}) {
+  try {
+    const narrow = await list(entity, filter, { limit: opts.limit ?? 500 });
+    const hits = narrow.filter(matchFn);
+    if (hits.length) return hits;
+  } catch (err) {
+    console.error(`[${entity}] narrow read failed:`, err.message);
+  }
+  try {
+    const broad = await list(entity, {}, { limit: opts.broadLimit ?? 5000 });
+    return broad.filter(matchFn);
+  } catch (err) {
+    console.error(`[${entity}] broad read failed:`, err.message);
+    return [];
+  }
+}
+
+// Loose name comparison — handles case and the "F.LastName" short form that
+// some imports use.
+function nameMatches(candidate, fullName) {
+  if (!candidate || !fullName) return false;
+  const a = String(candidate).trim().toLowerCase();
+  const b = String(fullName).trim().toLowerCase();
+  if (a === b) return true;
+  const parts = b.split(/\s+/);
+  if (parts.length >= 2) {
+    const short = `${parts[0][0]}.${parts[parts.length - 1]}`;
+    if (a === short) return true;
+  }
+  return false;
 }
 
 // --- data accessors used by commands -------------------------------------
@@ -273,7 +306,8 @@ export async function getStatLeaders(category, limit = 10, seasonNumber) {
   if (!cfg) throw new Error(`Unknown stat category: ${category}`);
 
   const cycle = await getCurrentCycle();
-  let rows = await list(cfg.entity, { cycle });
+  const all = await list(cfg.entity, { cycle }, { limit: 5000 });
+  const rows = all.filter((r) => !r.cycle || r.cycle === cycle);
   if (!rows.length) return { ...cfg, season: null, leaders: [] };
 
   const season =
@@ -298,7 +332,8 @@ export async function getPowerRankings() {
   let teamByUser = {};
   try {
     const cycle = await getCurrentCycle();
-    const recs = await list("SeasonRecord", { cycle });
+    const allRecs = await list("SeasonRecord", { cycle }, { limit: 5000 });
+    const recs = allRecs.filter((r) => !r.cycle || r.cycle === cycle);
     if (recs.length) {
       const latest = Math.max(...recs.map((r) => r.season_number ?? 0));
       for (const r of recs) {
@@ -368,12 +403,11 @@ async function getAllPlayers() {
     return _playerCache.rows;
   }
   const cycle = await getCurrentCycle();
-  const allRows = await list("Player", {}, { limit: 5000 }); // fetch all
-  
-  // Filter to current cycle in memory
-  const rows = allRows.filter(p => p.cycle === cycle);
-  
-  console.log(`[PLAYER] Fetched ${allRows.length} total, filtered to ${rows.length} for cycle ${cycle}`);
+  const allRows = await list("Player", {}, { limit: 10000 });
+  // Filter to the current cycle in memory — the server-side filter can't be
+  // relied on, and stale-cycle players are the exact bug we're avoiding.
+  const rows = allRows.filter((p) => p.cycle === cycle);
+  console.log(`[PLAYER] ${allRows.length} total -> ${rows.length} in cycle ${cycle}`);
   _playerCache = { at: now, rows };
   return rows;
 }
@@ -463,14 +497,105 @@ export async function getPlayer(name) {
 export async function getRosterFor(playerFullName) {
   try {
     const cycle = await getCurrentCycle();
-    const rows = await list("Roster", {
-      cycle,
-      player_fullName: playerFullName,
-    });
+    const rows = await listMatching(
+      "Roster",
+      { cycle, player_fullName: playerFullName },
+      (r) =>
+        (!r.cycle || r.cycle === cycle) &&
+        nameMatches(r.player_fullName, playerFullName)
+    );
     return rows[0] ?? null;
   } catch {
     return null;
   }
+}
+
+// --- player stat views (used by the /player dropdown) --------------------
+
+// Short-lived cache so flipping between dropdown views doesn't refetch.
+const _statCache = new Map(); // key -> { at, data }
+const STAT_TTL_MS = 120_000;
+
+function cachedStats(key) {
+  const hit = _statCache.get(key);
+  if (hit && Date.now() - hit.at < STAT_TTL_MS) return hit.data;
+  return null;
+}
+function putStats(key, data) {
+  _statCache.set(key, { at: Date.now(), data });
+  return data;
+}
+
+// Per-week stat lines for a player in the current cycle, newest week first.
+// Returns { season, weeks: [...] } for the latest season that has data.
+export async function getPlayerWeeklyStats(playerFullName) {
+  const cycle = await getCurrentCycle();
+  const key = `weekly:${cycle}:${playerFullName}`;
+  const hit = cachedStats(key);
+  if (hit) return hit;
+
+  const rows = await listMatching(
+    "WeeklyStats",
+    { cycle, player_full_name: playerFullName },
+    (r) =>
+      (!r.cycle || r.cycle === cycle) &&
+      nameMatches(r.player_full_name, playerFullName),
+    { limit: 500, broadLimit: 10000 }
+  );
+
+  if (!rows.length) return putStats(key, { season: null, weeks: [] });
+
+  const season = Math.max(...rows.map((r) => r.season_index ?? 0));
+  const weeks = rows
+    .filter((r) => (r.season_index ?? 0) === season)
+    .sort((a, b) => (b.week_index ?? 0) - (a.week_index ?? 0));
+
+  return putStats(key, { season, weeks });
+}
+
+// Season totals for a player, merged across the four stat entities.
+// Returns [{ season, gamesPlayed, passing, rushing, receiving, defense }, ...]
+// sorted newest season first.
+export async function getPlayerSeasonStats(playerFullName) {
+  const cycle = await getCurrentCycle();
+  const key = `season:${cycle}:${playerFullName}`;
+  const hit = cachedStats(key);
+  if (hit) return hit;
+
+  const entities = [
+    ["passing", "PassingStat"],
+    ["rushing", "RushingStat"],
+    ["receiving", "ReceivingStat"],
+    ["defense", "DefenseStat"],
+  ];
+
+  const bySeason = new Map();
+
+  for (const [bucket, entity] of entities) {
+    let rows = [];
+    try {
+      rows = await listMatching(
+        entity,
+        { cycle, player_fullName: playerFullName },
+        (r) =>
+          (!r.cycle || r.cycle === cycle) &&
+          nameMatches(r.player_fullName, playerFullName),
+        { limit: 200, broadLimit: 8000 }
+      );
+    } catch (err) {
+      console.error(`[STATS] ${entity} read failed:`, err.message);
+    }
+    for (const r of rows) {
+      const s = r.season_number ?? 0;
+      if (!bySeason.has(s)) bySeason.set(s, { season: s, gamesPlayed: 0 });
+      const slot = bySeason.get(s);
+      slot[bucket] = r;
+      slot.gamesPlayed = Math.max(slot.gamesPlayed, r.gamesPlayed ?? 0);
+    }
+  }
+
+  const out = [...bySeason.values()].sort((a, b) => b.season - a.season);
+  return putStats(key, out);
 }
 
 // Recent trade submissions, newest first.
@@ -481,4 +606,45 @@ export async function getTrades(status, limit = 10) {
     limit,
   });
   return trades;
+}
+
+// --- player stats (for the /player view dropdown) ------------------------
+
+// WeeklyStats rows for one player, newest first. The REST filter params are
+// not reliably applied, so we always re-filter in memory.
+export async function getPlayerWeeklyStats(playerFullName, limit = 12) {
+  try {
+    const rows = await list("WeeklyStats", { player_full_name: playerFullName }, { limit: 10000 });
+    const mine = rows.filter((w) => w.player_full_name === playerFullName);
+    if (!mine.length) return { season: null, weeks: [] };
+    const season = Math.max(...mine.map((w) => w.season_index ?? 0));
+    const weeks = mine
+      .filter((w) => w.season_index === season)
+      .sort((a, b) => (b.week_index ?? 0) - (a.week_index ?? 0))
+      .slice(0, limit);
+    return { season, weeks };
+  } catch (err) {
+    console.error("getPlayerWeeklyStats error:", err.message);
+    return { season: null, weeks: [] };
+  }
+}
+
+// Season totals for one player across the four stat entities.
+export async function getPlayerSeasonStats(playerFullName) {
+  const grab = async (entity) => {
+    try {
+      const rows = await list(entity, { player_fullName: playerFullName }, { limit: 5000 });
+      return rows.filter((r) => r.player_fullName === playerFullName);
+    } catch (err) {
+      console.error(`getPlayerSeasonStats(${entity}) error:`, err.message);
+      return [];
+    }
+  };
+  const [passing, rushing, receiving, defense] = await Promise.all([
+    grab("PassingStat"),
+    grab("RushingStat"),
+    grab("ReceivingStat"),
+    grab("DefenseStat"),
+  ]);
+  return { passing, rushing, receiving, defense };
 }
