@@ -472,15 +472,22 @@ export async function suggestPlayers(partial, limit = 25) {
     )
     .slice(0, limit);
 
-  return scored.map(({ p }) => {
-    const team = p.team_abbrName ? ` · ${p.team_abbrName}` : "";
-    const label =
-      `${p.player_fullName} (${p.player_position ?? "?"} · ${p.player_ovr ?? "?"} OVR${team})`.slice(
-        0,
-        100 // Discord caps choice names at 100 chars
-      );
-    return { name: label, value: p.id || p.player_fullName };
-  });
+  return scored
+    .map(({ p }) => {
+      const team = p.team_abbrName ? ` · ${p.team_abbrName}` : "";
+      const label =
+        `${p.player_fullName} (${p.player_position ?? "?"} · ${p.player_ovr ?? "?"} OVR${team})`.slice(
+          0,
+          100 // Discord caps choice names at 100 chars
+        );
+      // Discord rejects the ENTIRE response if any single choice is malformed:
+      // name and value must both be non-empty strings under 100 characters.
+      const value = String(p.id || p.player_fullName || "").slice(0, 100);
+      const name = String(label || "").trim();
+      if (!name || !value) return null;
+      return { name, value };
+    })
+    .filter(Boolean);
 }
 
 // Fetch a single player by Base44 record id (what autocomplete sends).
