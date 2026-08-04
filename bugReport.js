@@ -16,7 +16,7 @@ export default {
       .setDescription('View all bug reports and their status'),
     async execute(interaction) {
       try {
-        await interaction.deferReply();
+        // ❌ REMOVE THIS: await interaction.deferReply();
         const bugs = await base44.entities.BugReport.list({ limit: 100 });
         
         const stats = {
@@ -100,7 +100,7 @@ export default {
       ),
     async execute(interaction) {
       try {
-        await interaction.deferReply();
+        // ❌ REMOVE THIS: await interaction.deferReply();
         const bugId = interaction.options.getString('bug_id');
         const resolution = interaction.options.getString('resolution');
 
