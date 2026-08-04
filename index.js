@@ -346,4 +346,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+// Railway sends SIGTERM when replacing a container. Close the gateway session
+// cleanly so Discord doesn't keep routing interactions to a dying instance.
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => {
+    console.log(`👋 ${signal} received — shutting down cleanly.`);
+    client.destroy();
+    process.exit(0);
+  });
+}
+
 client.login(process.env.DISCORD_TOKEN);
