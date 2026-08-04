@@ -344,7 +344,7 @@ function navButtons(session) {
 function summaryEmbed(session, { final = false } = {}) {
   const e = new EmbedBuilder()
     .setColor(0x1d4ed8)
-    .setTitle(final ? "📦 Trade Ready to Submit" : "📦 Trade Builder")
+    .setTitle(final ? "Trade Ready to Submit" : "Trade Builder")
     .setURL(PUBLIC_URL);
 
   const side = (team, players, picks) => {
@@ -382,7 +382,7 @@ export async function startTradeFlow(interaction) {
   const team2 = interaction.options.getString("team2");
 
   if (team1 === team2) {
-    await interaction.editReply("⚠️ Team 1 and Team 2 must be different.");
+    await interaction.editReply("Team 1 and Team 2 must be different.");
     return;
   }
 
@@ -400,7 +400,7 @@ export async function startTradeFlow(interaction) {
     ]);
   } catch (err) {
     console.error("Trade flow roster load failed:", err.message);
-    await interaction.editReply(`⚠️ Couldn't load rosters (${err.message}). Try again shortly.`);
+    await interaction.editReply(`Couldn't load rosters (${err.message}). Try again shortly.`);
     endSession(interaction.user.id);
     return;
   }
@@ -408,7 +408,7 @@ export async function startTradeFlow(interaction) {
     `[TRADE] ${team1}: ${t1Players.length} players | ${team2}: ${t2Players.length} players`
   );
   if (!t1Players.length && !t2Players.length) {
-    await interaction.editReply("⚠️ No players found for either team. Check the team names.");
+    await interaction.editReply("No players found for either team. Check the team names.");
     endSession(interaction.user.id);
     return;
   }
@@ -554,7 +554,7 @@ export async function handleTradeComponent(interaction) {
   } catch (err) {
     console.error("Trade flow error:", err);
     try {
-      await interaction.reply({ content: `⚠️ ${err.message}`, ephemeral: true });
+      await interaction.reply({ content: err.message, ephemeral: true });
     } catch {}
     return true;
   }
