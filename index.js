@@ -19,6 +19,8 @@ import {
   getScores,
   getScoreWeeks,
   getRosterFor,
+  getPlayerWeeklyStats,
+  getPlayerSeasonStats,
   botLogin,
 } from "./vault.js";
 import {
@@ -50,6 +52,46 @@ client.once(Events.ClientReady, async (c) => {
   await loadEmoji(c);
   startScheduler(c);
 });
+
+// Fetch whatever extra data a /player view needs, then render it.
+async function renderPlayerView(player, team, view) {
+  const data = {};
+  if (view === "weekly") {
+    data.weekly = await getPlayerWeeklyStats(player.player_fullName);
+  } else if (view === "season") {
+    data.season = await getPlayerSeasonStats(player.player_fullName);
+  }
+  return playerEmbed(player, team, view, data);
+}
+
+// The Overview / Full Ratings / Weekly / Season dropdown under a player card.
+async function handlePlayerViewSelect(interaction) {
+  // Edit the existing message in place rather than posting a new one.
+  await interaction.deferUpdate();
+  try {
+    const playerId = interaction.customId.split(":")[1];
+    const view = interaction.values?.[0] ?? "overview";
+    const player = await getPlayerById(playerId);
+    if (!player) {
+      await interaction.editReply({
+        content: "⚠️ That player is no longer in the current cycle.",
+        embeds: [],
+        components: [],
+      });
+      return;
+    }
+    const team = await getRosterFor(player.player_fullName);
+    await interaction.editReply(await renderPlayerView(player, team, view));
+  } catch (err) {
+    console.error("Player view error:", err);
+    try {
+      await interaction.followUp({
+        content: `⚠️ ${err.message || "Could not switch views."}`,
+        ephemeral: true,
+      });
+    } catch {}
+  }
+}
 
 client.on(Events.InteractionCreate, async (interaction) => {
   // Autocomplete: respond with player suggestions as the user types.
@@ -95,6 +137,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     return;
   }
+
+  // Player card view switcher — must be checked before the trade handler.
+  if (
+    interaction.isStringSelectMenu() &&
+    interaction.customId.startsWith("player_view:")
+  ) {
+    await handlePlayerViewSelect(interaction);
+    return;
+  }
+
   if (interaction.isButton() || interaction.isStringSelectMenu()) {
     await handleTradeComponent(interaction);
     return;
@@ -135,8 +187,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const byId = await getPlayerById(input);
         if (byId) {
           const team = await getRosterFor(byId.player_fullName);
-          // playerEmbed returns a full message payload (markdown content).
-          await interaction.editReply(playerEmbed(byId, team));
+          // playerEmbed returns a full message payload (markdown + dropdown).
+          await interaction.editReply(await renderPlayerView(byId, team, "overview"));
           break;
         }
 
@@ -156,8 +208,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const match = matches[0];
         const team = await getRosterFor(match.player_fullName);
-        // playerEmbed returns a full message payload (markdown content).
-        await interaction.editReply(playerEmbed(match, team));
+        await interaction.editReply(await renderPlayerView(match, team, "overview"));
         break;
       }
       case "scores": {
