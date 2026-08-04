@@ -144,10 +144,8 @@ export function tradesEmbed(trades) {
   return e;
 }
 
-// Full player card — redesigned to match snallabot's cleaner style.
-// `team` is an optional Roster row giving team_abbrName for the helmet/header.
+// Full player card — snallabot-style design with excellent visual hierarchy.
 export function playerEmbed(p, team = null) {
-  const abbr = team?.team_abbrName ?? p.team_abbrName ?? "";
   const teamName = team?.team_name ?? p.team_name ?? "";
   const pos = p.player_position ?? "?";
   const gem = devEmoji(p.player_devTrait);
@@ -160,7 +158,7 @@ export function playerEmbed(p, team = null) {
     .setFooter({ text: "XCFL Vault" })
     .setTimestamp();
 
-  // OVR with dev trait
+  // OVR with dev trait in description
   e.setDescription(`${gem} **${p.player_ovr ?? "?"} OVR**`);
 
   // Bio line: age | season | height, weight
@@ -180,9 +178,11 @@ export function playerEmbed(p, team = null) {
     .filter(Boolean)
     .join(", ");
   if (hw) bits.push(hw);
-  if (bits.length) e.addFields({ name: "\u200b", value: bits.join(" | ") });
+  if (bits.length) {
+    e.addFields({ name: "\u200b", value: bits.join(" | ") });
+  }
 
-  // Contract block
+  // Contract block — clean three-line format
   const cl = p.player_contractLength;
   const yl = p.player_contractYrsLeft;
   const lengthStr = cl != null && yl != null ? `${yl}/${cl} yrs` : cl != null ? `${cl} yrs` : "—";
@@ -195,7 +195,7 @@ export function playerEmbed(p, team = null) {
     inline: false
   });
 
-  // Ratings — show the most relevant attributes that are present, two per line.
+  // Ratings — clean two-per-line format
   const RATINGS = [
     ["Speed", "spd"], ["Accel", "acc"], ["Agility", "agi"], ["Awareness", "awa"],
     ["Injury", "inj"], ["Break Tackle", "breakTackle"], ["Carrying", "carry"],
@@ -220,13 +220,23 @@ export function playerEmbed(p, team = null) {
       if (b) line += ` | **${b[0]}:** ${p[b[1]]}`;
       lines.push(line);
     }
-    e.addFields({ name: "Ratings", value: lines.join("\n").slice(0, 1024), inline: false });
+    e.addFields({
+      name: "Ratings",
+      value: lines.join("\n").slice(0, 1024),
+      inline: false
+    });
   }
 
   // Abilities
   if (Array.isArray(p.abilities) && p.abilities.length) {
     const names = p.abilities.map((a) => a.title).filter(Boolean).join(", ");
-    if (names) e.addFields({ name: "Abilities", value: names, inline: false });
+    if (names) {
+      e.addFields({
+        name: "Abilities",
+        value: names,
+        inline: false
+      });
+    }
   }
 
   return e;
