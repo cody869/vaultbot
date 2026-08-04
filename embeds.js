@@ -155,7 +155,7 @@ export function playerEmbed(p, team = null) {
   const playerUrl = `${VAULT_URL}/players/${encodeURIComponent(p.player_fullName)}`;
   const e = new EmbedBuilder()
     .setColor(VAULT_COLOR)
-    .setTitle(`${teamEmoji(abbr)} ${pos} ${p.player_fullName}`)
+    .setTitle(`${teamEmojiByName(teamName || p.team_name || "")} ${pos} ${p.player_fullName}`)
     .setURL(playerUrl)
     .setFooter({ text: "XCFL Vault" })
     .setTimestamp()
