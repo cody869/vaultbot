@@ -549,13 +549,62 @@ function comparableRatings(a, b) {
     .map((k) => [labelOf[k] ?? k, k]);
 }
 
-// Side-by-side player comparison.
-//   values — { a: number|null, b: number|null } from the trade value engine
+// Side-by-side player comparison. Rendered inside a fenced code block so
+// Discord uses a monospace font — the only way to get true column alignment,
+// since Discord markdown has no table support.
+const CMP_LABEL_W = 13; // stat label column
+const CMP_VAL_W = 9;    // each player's value column
+const CMP_MARK_W = 3;   // the center column holding < or >
+
+// Generational suffixes are not surnames — "Patrick Surtain II" should
+// shorten to "Surtain", not "II".
+const NAME_SUFFIXES = new Set([
+  "jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v", "vi",
+]);
+
+// Short, column-friendly name: surname, clipped to the column width.
+function shortName(fullName) {
+  const parts = String(fullName ?? "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  let i = parts.length - 1;
+  while (i > 0 && NAME_SUFFIXES.has(parts[i].toLowerCase())) i--;
+  return parts[i].slice(0, CMP_VAL_W);
+}
+
+// One aligned row. The left value is right-aligned and the right value is
+// left-aligned, so both hug the centre marker and each value clearly belongs
+// to the player named above its column.
+function cmpRow(label, a, b, { compare = true } = {}) {
+  const left = a == null || a === "" ? "—" : String(a);
+  const right = b == null || b === "" ? "—" : String(b);
+
+  let mark = "   ";
+  if (compare && typeof a === "number" && typeof b === "number") {
+    if (a > b) mark = " < ";
+    else if (b > a) mark = " > ";
+  }
+
+  return (
+    String(label).slice(0, CMP_LABEL_W).padEnd(CMP_LABEL_W) +
+    left.slice(0, CMP_VAL_W).padStart(CMP_VAL_W) +
+    mark +
+    right.slice(0, CMP_VAL_W).padEnd(CMP_VAL_W)
+  ).trimEnd();
+}
+
+// Placeholder — real width is computed once every row is built, so the rule
+// matches the widest line instead of overrunning it.
+const CMP_DIV = "\u0000DIV\u0000";
+function cmpDivider() {
+  return CMP_DIV;
+}
+
 export function compareEmbed(a, b, teamA = null, teamB = null, values = {}) {
   const nameA = a.player_fullName;
   const nameB = b.player_fullName;
   const logoA = teamEmojiByName(teamA?.team_name ?? a.team_name ?? "");
   const logoB = teamEmojiByName(teamB?.team_name ?? b.team_name ?? "");
+  const samePos = a.player_position === b.player_position;
 
   const out = [];
   out.push(`# ⚖️ ${nameA} vs ${nameB}`);
@@ -563,76 +612,98 @@ export function compareEmbed(a, b, teamA = null, teamB = null, values = {}) {
     `### ${logoA} ${devEmoji(a.player_devTrait)} ${a.player_ovr ?? "?"} OVR ` +
       `**vs** ${logoB} ${devEmoji(b.player_devTrait)} ${b.player_ovr ?? "?"} OVR`
   );
-
-  const posLine = `**${a.player_position ?? "?"}** vs **${b.player_position ?? "?"}**`;
-  if (a.player_position !== b.player_position) {
-    out.push(`${posLine} — *different positions, comparing athletic traits*`);
-  } else {
-    out.push(posLine);
+  if (!samePos) {
+    out.push(
+      `*${a.player_position ?? "?"} vs ${b.player_position ?? "?"} — different positions, comparing athletic traits*`
+    );
   }
+
+  // Everything below lives in one monospace block so the columns line up.
+  const rows = [];
+
+  // Header: player names over their own columns.
+  rows.push(
+    (
+      "".padEnd(CMP_LABEL_W) +
+      shortName(nameA).padStart(CMP_VAL_W) +
+      "".padEnd(CMP_MARK_W) +
+      shortName(nameB).padEnd(CMP_VAL_W)
+    ).trimEnd()
+  );
+  rows.push(cmpDivider());
+
+  // Core profile
+  rows.push(cmpRow("Overall", a.player_ovr, b.player_ovr));
+  rows.push(cmpRow("Position", a.player_position, b.player_position, { compare: false }));
+  rows.push(cmpRow("Age", a.player_age, b.player_age, { compare: false }));
+  if (a.player_yrsPro != null || b.player_yrsPro != null) {
+    rows.push(
+      cmpRow(
+        "Season",
+        a.player_yrsPro != null ? a.player_yrsPro + 1 : null,
+        b.player_yrsPro != null ? b.player_yrsPro + 1 : null,
+        { compare: false }
+      )
+    );
+  }
+  rows.push(
+    cmpRow("Dev Trait", a.player_devTrait, b.player_devTrait, { compare: false })
+  );
+
+  // Contract
+  rows.push(cmpDivider());
+  rows.push(
+    cmpRow(
+      "Yrs Left",
+      a.player_contractYrsLeft,
+      b.player_contractYrsLeft,
+      { compare: false }
+    )
+  );
+  rows.push(
+    cmpRow("Cap Hit", fmtMoney(a.player_capHit), fmtMoney(b.player_capHit), {
+      compare: false,
+    })
+  );
+  rows.push(
+    cmpRow("Salary", fmtMoney(a.player_contractSalary), fmtMoney(b.player_contractSalary), {
+      compare: false,
+    })
+  );
 
   // Trade value, when the engine is available.
   if (values.a != null || values.b != null) {
-    const va = values.a ?? 0;
-    const vb = values.b ?? 0;
-    const diff = va - vb;
-    const edge =
-      diff === 0
-        ? "even"
-        : diff > 0
-          ? `**${nameA}** +${diff}`
-          : `**${nameB}** +${Math.abs(diff)}`;
-    out.push("");
-    out.push("**Trade Value**");
-    out.push(`> ${values.a ?? "—"} vs ${values.b ?? "—"} — edge: ${edge}`);
+    rows.push(cmpDivider());
+    rows.push(cmpRow("Trade Value", values.a, values.b));
   }
 
-  // Bio comparison
-  out.push("");
-  out.push("**Profile**");
-  const bio = (p) => {
-    const age = p.player_age != null ? `${p.player_age}y` : "—";
-    const yrs = p.player_yrsPro != null ? `${p.player_yrsPro + 1} szn` : "—";
-    return `${age} · ${yrs}`;
-  };
-  out.push(`> **Age/Exp:** ${bio(a)} | ${bio(b)}`);
-  out.push(
-    `> **Dev:** ${a.player_devTrait ?? "—"} | ${b.player_devTrait ?? "—"}`
-  );
-  const contract = (p) => {
-    const yl = p.player_contractYrsLeft;
-    const cl = p.player_contractLength;
-    const len = yl != null && cl != null ? `${yl}/${cl}y` : "—";
-    return `${len} · ${fmtMoney(p.player_capHit)}`;
-  };
-  out.push(`> **Contract/Cap:** ${contract(a)} | ${contract(b)}`);
-
-  // Ratings with a winner marker per row
+  // Ratings
   const pairs = comparableRatings(a, b);
   if (pairs.length) {
-    out.push("");
-    out.push("**Ratings**");
+    rows.push(cmpDivider());
     for (const [label, key] of pairs) {
-      const va = a[key];
-      const vb = b[key];
-      let mark = "  ";
-      if (va != null && vb != null) {
-        if (va > vb) mark = "◀ ";
-        else if (vb > va) mark = "▶ ";
-      }
-      out.push(`> ${mark}**${label}:** ${va ?? "—"} vs ${vb ?? "—"}`);
+      rows.push(cmpRow(label, a[key], b[key]));
     }
-    out.push(`-# ◀ favors ${nameA} · ▶ favors ${nameB}`);
   }
 
-  out.push("");
+  // Size the dividers to the widest actual row.
+  const width = Math.max(
+    ...rows.filter((r) => r !== CMP_DIV).map((r) => r.length)
+  );
+  const ruled = rows.map((r) => (r === CMP_DIV ? "-".repeat(width) : r));
+
+  out.push("```");
+  out.push(ruled.join("\n"));
+  out.push("```");
+  out.push(`-# \`<\` favors ${shortName(nameA)} · \`>\` favors ${shortName(nameB)}`);
+
   out.push(
     `-# [${nameA}](<${VAULT_URL}/players/${encodeURIComponent(nameA)}>) · ` +
       `[${nameB}](<${VAULT_URL}/players/${encodeURIComponent(nameB)}>)`
   );
 
   let content = out.join("\n");
-  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  if (content.length > 2000) content = content.slice(0, 1994) + "…\n```";
   return { content, embeds: [], components: [] };
 }
 
