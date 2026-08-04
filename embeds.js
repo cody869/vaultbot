@@ -515,3 +515,247 @@ export function scoresEmbed({ season, week, games }) {
   });
   return e.setDescription(lines.join("\n"));
 }
+
+// ===== /compare, /team, /rivalry, /myteam ================================
+
+// Ratings worth comparing, by position group — reuses the /player mapping.
+function comparableRatings(a, b) {
+  const groupA = positionGroup(a.player_position);
+  const groupB = positionGroup(b.player_position);
+  // Same position group -> that group's keys. Mixed -> shared athletic core.
+  const keys =
+    groupA && groupA === groupB
+      ? POSITION_RATINGS[groupA]
+      : ["spd", "acc", "agi", "str", "awa", "inj", "playRecog"];
+  const labelOf = Object.fromEntries(ALL_RATINGS.map(([l, k]) => [k, l]));
+  return keys
+    .filter((k) => a[k] != null || b[k] != null)
+    .slice(0, 12)
+    .map((k) => [labelOf[k] ?? k, k]);
+}
+
+// Side-by-side player comparison.
+//   values — { a: number|null, b: number|null } from the trade value engine
+export function compareEmbed(a, b, teamA = null, teamB = null, values = {}) {
+  const nameA = a.player_fullName;
+  const nameB = b.player_fullName;
+  const logoA = teamEmojiByName(teamA?.team_name ?? a.team_name ?? "");
+  const logoB = teamEmojiByName(teamB?.team_name ?? b.team_name ?? "");
+
+  const out = [];
+  out.push(`# ⚖️ ${nameA} vs ${nameB}`);
+  out.push(
+    `### ${logoA} ${devEmoji(a.player_devTrait)} ${a.player_ovr ?? "?"} OVR ` +
+      `**vs** ${logoB} ${devEmoji(b.player_devTrait)} ${b.player_ovr ?? "?"} OVR`
+  );
+
+  const posLine = `**${a.player_position ?? "?"}** vs **${b.player_position ?? "?"}**`;
+  if (a.player_position !== b.player_position) {
+    out.push(`${posLine} — *different positions, comparing athletic traits*`);
+  } else {
+    out.push(posLine);
+  }
+
+  // Trade value, when the engine is available.
+  if (values.a != null || values.b != null) {
+    const va = values.a ?? 0;
+    const vb = values.b ?? 0;
+    const diff = va - vb;
+    const edge =
+      diff === 0
+        ? "even"
+        : diff > 0
+          ? `**${nameA}** +${diff}`
+          : `**${nameB}** +${Math.abs(diff)}`;
+    out.push("");
+    out.push("**Trade Value**");
+    out.push(`> ${values.a ?? "—"} vs ${values.b ?? "—"} — edge: ${edge}`);
+  }
+
+  // Bio comparison
+  out.push("");
+  out.push("**Profile**");
+  const bio = (p) => {
+    const age = p.player_age != null ? `${p.player_age}y` : "—";
+    const yrs = p.player_yrsPro != null ? `${p.player_yrsPro + 1} szn` : "—";
+    return `${age} · ${yrs}`;
+  };
+  out.push(`> **Age/Exp:** ${bio(a)} | ${bio(b)}`);
+  out.push(
+    `> **Dev:** ${a.player_devTrait ?? "—"} | ${b.player_devTrait ?? "—"}`
+  );
+  const contract = (p) => {
+    const yl = p.player_contractYrsLeft;
+    const cl = p.player_contractLength;
+    const len = yl != null && cl != null ? `${yl}/${cl}y` : "—";
+    return `${len} · ${fmtMoney(p.player_capHit)}`;
+  };
+  out.push(`> **Contract/Cap:** ${contract(a)} | ${contract(b)}`);
+
+  // Ratings with a winner marker per row
+  const pairs = comparableRatings(a, b);
+  if (pairs.length) {
+    out.push("");
+    out.push("**Ratings**");
+    for (const [label, key] of pairs) {
+      const va = a[key];
+      const vb = b[key];
+      let mark = "  ";
+      if (va != null && vb != null) {
+        if (va > vb) mark = "◀ ";
+        else if (vb > va) mark = "▶ ";
+      }
+      out.push(`> ${mark}**${label}:** ${va ?? "—"} vs ${vb ?? "—"}`);
+    }
+    out.push(`-# ◀ favors ${nameA} · ▶ favors ${nameB}`);
+  }
+
+  out.push("");
+  out.push(
+    `-# [${nameA}](<${VAULT_URL}/players/${encodeURIComponent(nameA)}>) · ` +
+      `[${nameB}](<${VAULT_URL}/players/${encodeURIComponent(nameB)}>)`
+  );
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  return { content, embeds: [], components: [] };
+}
+
+// Team card — record, owner, cap, top roster, trade block.
+export function teamEmbed(data) {
+  if (!data.found) {
+    const out = [`# 🔍 No team matching "${data.query}"`, ""];
+    if (data.teams?.length) {
+      out.push("**Try one of these:**");
+      out.push(data.teams.map((t) => `${teamEmojiByName(t)} ${t}`).join("\n").slice(0, 1500));
+    }
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  const { teamName, owner, record, roster, block, cap } = data;
+  const out = [];
+  out.push(`# ${teamEmojiByName(teamName)} ${teamName}`);
+
+  if (record) {
+    const rec = `${record.wins ?? 0}-${record.losses ?? 0}${record.ties ? `-${record.ties}` : ""}`;
+    const seed = record.seed ? ` · #${record.seed} seed` : "";
+    out.push(`### ${rec}${seed}${record.season != null ? ` · Season ${record.season}` : ""}`);
+  }
+  if (owner) out.push(`**Owner:** ${owner}`);
+
+  if (cap) {
+    const bits = [];
+    if (cap.grade != null) bits.push(`Grade **${cap.grade}**`);
+    if (cap.cap_ecs2026 != null) bits.push(`Cap space **$${cap.cap_ecs2026}M**`);
+    if (cap.draft_score != null) bits.push(`Draft **${cap.draft_score}**`);
+    if (bits.length) {
+      out.push("");
+      out.push("**Outlook**");
+      out.push(`> ${bits.join(" · ")}`);
+    }
+  }
+
+  const top = roster.filter((r) => r.player_ovr != null).slice(0, 8);
+  if (top.length) {
+    out.push("");
+    out.push(`**Top Players** *(${roster.length} on roster)*`);
+    for (const r of top) {
+      const url = `${VAULT_URL}/players/${encodeURIComponent(r.player_fullName)}`;
+      out.push(
+        `> [**${r.player_fullName}**](<${url}>) — ${r.player_position ?? "?"} · ${r.player_ovr} OVR`
+      );
+    }
+  }
+
+  if (block?.length) {
+    const players = block.filter((e) => e.entry_type !== "pick");
+    const picks = block.filter((e) => e.entry_type === "pick");
+    out.push("");
+    out.push("**On the Trade Block**");
+    for (const e of players.slice(0, 5)) {
+      out.push(`> ${e.player_fullName} — ${e.player_position ?? "?"} · ${e.player_ovr ?? "?"} OVR`);
+    }
+    for (const e of picks.slice(0, 3)) out.push(`> ${e.pick_label ?? "Pick"}`);
+    const extra = block.length - Math.min(players.length, 5) - Math.min(picks.length, 3);
+    if (extra > 0) out.push(`-# …and ${extra} more`);
+  }
+
+  out.push("");
+  out.push(`-# [View on XCFL Vault](<${VAULT_URL}/trade-block>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  return { content, embeds: [], components: [] };
+}
+
+// Head-to-head record between two league members.
+export function rivalryEmbed(r) {
+  if (!r) {
+    return {
+      content: "⚠️ Could not build that rivalry — check both usernames.",
+      embeds: [],
+      components: [],
+    };
+  }
+
+  const total = (r.user1_wins ?? 0) + (r.user2_wins ?? 0) + (r.ties ?? 0);
+  const out = [];
+  out.push(`# ⚔️ ${r.user1} vs ${r.user2}`);
+
+  if (!total) {
+    out.push("");
+    out.push("These two have never played each other.");
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  out.push(`### ${r.user1_wins}–${r.user2_wins}${r.ties ? `–${r.ties}` : ""}`);
+
+  const leader =
+    r.user1_wins > r.user2_wins
+      ? `**${r.user1}** leads the all-time series`
+      : r.user2_wins > r.user1_wins
+        ? `**${r.user2}** leads the all-time series`
+        : "All square";
+  out.push(`${leader} · ${total} meeting${total === 1 ? "" : "s"}`);
+
+  if (r.games?.length) {
+    out.push("");
+    out.push("**Recent Meetings**");
+    for (const g of r.games) {
+      const label = [
+        g.season != null ? `S${g.season}` : null,
+        g.week != null ? `W${g.week}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const aWon = g.aScore > g.bScore;
+      const bWon = g.bScore > g.aScore;
+      const left = aWon ? `**${g.aScore}**` : `${g.aScore}`;
+      const right = bWon ? `**${g.bScore}**` : `${g.bScore}`;
+      out.push(`> ${label} — ${r.user1} ${left} – ${right} ${r.user2}`);
+    }
+  }
+
+  if (r.source === "games") {
+    out.push("");
+    out.push("-# Tallied live from game history.");
+  }
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  return { content, embeds: [], components: [] };
+}
+
+// Shown when a Discord account isn't linked to a league member.
+export function notLinkedEmbed(discordTag) {
+  const out = [
+    "# 🔗 Account not linked",
+    "",
+    `Your Discord account (**${discordTag}**) isn't linked to a league member yet.`,
+    "",
+    "An admin can link it by setting **discord_user_id** on your LeagueMember record in the Vault.",
+    "",
+    `-# [Open XCFL Vault](<${VAULT_URL}>)`,
+  ];
+  return { content: out.join("\n"), embeds: [], components: [] };
+}
