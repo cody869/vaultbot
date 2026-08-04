@@ -71,53 +71,105 @@ export function powerRankingsEmbed({ week, rows }) {
   return e.setDescription(lines.join("\n"));
 }
 
+// Trade block — plain markdown message matching the /player card style.
+// Returns a message payload; pass it straight to editReply.
 export function tradeBlockEmbed({ team, entries }) {
-  // Team-specific title with helmet; otherwise the league-wide block.
-  const title = team
-    ? `${teamEmojiByName(team)} ${team} — Trade Block`
-    : "🔁 Trade Block";
-  const e = base(title);
+  const out = [];
 
-  // Set URL to the trade-block page
-  e.setURL(`${VAULT_URL}/trade-block`);
+  if (team) {
+    out.push(`# ${teamEmojiByName(team)} ${team}`);
+    out.push(`### Trade Block`);
+  } else {
+    out.push(`# 🔁 Trade Block`);
+  }
 
   if (!entries.length) {
-    return e.setDescription(
+    out.push("");
+    out.push(
       team
         ? `**${team}** has nothing on the block right now.`
         : "Nothing on the block right now."
     );
+    out.push("");
+    out.push(`-# [View on XCFL Vault](<${VAULT_URL}/trade-block>)`);
+    return { content: out.join("\n"), embeds: [], components: [] };
   }
 
-  // Group entries by team for cleaner display
-  const byTeam = {};
-  entries.slice(0, 25).forEach((t) => {
-    if (!byTeam[t.team_name]) byTeam[t.team_name] = [];
-    byTeam[t.team_name].push(t);
-  });
-
-  // Add fields for each team's entries
-  for (const teamName of Object.keys(byTeam).sort()) {
-    const teamEntries = byTeam[teamName];
-    const lines = teamEntries.map((t) => {
-      if (t.entry_type === "pick") {
-        return `**${t.pick_label ?? "Pick"}**${t.pick_notes ? ` *(${t.pick_notes})*` : ""}`;
-      }
-
-      const ovr = t.player_ovr ? ` ${t.player_ovr} OVR` : "";
-      const tradeValue = t.trade_value ? ` • TV: ${t.trade_value}` : "";
-      return `**${t.player_fullName}** (${t.player_position ?? "?"}${ovr}${tradeValue})`;
-    });
-
-    const logo = teamEmojiByName(teamName);
-    e.addFields({
-      name: `${logo} ${teamName}`,
-      value: lines.join("\n"),
-      inline: false,
-    });
+  // Group by team so each franchise gets its own headed section.
+  const byTeam = new Map();
+  for (const t of entries) {
+    const key = t.team_name ?? "—";
+    if (!byTeam.has(key)) byTeam.set(key, []);
+    byTeam.get(key).push(t);
   }
 
-  return e;
+  const totalPlayers = entries.filter((t) => t.entry_type !== "pick").length;
+  const totalPicks = entries.filter((t) => t.entry_type === "pick").length;
+  const summary = [
+    totalPlayers ? `${totalPlayers} player${totalPlayers === 1 ? "" : "s"}` : null,
+    totalPicks ? `${totalPicks} pick${totalPicks === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (summary) out.push(`**${summary}** across ${byTeam.size} team${byTeam.size === 1 ? "" : "s"}`);
+
+  let shown = 0;
+  let truncated = false;
+
+  for (const [teamName, items] of [...byTeam.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0])
+  )) {
+    // Players first (highest OVR first), then picks.
+    const players = items
+      .filter((t) => t.entry_type !== "pick")
+      .sort((a, b) => (b.player_ovr ?? 0) - (a.player_ovr ?? 0));
+    const picks = items.filter((t) => t.entry_type === "pick");
+
+    const lines = [];
+
+    for (const t of players) {
+      const url = `${VAULT_URL}/players/${encodeURIComponent(t.player_fullName)}`;
+      const meta = [
+        t.player_position ?? "?",
+        t.player_ovr != null ? `${t.player_ovr} OVR` : null,
+        t.trade_value != null ? `TV ${t.trade_value}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      // Angle brackets stop Discord unfurling a preview for each link.
+      lines.push(`> [**${t.player_fullName}**](<${url}>) — ${meta}`);
+      shown++;
+    }
+
+    for (const t of picks) {
+      const notes = t.pick_notes ? ` *(${t.pick_notes})*` : "";
+      lines.push(`> **${t.pick_label ?? "Pick"}**${notes}`);
+      shown++;
+    }
+
+    if (!lines.length) continue;
+
+    const block = [``, `**${teamEmojiByName(teamName)} ${teamName}**`, ...lines];
+    // Keep room for the footer line before Discord's 2000-char ceiling.
+    if (out.join("\n").length + block.join("\n").length > 1850) {
+      truncated = true;
+      break;
+    }
+    out.push(...block);
+  }
+
+  if (truncated) {
+    out.push("");
+    out.push(`-# …and more — ${entries.length - shown} entries not shown.`);
+  }
+
+  out.push("");
+  out.push(`-# [View the full trade block](<${VAULT_URL}/trade-block>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+
+  return { content, embeds: [], components: [] };
 }
 
 // Shown when a team filter matches nothing — lists teams that do have entries.
