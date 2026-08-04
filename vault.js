@@ -395,21 +395,56 @@ export async function getTradeBlockTeams() {
 // Cache the full player list briefly so autocomplete (which fires on every
 // keystroke) doesn't hit the API repeatedly.
 let _playerCache = { at: 0, rows: [] };
-const PLAYER_TTL_MS = 60_000; // 1 minute
+let _playerRefresh = null; // in-flight load, shared by concurrent callers
+const PLAYER_TTL_MS = 300_000; // 5 minutes — refreshes happen in background
 
-async function getAllPlayers() {
-  const now = Date.now();
-  if (now - _playerCache.at < PLAYER_TTL_MS && _playerCache.rows.length) {
-    return _playerCache.rows;
-  }
+async function loadPlayers() {
   const cycle = await getCurrentCycle();
   const allRows = await list("Player", {}, { limit: 10000 });
   // Filter to the current cycle in memory — the server-side filter can't be
   // relied on, and stale-cycle players are the exact bug we're avoiding.
   const rows = allRows.filter((p) => p.cycle === cycle);
   console.log(`[PLAYER] ${allRows.length} total -> ${rows.length} in cycle ${cycle}`);
-  _playerCache = { at: now, rows };
+  _playerCache = { at: Date.now(), rows };
   return rows;
+}
+
+// Kick off a refresh without blocking the caller. Multiple callers share the
+// same in-flight promise so we never stack duplicate 10k-row fetches.
+function refreshPlayersInBackground() {
+  if (_playerRefresh) return _playerRefresh;
+  _playerRefresh = loadPlayers()
+    .catch((err) => {
+      console.error("[PLAYER] background refresh failed:", err.message);
+      return _playerCache.rows;
+    })
+    .finally(() => {
+      _playerRefresh = null;
+    });
+  return _playerRefresh;
+}
+
+// Warm the cache at startup so the very first autocomplete is instant.
+export async function warmPlayerCache() {
+  try {
+    await loadPlayers();
+    console.log("🔥 Player cache warmed.");
+  } catch (err) {
+    console.error("[PLAYER] warm failed:", err.message);
+  }
+}
+
+// Cached player list. Never blocks on a refresh if we already have rows —
+// Discord gives autocomplete only 3 seconds, and a cold fetch blows past it.
+async function getAllPlayers() {
+  const fresh = Date.now() - _playerCache.at < PLAYER_TTL_MS;
+  if (_playerCache.rows.length) {
+    // Stale but usable: hand back what we have and refresh behind the scenes.
+    if (!fresh) refreshPlayersInBackground();
+    return _playerCache.rows;
+  }
+  // Nothing cached at all — we have to wait for the first load.
+  return refreshPlayersInBackground();
 }
 
 // Suggestions for autocomplete. Returns up to `limit` players ranked by how
