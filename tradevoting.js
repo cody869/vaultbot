@@ -14,6 +14,7 @@ import {
 import { teamEmojiByName, devEmoji } from "./emoji.js";
 import {
   getPendingTrades,
+  getAllTrades,
   getTradeById,
   getPlayersByNames,
   getMemberByDiscordId,
@@ -23,6 +24,9 @@ import {
 
 const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 const TRADE_CHANNEL_ID = process.env.TRADE_CHANNEL_ID || null;
+// Approved trades are announced here. Rejections are resolved silently —
+// the review card updates in place and nothing else is posted.
+const TRADE_ANNOUNCE_CHANNEL_ID = process.env.TRADE_ANNOUNCE_CHANNEL_ID || null;
 
 // How often to look for newly submitted trades to post.
 const WATCH_INTERVAL_MS = 60_000;
@@ -341,6 +345,13 @@ export async function handleTradeVote(interaction) {
     const players = await playersForTrade(updated);
     await interaction.editReply(tradeMessage(updated, players));
 
+    // Approvals get announced publicly; rejections resolve silently.
+    if (status === "approved") {
+      await announceApproval(interaction.client, updated);
+    } else if (status === "rejected") {
+      announced.add(tradeId); // decided — the watcher should not revisit it
+    }
+
     if (status !== "pending" && status !== (trade.status ?? "pending")) {
       await interaction.followUp({
         content: `${notice} That decides it — the trade is **${status}**.`,
@@ -364,6 +375,84 @@ export async function handleTradeVote(interaction) {
   }
 }
 
+// ---- approval announcements ---------------------------------------------
+
+// Trades we've already announced, so a restart or a second vote can't double
+// post. Seeded at startup with everything already decided.
+const announced = new Set();
+
+// The public "this trade went through" post. Deliberately lighter than the
+// review card: what moved, who won the vote, and a link.
+export function approvalMessage(trade, players = new Map()) {
+  const t1 = trade.team1 ?? "Team 1";
+  const t2 = trade.team2 ?? "Team 2";
+  const votes = Array.isArray(trade.votes) ? trade.votes : [];
+  const approve = votes.filter((v) => v.vote === "approve");
+  const reject = votes.filter((v) => v.vote === "reject");
+
+  const out = [];
+  out.push(`# ✅ Trade Approved`);
+  out.push(`### ${teamEmojiByName(t1)} ${t1}  ↔  ${teamEmojiByName(t2)} ${t2}`);
+
+  const sideBlock = (teamName, playerNames = [], picks = []) => {
+    const lines = [``, `**${teamEmojiByName(teamName)} ${teamName} receives**`];
+    if (!playerNames.length && !picks.length) {
+      lines.push("> *nothing*");
+      return lines;
+    }
+    for (const n of playerNames) {
+      lines.push(playerLine(n, players.get(String(n).toLowerCase())));
+    }
+    for (const p of picks) lines.push(`> Pick: **${p}**`);
+    return lines;
+  };
+
+  // Each team receives what the OTHER side sent.
+  out.push(...sideBlock(t1, trade.team2_players, trade.team2_picks));
+  out.push(...sideBlock(t2, trade.team1_players, trade.team1_picks));
+
+  out.push("");
+  out.push(
+    `-# Approved ${approve.length}\u2013${reject.length}` +
+      (approve.length ? ` — ${approve.map((v) => v.voter_name).join(", ")}` : "")
+  );
+  out.push(`-# [View in XCFL Vault](<${VAULT_URL}/trades>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "\u2026";
+  return { content, embeds: [], components: [] };
+}
+
+// Post the approval announcement, once per trade.
+export async function announceApproval(client, trade) {
+  if (announced.has(trade.id)) return null;
+  announced.add(trade.id); // claim it up front so a race can't double-post
+
+  if (!TRADE_ANNOUNCE_CHANNEL_ID) {
+    console.log("[TRADE VOTE] TRADE_ANNOUNCE_CHANNEL_ID not set — skipping announcement.");
+    return null;
+  }
+  const channel = await client.channels
+    .fetch(TRADE_ANNOUNCE_CHANNEL_ID)
+    .catch(() => null);
+  if (!channel) {
+    console.error(`[TRADE VOTE] announce channel ${TRADE_ANNOUNCE_CHANNEL_ID} not found.`);
+    announced.delete(trade.id); // let a later tick retry
+    return null;
+  }
+
+  try {
+    const players = await playersForTrade(trade);
+    const msg = await channel.send(approvalMessage(trade, players));
+    console.log(`[TRADE VOTE] announced approved trade ${trade.id}`);
+    return msg;
+  } catch (err) {
+    console.error("[TRADE VOTE] announcement failed:", err.message);
+    announced.delete(trade.id);
+    return null;
+  }
+}
+
 // ---- watcher -------------------------------------------------------------
 
 // Poll for pending trades that haven't been posted yet and post them.
@@ -373,23 +462,59 @@ export function startTradeWatcher(client) {
     return;
   }
 
+  // On startup, treat everything already decided as announced so a restart
+  // never replays old approvals into the channel.
+  const seed = async () => {
+    try {
+      const all = await getAllTrades();
+      let n = 0;
+      for (const t of all) {
+        if ((t.status ?? "pending") !== "pending") {
+          announced.add(t.id);
+          n++;
+        }
+      }
+      console.log(`[TRADE VOTE] seeded ${n} already-decided trade(s).`);
+    } catch (err) {
+      console.error("[TRADE VOTE] seed failed:", err.message);
+    }
+  };
+
   const tick = async () => {
     try {
+      // 1) Post newly submitted trades for review.
       const pending = await getPendingTrades();
       const unposted = pending.filter((t) => !t.discord_message_id);
-      if (!unposted.length) return;
-      console.log(`[TRADE VOTE] ${unposted.length} trade(s) to post.`);
-      // Oldest first so the channel reads in submission order.
-      for (const trade of unposted.reverse()) {
-        await postTrade(client, trade);
+      if (unposted.length) {
+        console.log(`[TRADE VOTE] ${unposted.length} trade(s) to post.`);
+        // Oldest first so the channel reads in submission order.
+        for (const trade of unposted.reverse()) {
+          await postTrade(client, trade);
+        }
+      }
+
+      // 2) Announce approvals — including ones decided in the app rather than
+      //    through the Discord buttons. Rejections stay silent.
+      const all = await getAllTrades();
+      for (const t of all) {
+        if (t.status === "approved" && !announced.has(t.id)) {
+          await announceApproval(client, t);
+        } else if (t.status === "rejected" || t.status === "vetoed") {
+          announced.add(t.id);
+        }
       }
     } catch (err) {
       console.error("[TRADE VOTE] watcher error:", err.message);
     }
   };
 
-  // First sweep shortly after startup, then on an interval.
-  setTimeout(tick, 10_000);
-  setInterval(tick, WATCH_INTERVAL_MS);
-  console.log(`🗳️  Trade voting watcher started (channel ${TRADE_CHANNEL_ID}).`);
+  // Seed first, then sweep shortly after startup and on an interval.
+  seed().then(() => {
+    setTimeout(tick, 10_000);
+    setInterval(tick, WATCH_INTERVAL_MS);
+  });
+  console.log(
+    `Trade voting watcher started (review: ${TRADE_CHANNEL_ID}` +
+      `, announce: ${TRADE_ANNOUNCE_CHANNEL_ID ?? "not set"}).`
+  );
 }
