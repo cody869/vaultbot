@@ -298,13 +298,14 @@ function weeklyStatLine(w) {
   return parts.join(" • ");
 }
 
-// Season-total lines for one season across the four stat entities.
-function seasonStatLines(season, stats) {
+// Season-total lines for one merged season row:
+// { season, gamesPlayed, passing?, rushing?, receiving?, defense? }
+function seasonStatLines(row) {
   const parts = [];
-  const pass = stats.passing.find((r) => r.season_number === season);
-  const rush = stats.rushing.find((r) => r.season_number === season);
-  const rec = stats.receiving.find((r) => r.season_number === season);
-  const def = stats.defense.find((r) => r.season_number === season);
+  const pass = row.passing;
+  const rush = row.rushing;
+  const rec = row.receiving;
+  const def = row.defense;
   if (pass) {
     parts.push(
       `Pass: ${pass.passTotalComp ?? 0}/${pass.passTotalAtt ?? 0}, ${pass.passTotalYds ?? 0} yds, ${pass.passTotalTDs ?? 0} TD, ${pass.passTotalInts ?? 0} INT`
@@ -373,7 +374,9 @@ export function playerEmbed(p, team = null, view = "overview", data = {}) {
   }
 
   if (view === "weekly") {
-    const { season = null, weeks = [] } = data.weekly ?? {};
+    const { season = null, weeks: allWeeks = [] } = data.weekly ?? {};
+    // Newest weeks first; cap so we stay under Discord's 2000-char limit.
+    const weeks = allWeeks.slice(0, 12);
     out.push("");
     out.push(`**Weekly Stats${season != null ? ` — Season ${season}` : ""}**`);
     if (!weeks.length) {
@@ -391,25 +394,22 @@ export function playerEmbed(p, team = null, view = "overview", data = {}) {
   }
 
   if (view === "season") {
-    const stats = data.season ?? { passing: [], rushing: [], receiving: [], defense: [] };
-    const seasons = [
-      ...new Set(
-        [...stats.passing, ...stats.rushing, ...stats.receiving, ...stats.defense]
-          .map((r) => r.season_number)
-          .filter((s) => s != null)
-      ),
-    ].sort((a, b) => b - a);
-
+    // getPlayerSeasonStats returns rows sorted newest season first.
+    const rows = Array.isArray(data.season) ? data.season : [];
     out.push("");
     out.push("**Season Stats**");
-    if (!seasons.length) {
+    if (!rows.length) {
       out.push("> No season stats on file for this player.");
     } else {
-      for (const s of seasons.slice(0, 8)) {
-        const parts = seasonStatLines(s, stats);
+      let any = false;
+      for (const row of rows.slice(0, 8)) {
+        const parts = seasonStatLines(row);
         if (!parts.length) continue;
-        out.push(`> **Season ${s}** — ${parts.join(" • ")}`);
+        any = true;
+        const gp = row.gamesPlayed ? ` (${row.gamesPlayed} GP)` : "";
+        out.push(`> **Season ${row.season}**${gp} — ${parts.join(" • ")}`);
       }
+      if (!any) out.push("> No recorded stats in these seasons.");
     }
   }
 
