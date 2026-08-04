@@ -1,483 +1,761 @@
-// index.js — the XCFL Vault Discord bot.
-import "dotenv/config";
-import { Client, GatewayIntentBits, Events } from "discord.js";
-import { loadEmoji } from "./emoji.js";
-import { registerCommands } from "./deploy-commands.js";
-import { startScheduler } from "./scheduler.js";
-import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.js";
-import bugReportCommands from "./bugReport.js";
+// embeds.js — turns Vault data into pretty Discord embeds.
 import {
-  getStandings,
-  getStatLeaders,
-  getPowerRankings,
-  getTradeBlock,
-  getTradeBlockTeams,
-  getTrades,
-  getPlayer,
-  getPlayerById,
-  suggestPlayers,
-  getScores,
-  getScoreWeeks,
-  getRosterFor,
-  getPlayerWeeklyStats,
-  getPlayerSeasonStats,
-  getTeamOverview,
-  getRivalry,
-  getMemberByDiscordId,
-  suggestMembers,
-  playerTradeValue,
-  warmPlayerCache,
-  botLogin,
-} from "./vault.js";
-import {
-  standingsEmbed,
-  statLeadersEmbed,
-  powerRankingsEmbed,
-  tradeBlockEmbed,
-  tradeBlockNoTeamEmbed,
-  tradesEmbed,
-  playerEmbed,
-  playerChoicesEmbed,
-  scoresEmbed,
-  compareEmbed,
-  teamEmbed,
-  rivalryEmbed,
-  notLinkedEmbed,
-} from "./embeds.js";
+  EmbedBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+} from "discord.js";
+import { teamEmoji, teamEmojiByName, devEmoji } from "./emoji.js";
 
-if (!process.env.DISCORD_TOKEN) {
-  console.error("Missing DISCORD_TOKEN in environment. See README.");
-  process.exit(1);
+const VAULT_COLOR = 0x1d4ed8; // XCFL blue
+const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
+
+function fmtMoney(m) {
+  if (m == null) return "—";
+  const n = Number(m);
+  // Values arrive in raw dollars (e.g. 1130000) — show as $1.13M.
+  // If a value is already small (< 1000) assume it's already in millions.
+  const millions = n >= 1000 ? n / 1_000_000 : n;
+  return `$${millions.toFixed(2)}M`;
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-client.once(Events.ClientReady, async (c) => {
-  console.log(`✅ XCFL Vault bot online as ${c.user.tag}`);
-  // Authenticate to Base44 first (needed once the app requires login).
-  await botLogin();
-  // Always re-register on startup so the registered commands match this code
-  // (including autocomplete and option changes). Discord replaces the full set.
-  await registerCommands();
-  await loadEmoji(c);
-  // Warm the player cache before anyone can type — Discord gives autocomplete
-  // only 3 seconds, which a cold 10k-row fetch cannot meet.
-  await warmPlayerCache();
-  // Keep it warm so a refresh never lands in the middle of a keystroke.
-  setInterval(() => {
-    warmPlayerCache().catch(() => {});
-  }, 240_000);
-  startScheduler(c);
-});
-
-// Reject instead of hanging forever if a Vault read stalls.
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
-    ),
-  ]);
+function base(title) {
+  return new EmbedBuilder()
+    .setColor(VAULT_COLOR)
+    .setTitle(title)
+    .setURL(VAULT_URL)
+    .setFooter({ text: "XCFL Vault" })
+    .setTimestamp();
 }
 
-// Fetch whatever extra data a /player view needs, then render it.
-async function renderPlayerView(player, team, view) {
-  const data = {};
-  if (view === "weekly") {
-    console.log(`[PLAYER] fetching weekly stats for ${player.player_fullName}`);
-    data.weekly = await withTimeout(
-      getPlayerWeeklyStats(player.player_fullName),
-      20_000,
-      "Weekly stats"
-    );
-    console.log(`[PLAYER] weekly rows: ${data.weekly?.weeks?.length ?? 0}`);
-  } else if (view === "season") {
-    console.log(`[PLAYER] fetching season stats for ${player.player_fullName}`);
-    data.season = await withTimeout(
-      getPlayerSeasonStats(player.player_fullName),
-      20_000,
-      "Season stats"
-    );
-    console.log(`[PLAYER] season rows: ${Array.isArray(data.season) ? data.season.length : 0}`);
-  }
-  const payload = playerEmbed(player, team, view, data);
-  console.log(
-    `[PLAYER] built "${view}" view — ${payload.content.length} chars, ` +
-      `${payload.components?.length ?? 0} component row(s)`
-  );
-  return payload;
-}
+export function standingsEmbed({ season, rows }) {
+  const e = base(`📊 Standings — Season ${season ?? "?"}`);
+  if (!rows.length) return e.setDescription("No standings data found.");
 
-// The Overview / Full Ratings / Weekly / Season dropdown under a player card.
-async function handlePlayerViewSelect(interaction) {
-  // Edit the existing message in place rather than posting a new one.
-  await interaction.deferUpdate();
-  try {
-    const playerId = interaction.customId.split(":")[1];
-    const view = interaction.values?.[0] ?? "overview";
-    const player = await getPlayerById(playerId);
-    if (!player) {
-      await interaction.editReply({
-        content: "⚠️ That player is no longer in the current cycle.",
-        embeds: [],
-        components: [],
-      });
-      return;
-    }
-    const team = await getRosterFor(player.player_fullName);
-    await interaction.editReply(await renderPlayerView(player, team, view));
-  } catch (err) {
-    console.error("Player view error:", err);
-    try {
-      await interaction.followUp({
-        content: `⚠️ ${err.message || "Could not switch views."}`,
-        ephemeral: true,
-      });
-    } catch {}
-  }
-}
-
-client.on(Events.InteractionCreate, async (interaction) => {
-  // Probe: fires for EVERY interaction type before any routing happens.
-  // If nothing appears here when you use a command, interactions are not
-  // reaching the bot at all and the problem is upstream of this code.
-  console.log(
-    `[INTERACTION] type=${interaction.type} ` +
-      `command=${interaction.commandName ?? "-"} ` +
-      `user=${interaction.user?.tag ?? "-"}`
-  );
-
-  // Autocomplete: respond with player suggestions as the user types.
-  if (interaction.isAutocomplete()) {
-    if (interaction.commandName === "player") {
-      const started = Date.now();
-      try {
-        const focused = interaction.options.getFocused();
-        const choices = await suggestPlayers(focused, 25);
-        console.log(
-          `[AUTOCOMPLETE] "${focused}" -> ${choices.length} choices in ${Date.now() - started}ms`
-        );
-        if (choices.length) {
-          console.log(`[AUTOCOMPLETE] sample: ${JSON.stringify(choices[0])}`);
-        }
-        await interaction.respond(choices);
-        console.log(`[AUTOCOMPLETE] responded OK (${Date.now() - started}ms total)`);
-      } catch (err) {
-        // Log the whole error — Discord's validation failures carry the detail
-        // in err.rawError, not err.message.
-        console.error("[AUTOCOMPLETE] failed after", Date.now() - started, "ms:", err);
-        if (err.rawError) {
-          console.error("[AUTOCOMPLETE] rawError:", JSON.stringify(err.rawError));
-        }
-        try {
-          await interaction.respond([]);
-        } catch {}
-      }
-    } else if (interaction.commandName === "compare") {
-      // Both player1 and player2 use the same player suggestions.
-      try {
-        const focused = interaction.options.getFocused();
-        await interaction.respond(await suggestPlayers(focused, 25));
-      } catch (err) {
-        console.error("[AUTOCOMPLETE] compare failed:", err.message);
-        try {
-          await interaction.respond([]);
-        } catch {}
-      }
-    } else if (interaction.commandName === "team") {
-      try {
-        const focused = String(interaction.options.getFocused() ?? "");
-        await interaction.respond(await suggestTeams(focused, 25));
-      } catch (err) {
-        console.error("[AUTOCOMPLETE] team failed:", err.message);
-        try {
-          await interaction.respond([]);
-        } catch {}
-      }
-    } else if (interaction.commandName === "rivalry") {
-      try {
-        const focused = String(interaction.options.getFocused() ?? "");
-        await interaction.respond(await suggestMembers(focused, 25));
-      } catch (err) {
-        console.error("[AUTOCOMPLETE] rivalry failed:", err.message);
-        try {
-          await interaction.respond([]);
-        } catch {}
-      }
-    } else if (interaction.commandName === "scores") {
-      try {
-        const focused = String(interaction.options.getFocused() ?? "");
-        const { weeks } = await getScoreWeeks();
-        const choices = weeks
-          .filter((w) => !focused || String(w).startsWith(focused))
-          .slice(-25) // most recent 25 weeks
-          .reverse()
-          .map((w) => ({ name: `Week ${w}`, value: w }));
-        await interaction.respond(choices);
-      } catch (err) {
-        console.error("Autocomplete error:", err.message);
-        try {
-          await interaction.respond([]);
-        } catch {}
-      }
-    } else if (interaction.commandName === "submit_trade") {
-      try {
-        const focused = String(interaction.options.getFocused() ?? "");
-        const choices = await suggestTeams(focused, 25);
-        await interaction.respond(choices);
-      } catch (err) {
-        console.error("Autocomplete error:", err.message);
-        try {
-          await interaction.respond([]);
-        } catch {}
-      }
-    }
-    return;
-  }
-
-  // Player card view switcher — must be checked before the trade handler.
-  if (
-    interaction.isStringSelectMenu() &&
-    interaction.customId.startsWith("player_view:")
-  ) {
-    await handlePlayerViewSelect(interaction);
-    return;
-  }
-
-  if (interaction.isButton() || interaction.isStringSelectMenu()) {
-    await handleTradeComponent(interaction);
-    return;
-  }
-
-  if (!interaction.isChatInputCommand()) return;
-
-  // The trade builder is private to the user; everything else posts publicly.
-  if (interaction.commandName === "submit_trade") {
-    await interaction.deferReply({ ephemeral: true });
-    await startTradeFlow(interaction);
-    return;
-  }
-
-  // Vault calls can take a moment — defer so we don't time out (3s limit).
-  await interaction.deferReply();
-
-  try {
-    switch (interaction.commandName) {
-      case "standings": {
-        const season = interaction.options.getInteger("season") ?? undefined;
-        const data = await getStandings(season);
-        await interaction.editReply({ embeds: [standingsEmbed(data)] });
-        break;
-      }
-      case "leaders": {
-        const category = interaction.options.getString("category");
-        const count = interaction.options.getInteger("count") ?? 10;
-        const data = await getStatLeaders(category, Math.min(count, 25));
-        await interaction.editReply({ embeds: [statLeadersEmbed(data)] });
-        break;
-      }
-      case "player": {
-        const input = interaction.options.getString("name");
-        console.log(`[PLAYER] /player invoked with: ${input}`);
-
-        // If the value looks like a Base44 record id (picked from the
-        // autocomplete dropdown), fetch that exact player.
-        const byId = await withTimeout(getPlayerById(input), 25_000, "Player lookup");
-        if (byId) {
-          console.log(`[PLAYER] matched by id: ${byId.player_fullName}`);
-          const team = await withTimeout(
-            getRosterFor(byId.player_fullName),
-            15_000,
-            "Roster lookup"
-          );
-          // playerEmbed returns a full message payload (markdown + dropdown).
-          await interaction.editReply(await renderPlayerView(byId, team, "overview"));
-          console.log(`[PLAYER] reply sent for ${byId.player_fullName}`);
-          break;
-        }
-
-        // Otherwise treat it as a free-text name search.
-        const { matches, unambiguous } = await withTimeout(
-          getPlayer(input),
-          25_000,
-          "Player search"
-        );
-        console.log(`[PLAYER] name search matches: ${matches.length}, unambiguous: ${unambiguous}`);
-        if (!matches.length) {
-          await interaction.editReply({
-            embeds: [playerChoicesEmbed(input, [])],
-          });
-          break;
-        }
-        if (!unambiguous) {
-          await interaction.editReply({
-            embeds: [playerChoicesEmbed(input, matches)],
-          });
-          break;
-        }
-        const match = matches[0];
-        const team = await withTimeout(
-          getRosterFor(match.player_fullName),
-          15_000,
-          "Roster lookup"
-        );
-        await interaction.editReply(await renderPlayerView(match, team, "overview"));
-        console.log(`[PLAYER] reply sent for ${match.player_fullName}`);
-        break;
-      }
-      case "compare": {
-        const in1 = interaction.options.getString("player1");
-        const in2 = interaction.options.getString("player2");
-        console.log(`[COMPARE] ${in1} vs ${in2}`);
-
-        // Autocomplete sends record ids; fall back to a name search.
-        const resolve = async (input) => {
-          const byId = await getPlayerById(input);
-          if (byId) return byId;
-          const { matches } = await getPlayer(input);
-          return matches[0] ?? null;
-        };
-
-        const [p1, p2] = await Promise.all([resolve(in1), resolve(in2)]);
-        if (!p1 || !p2) {
-          const missing = !p1 ? in1 : in2;
-          await interaction.editReply(
-            `⚠️ Couldn't find a player matching **${missing}** — pick from the dropdown for an exact match.`
-          );
-          break;
-        }
-        if (p1.id && p1.id === p2.id) {
-          await interaction.editReply("⚠️ Pick two different players to compare.");
-          break;
-        }
-
-        const [team1, team2] = await Promise.all([
-          getRosterFor(p1.player_fullName),
-          getRosterFor(p2.player_fullName),
-        ]);
-        const values = { a: playerTradeValue(p1), b: playerTradeValue(p2) };
-        await interaction.editReply(compareEmbed(p1, p2, team1, team2, values));
-        break;
-      }
-      case "team": {
-        const query = interaction.options.getString("team");
-        console.log(`[TEAM] lookup: ${query}`);
-        const data = await getTeamOverview(query);
-        await interaction.editReply(teamEmbed(data));
-        break;
-      }
-      case "myteam": {
-        const member = await getMemberByDiscordId(interaction.user.id);
-        if (!member) {
-          console.log(`[MYTEAM] no LeagueMember linked to ${interaction.user.tag}`);
-          await interaction.editReply(notLinkedEmbed(interaction.user.tag));
-          break;
-        }
-        if (!member.team_name) {
-          await interaction.editReply(
-            `⚠️ **${member.username}** isn't assigned to a team right now.`
-          );
-          break;
-        }
-        console.log(`[MYTEAM] ${interaction.user.tag} -> ${member.team_name}`);
-        const data = await getTeamOverview(member.team_name);
-        await interaction.editReply(teamEmbed(data));
-        break;
-      }
-      case "rivalry": {
-        const m1 = interaction.options.getString("member1");
-        let m2 = interaction.options.getString("member2");
-
-        // member2 is optional — default to the caller's linked member.
-        if (!m2) {
-          const me = await getMemberByDiscordId(interaction.user.id);
-          if (!me?.username) {
-            await interaction.editReply(
-              "⚠️ Name a second member — your Discord isn't linked to a league member yet."
-            );
-            break;
-          }
-          m2 = me.username;
-        }
-        if (m1.toLowerCase() === m2.toLowerCase()) {
-          await interaction.editReply("⚠️ Pick two different members.");
-          break;
-        }
-        console.log(`[RIVALRY] ${m1} vs ${m2}`);
-        const r = await getRivalry(m1, m2);
-        await interaction.editReply(rivalryEmbed(r));
-        break;
-      }
-      case "scores": {
-        const week = interaction.options.getInteger("week") ?? undefined;
-        const season = interaction.options.getInteger("season") ?? undefined;
-        const data = await getScores(week, season);
-        await interaction.editReply({ embeds: [scoresEmbed(data)] });
-        break;
-      }
-      case "power": {
-        const data = await getPowerRankings();
-        await interaction.editReply({ embeds: [powerRankingsEmbed(data)] });
-        break;
-      }
-      case "tradeblock": {
-        const team = interaction.options.getString("team") ?? undefined;
-        const data = await getTradeBlock(team);
-        // If a team was requested but nothing matched, show available teams.
-        if (team && !data.entries.length) {
-          const teams = await getTradeBlockTeams();
-          await interaction.editReply({
-            embeds: [tradeBlockNoTeamEmbed(team, teams)],
-          });
-          break;
-        }
-        // tradeBlockEmbed returns a full message payload (markdown content).
-        await interaction.editReply(tradeBlockEmbed(data));
-        break;
-      }
-      case "trades": {
-        const status = interaction.options.getString("status") ?? undefined;
-        const data = await getTrades(status);
-        await interaction.editReply({ embeds: [tradesEmbed(data)] });
-        break;
-      }
-      case "bug-status": {
-        await bugReportCommands.bugStatus.execute(interaction);
-        break;
-      }
-      case "resolve-bug": {
-        await bugReportCommands.resolveBug.execute(interaction);
-        break;
-      }
-      default:
-        await interaction.editReply("Unknown command.");
-    }
-  } catch (err) {
-    console.error(`[ERROR] /${interaction.commandName} failed:`, err);
-    const msg = `⚠️ ${err.message || "Something went wrong reaching the Vault."}`;
-    // editReply can itself fail (e.g. an invalid payload) — fall back to a
-    // follow-up so the user never sees an endless "thinking" spinner.
-    try {
-      await interaction.editReply({ content: msg, embeds: [], components: [] });
-    } catch (replyErr) {
-      console.error("[ERROR] editReply also failed:", replyErr.message);
-      try {
-        await interaction.followUp({ content: msg, ephemeral: true });
-      } catch (followErr) {
-        console.error("[ERROR] followUp also failed:", followErr.message);
-      }
-    }
-  }
-});
-
-// Railway sends SIGTERM when replacing a container. Close the gateway session
-// cleanly so Discord doesn't keep routing interactions to a dying instance.
-for (const signal of ["SIGTERM", "SIGINT"]) {
-  process.on(signal, () => {
-    console.log(`👋 ${signal} received — shutting down cleanly.`);
-    client.destroy();
-    process.exit(0);
+  const lines = rows.slice(0, 32).map((r, i) => {
+    const rec = `${r.wins ?? 0}-${r.losses ?? 0}${r.ties ? "-" + r.ties : ""}`;
+    const team = r.team_name ?? "";
+    const logo = teamEmojiByName(team);
+    return `\`${String(i + 1).padStart(2)}\` ${logo} **${rec}**  ${team}`;
   });
+  return e.setDescription(lines.join("\n"));
 }
 
-client.login(process.env.DISCORD_TOKEN);
+export function statLeadersEmbed({ label, field, season, leaders }) {
+  const e = base(`🏈 ${label} Leaders — Season ${season ?? "?"}`);
+  if (!leaders.length) return e.setDescription("No stats found.");
+
+  const lines = leaders.map((p, i) => {
+    const raw = p[field] ?? 0;
+    // Sacks come as decimals (e.g. 0.5); show one decimal only when needed.
+    const val = Number.isInteger(raw) ? raw.toLocaleString() : raw.toFixed(1);
+    const team = p.team_abbrName ?? "";
+    const logo = teamEmoji(team);
+    return `\`${String(i + 1).padStart(2)}\` ${logo} **${val}**  ${p.player_fullName} *(${team})*`;
+  });
+  return e.setDescription(lines.join("\n"));
+}
+
+export function powerRankingsEmbed({ week, rows }) {
+  const e = base(`🔥 Power Rankings — ${week ?? "Latest"}`);
+  if (!rows.length) return e.setDescription("No power rankings posted yet.");
+
+  const lines = rows.slice(0, 32).map((r) => {
+    let move = "";
+    if (r.previous_rank && r.previous_rank !== r.rank) {
+      const diff = r.previous_rank - r.rank;
+      move = diff > 0 ? ` 🔺${diff}` : ` 🔻${Math.abs(diff)}`;
+    }
+    const logo = r.team_name ? `${teamEmojiByName(r.team_name)} ` : "";
+    return `\`${String(r.rank).padStart(2)}\` ${logo}**${r.username}**${move}`;
+  });
+  return e.setDescription(lines.join("\n"));
+}
+
+// Trade block — plain markdown message matching the /player card style.
+// Returns a message payload; pass it straight to editReply.
+export function tradeBlockEmbed({ team, entries }) {
+  const out = [];
+
+  if (team) {
+    out.push(`# ${teamEmojiByName(team)} ${team}`);
+    out.push(`### Trade Block`);
+  } else {
+    out.push(`# 🔁 Trade Block`);
+  }
+
+  if (!entries.length) {
+    out.push("");
+    out.push(
+      team
+        ? `**${team}** has nothing on the block right now.`
+        : "Nothing on the block right now."
+    );
+    out.push("");
+    out.push(`-# [View on XCFL Vault](<${VAULT_URL}/trade-block>)`);
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  // Group by team so each franchise gets its own headed section.
+  const byTeam = new Map();
+  for (const t of entries) {
+    const key = t.team_name ?? "—";
+    if (!byTeam.has(key)) byTeam.set(key, []);
+    byTeam.get(key).push(t);
+  }
+
+  const totalPlayers = entries.filter((t) => t.entry_type !== "pick").length;
+  const totalPicks = entries.filter((t) => t.entry_type === "pick").length;
+  const summary = [
+    totalPlayers ? `${totalPlayers} player${totalPlayers === 1 ? "" : "s"}` : null,
+    totalPicks ? `${totalPicks} pick${totalPicks === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (summary) out.push(`**${summary}** across ${byTeam.size} team${byTeam.size === 1 ? "" : "s"}`);
+
+  let shown = 0;
+  let truncated = false;
+
+  for (const [teamName, items] of [...byTeam.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0])
+  )) {
+    // Players first (highest OVR first), then picks.
+    const players = items
+      .filter((t) => t.entry_type !== "pick")
+      .sort((a, b) => (b.player_ovr ?? 0) - (a.player_ovr ?? 0));
+    const picks = items.filter((t) => t.entry_type === "pick");
+
+    const lines = [];
+
+    for (const t of players) {
+      const url = `${VAULT_URL}/players/${encodeURIComponent(t.player_fullName)}`;
+      const meta = [
+        t.player_position ?? "?",
+        t.player_ovr != null ? `${t.player_ovr} OVR` : null,
+        t.trade_value != null ? `TV ${t.trade_value}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      // Angle brackets stop Discord unfurling a preview for each link.
+      lines.push(`> [**${t.player_fullName}**](<${url}>) — ${meta}`);
+      shown++;
+    }
+
+    for (const t of picks) {
+      const notes = t.pick_notes ? ` *(${t.pick_notes})*` : "";
+      lines.push(`> **${t.pick_label ?? "Pick"}**${notes}`);
+      shown++;
+    }
+
+    if (!lines.length) continue;
+
+    const block = [``, `**${teamEmojiByName(teamName)} ${teamName}**`, ...lines];
+    // Keep room for the footer line before Discord's 2000-char ceiling.
+    if (out.join("\n").length + block.join("\n").length > 1850) {
+      truncated = true;
+      break;
+    }
+    out.push(...block);
+  }
+
+  if (truncated) {
+    out.push("");
+    out.push(`-# …and more — ${entries.length - shown} entries not shown.`);
+  }
+
+  out.push("");
+  out.push(`-# [View the full trade block](<${VAULT_URL}/trade-block>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+
+  return { content, embeds: [], components: [] };
+}
+
+// Shown when a team filter matches nothing — lists teams that do have entries.
+export function tradeBlockNoTeamEmbed(query, teams) {
+  const e = base(`🔍 No trade block for "${query}"`);
+  return e.setDescription(
+    teams.length
+      ? "Teams with entries on the block:\n" +
+          teams.map((t) => `${teamEmojiByName(t)} ${t}`).join("\n")
+      : "No teams have anything on the block right now."
+  );
+}
+
+export function tradesEmbed(trades) {
+  const e = base("📑 Recent Trades");
+  if (!trades.length) return e.setDescription("No trades found.");
+
+  for (const t of trades.slice(0, 8)) {
+    const t1 = [...(t.team1_players ?? []), ...(t.team1_picks ?? [])].join(", ") || "—";
+    const t2 = [...(t.team2_players ?? []), ...(t.team2_picks ?? [])].join(", ") || "—";
+    const badge =
+      { approved: "✅", rejected: "❌", vetoed: "🚫", pending: "⏳" }[t.status] ?? "•";
+    e.addFields({
+      name: `${badge} ${teamEmojiByName(t.team1)} ${t.team1} ↔ ${teamEmojiByName(t.team2)} ${t.team2}`,
+      value: `**${t.team1} send:** ${t1}\n**${t.team2} send:** ${t2}`,
+    });
+  }
+  return e;
+}
+
+// ===== /player card =====================================================
+// Rendered as a plain markdown message (not an embed) so it can use a large
+// `#` heading and block-quoted sections, matching the snallabot look.
+
+// Every rating we know how to show: [label, data key].
+const ALL_RATINGS = [
+  ["Speed", "spd"], ["Accel", "acc"], ["Agility", "agi"], ["Awareness", "awa"],
+  ["Injury", "inj"], ["Break Tackle", "breakTackle"], ["Carrying", "carry"],
+  ["BC Vision", "ballCarryVision"], ["Truck", "trucking"], ["Stiff Arm", "stiffArm"],
+  ["Juke Move", "jukeMove"], ["Spin Move", "spinMove"], ["COD", "changeOfDir"],
+  ["Strength", "str"], ["Throw Power", "throwPower"], ["Short Acc", "shortAcc"],
+  ["Mid Acc", "midAcc"], ["Deep Acc", "deepAcc"], ["Catch", "catch"],
+  ["Spec Catch", "specCatch"], ["Release", "release"], ["Short Route", "shortRouteRun"],
+  ["Tackle", "tackle"], ["Hit Power", "hitPower"], ["Pursuit", "pursuit"],
+  ["Man Cov", "manCoverage"], ["Zone Cov", "zoneCoverage"], ["Press", "press"],
+  ["Block Shed", "blockShed"], ["Power Moves", "powerMoves"], ["Finesse Moves", "finesseMoves"],
+  ["Pass Block", "passBlock"], ["Run Block", "runBlock"], ["Kick Power", "kickPower"],
+  ["Kick Acc", "kickAcc"], ["Play Recog", "playRecog"], ["Jump", "jmp"],
+];
+
+// Which rating keys matter for each position group, in display order.
+const POSITION_RATINGS = {
+  QB: ["throwPower", "shortAcc", "midAcc", "deepAcc", "awa", "playRecog", "spd", "acc", "agi", "breakTackle", "str", "inj"],
+  RB: ["spd", "acc", "agi", "changeOfDir", "carry", "ballCarryVision", "breakTackle", "trucking", "stiffArm", "jukeMove", "spinMove", "catch", "str", "awa", "inj"],
+  WR: ["spd", "acc", "agi", "changeOfDir", "catch", "specCatch", "release", "shortRouteRun", "jukeMove", "carry", "jmp", "breakTackle", "awa", "inj"],
+  TE: ["spd", "acc", "agi", "catch", "specCatch", "release", "shortRouteRun", "runBlock", "passBlock", "str", "breakTackle", "jmp", "awa", "inj"],
+  OL: ["passBlock", "runBlock", "str", "awa", "playRecog", "acc", "agi", "spd", "inj"],
+  DL: ["blockShed", "powerMoves", "finesseMoves", "tackle", "pursuit", "hitPower", "str", "spd", "acc", "agi", "playRecog", "awa", "inj"],
+  LB: ["tackle", "hitPower", "pursuit", "blockShed", "powerMoves", "finesseMoves", "manCoverage", "zoneCoverage", "playRecog", "spd", "acc", "agi", "str", "awa", "inj"],
+  CB: ["manCoverage", "zoneCoverage", "press", "spd", "acc", "agi", "changeOfDir", "catch", "jmp", "tackle", "playRecog", "awa", "inj"],
+  S:  ["zoneCoverage", "manCoverage", "tackle", "hitPower", "pursuit", "spd", "acc", "agi", "catch", "jmp", "playRecog", "awa", "inj"],
+  K:  ["kickPower", "kickAcc", "awa", "inj"],
+};
+
+// Map a Madden position string to one of the groups above.
+function positionGroup(posRaw) {
+  const pos = String(posRaw ?? "").toUpperCase();
+  if (pos === "QB") return "QB";
+  if (["HB", "RB", "FB"].includes(pos)) return "RB";
+  if (pos === "WR") return "WR";
+  if (pos === "TE") return "TE";
+  if (["LT", "LG", "C", "RG", "RT", "OL", "OT", "OG"].includes(pos)) return "OL";
+  if (["LE", "RE", "DT", "DE", "EDGE", "LEDGE", "REDGE", "DL"].includes(pos)) return "DL";
+  if (["MLB", "LOLB", "ROLB", "OLB", "ILB", "LB"].includes(pos)) return "LB";
+  if (pos === "CB") return "CB";
+  if (["FS", "SS", "S"].includes(pos)) return "S";
+  if (["K", "P"].includes(pos)) return "K";
+  return null;
+}
+
+// Ratings to show on the Overview tab: position-relevant only, and only the
+// ones this player actually has. Falls back to the first 14 present.
+function relevantRatings(p) {
+  const group = positionGroup(p.player_position);
+  const keys = group ? POSITION_RATINGS[group] : null;
+  if (keys) {
+    const labelOf = Object.fromEntries(ALL_RATINGS.map(([l, k]) => [k, l]));
+    const picked = keys
+      .filter((k) => p[k] != null)
+      .map((k) => [labelOf[k] ?? k, k]);
+    if (picked.length) return picked;
+  }
+  return ALL_RATINGS.filter(([, k]) => p[k] != null).slice(0, 14);
+}
+
+// Render [label, key] pairs two per line, block-quoted.
+function ratingLines(p, pairs) {
+  const out = [];
+  for (let i = 0; i < pairs.length; i += 2) {
+    const a = pairs[i];
+    const b = pairs[i + 1];
+    let line = `> **${a[0]}:** ${p[a[1]]}`;
+    if (b) line += ` | **${b[0]}:** ${p[b[1]]}`;
+    out.push(line);
+  }
+  return out;
+}
+
+const VIEW_LABELS = {
+  overview: "Overview",
+  ratings: "Full Ratings",
+  weekly: "Weekly Stats",
+  season: "Season Stats",
+};
+
+// The Overview / Full Ratings / Weekly / Season picker under the card.
+function playerViewRow(playerId, view) {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`player_view:${playerId}`)
+    .setPlaceholder(VIEW_LABELS[view] ?? "Overview")
+    .addOptions(
+      Object.entries(VIEW_LABELS).map(([value, label]) => ({
+        label,
+        value,
+        default: value === view,
+      }))
+    );
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+// Header shared by every view: big title, OVR, bio line.
+function playerHeader(p, teamName) {
+  const pos = p.player_position ?? "?";
+  const gem = devEmoji(p.player_devTrait);
+  const out = [];
+  out.push(`# ${teamEmojiByName(teamName)} ${pos} ${p.player_fullName}`);
+  out.push(`### ${gem} ${p.player_ovr ?? "?"} OVR`);
+
+  const bits = [];
+  if (p.player_age != null) bits.push(`${p.player_age} yrs`);
+  if (p.player_yrsPro != null) {
+    const s = p.player_yrsPro + 1;
+    const suffix = s === 1 ? "st" : s === 2 ? "nd" : s === 3 ? "rd" : "th";
+    bits.push(`${s}${suffix} Season`);
+  }
+  let heightStr = p.player_height;
+  if (heightStr != null && /^\d+$/.test(String(heightStr).trim())) {
+    const inches = parseInt(heightStr, 10);
+    heightStr = `${Math.floor(inches / 12)}'${inches % 12}"`;
+  }
+  const hw = [heightStr, p.player_weight ? `${p.player_weight} lbs` : null]
+    .filter(Boolean)
+    .join(", ");
+  if (hw) bits.push(hw);
+  if (bits.length) out.push(`**${bits.join(" | ")}**`);
+  return out;
+}
+
+// One stat line from a WeeklyStats row — only the categories with activity.
+function weeklyStatLine(w) {
+  const parts = [];
+  if (w.pass_att || w.pass_yds || w.pass_tds) {
+    parts.push(
+      `${w.pass_comp ?? 0}/${w.pass_att ?? 0}, ${w.pass_yds ?? 0} yds, ${w.pass_tds ?? 0} TD, ${w.pass_ints ?? 0} INT`
+    );
+  }
+  if (w.rush_att || w.rush_yds || w.rush_tds) {
+    parts.push(`${w.rush_att ?? 0} car, ${w.rush_yds ?? 0} yds, ${w.rush_tds ?? 0} TD`);
+  }
+  if (w.rec_catches || w.rec_yds || w.rec_tds) {
+    parts.push(`${w.rec_catches ?? 0} rec, ${w.rec_yds ?? 0} yds, ${w.rec_tds ?? 0} TD`);
+  }
+  if (w.def_total_tackles || w.def_sacks || w.def_ints) {
+    parts.push(
+      `${w.def_total_tackles ?? 0} tkl, ${w.def_sacks ?? 0} sk, ${w.def_ints ?? 0} INT`
+    );
+  }
+  return parts.join(" • ");
+}
+
+// Season-total lines for one merged season row:
+// { season, gamesPlayed, passing?, rushing?, receiving?, defense? }
+function seasonStatLines(row) {
+  const parts = [];
+  const pass = row.passing;
+  const rush = row.rushing;
+  const rec = row.receiving;
+  const def = row.defense;
+  if (pass) {
+    parts.push(
+      `Pass: ${pass.passTotalComp ?? 0}/${pass.passTotalAtt ?? 0}, ${pass.passTotalYds ?? 0} yds, ${pass.passTotalTDs ?? 0} TD, ${pass.passTotalInts ?? 0} INT`
+    );
+  }
+  if (rush) {
+    parts.push(
+      `Rush: ${rush.rushTotalAtt ?? 0} car, ${rush.rushTotalYds ?? 0} yds, ${rush.rushTotalTDs ?? 0} TD`
+    );
+  }
+  if (rec) {
+    parts.push(
+      `Rec: ${rec.recTotalCatches ?? 0} rec, ${rec.recTotalYds ?? 0} yds, ${rec.recTotalTDs ?? 0} TD`
+    );
+  }
+  if (def) {
+    parts.push(
+      `Def: ${def.defTotalTackles ?? 0} tkl, ${def.defTotalSacks ?? 0} sk, ${def.defTotalInts ?? 0} INT`
+    );
+  }
+  return parts;
+}
+
+// Build the /player message for a given view.
+//   view  — "overview" | "ratings" | "weekly" | "season"
+//   data  — { weekly, season } as needed by the weekly/season views
+// Returns a message payload; pass it straight to editReply/update.
+export function playerEmbed(p, team = null, view = "overview", data = {}) {
+  const teamName = team?.team_name ?? p.team_name ?? "";
+  const playerUrl = `${VAULT_URL}/players/${encodeURIComponent(p.player_fullName)}`;
+  const out = playerHeader(p, teamName);
+
+  if (view === "overview") {
+    const cl = p.player_contractLength;
+    const yl = p.player_contractYrsLeft;
+    const lengthStr =
+      cl != null && yl != null ? `${yl}/${cl} yrs` : cl != null ? `${cl} yrs` : "—";
+    out.push("");
+    out.push("**Contract**");
+    out.push(`> **Length**: ${lengthStr} | **Salary**: ${fmtMoney(p.player_contractSalary)}`);
+    out.push(`> **Cap Hit**: ${fmtMoney(p.player_capHit)} | **Bonus**: ${fmtMoney(p.player_contractBonus)}`);
+    out.push(`> **Savings**: ${fmtMoney(p.player_capSavings)} | **Penalty**: ${fmtMoney(p.player_capPenalty)}`);
+
+    const pairs = relevantRatings(p);
+    if (pairs.length) {
+      out.push("");
+      out.push("**Key Ratings**");
+      out.push(...ratingLines(p, pairs));
+    }
+
+    if (Array.isArray(p.abilities) && p.abilities.length) {
+      const names = p.abilities.map((a) => a.title).filter(Boolean).join(", ");
+      if (names) {
+        out.push("");
+        out.push(`**Abilities:** ${names}`);
+      }
+    }
+  }
+
+  if (view === "ratings") {
+    const pairs = ALL_RATINGS.filter(([, k]) => p[k] != null);
+    out.push("");
+    out.push("**Full Ratings**");
+    if (pairs.length) out.push(...ratingLines(p, pairs));
+    else out.push("> No ratings on file.");
+  }
+
+  if (view === "weekly") {
+    const { season = null, weeks: allWeeks = [] } = data.weekly ?? {};
+    // Newest weeks first; cap so we stay under Discord's 2000-char limit.
+    const weeks = allWeeks.slice(0, 12);
+    out.push("");
+    out.push(`**Weekly Stats${season != null ? ` — Season ${season}` : ""}**`);
+    if (!weeks.length) {
+      out.push("> No weekly stats on file for this player.");
+    } else {
+      let any = false;
+      for (const w of weeks) {
+        const line = weeklyStatLine(w);
+        if (!line) continue;
+        any = true;
+        out.push(`> **Wk ${w.week_index ?? "?"}** — ${line}`);
+      }
+      if (!any) out.push("> No recorded stats in these weeks.");
+    }
+  }
+
+  if (view === "season") {
+    // getPlayerSeasonStats returns rows sorted newest season first.
+    const rows = Array.isArray(data.season) ? data.season : [];
+    out.push("");
+    out.push("**Season Stats**");
+    if (!rows.length) {
+      out.push("> No season stats on file for this player.");
+    } else {
+      let any = false;
+      for (const row of rows.slice(0, 8)) {
+        const parts = seasonStatLines(row);
+        if (!parts.length) continue;
+        any = true;
+        const gp = row.gamesPlayed ? ` (${row.gamesPlayed} GP)` : "";
+        out.push(`> **Season ${row.season}**${gp} — ${parts.join(" • ")}`);
+      }
+      if (!any) out.push("> No recorded stats in these seasons.");
+    }
+  }
+
+  // Angle brackets around the URL stop Discord from unfurling a link preview.
+  out.push("");
+  out.push(`-# [View on XCFL Vault](<${playerUrl}>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+
+  return {
+    content,
+    embeds: [],
+    components: [playerViewRow(p.id, view)],
+  };
+}
+
+// When a name is ambiguous, list the alternatives.
+export function playerChoicesEmbed(name, matches) {
+  if (!matches.length) {
+    return base(`🔍 No player found for "${name}"`).setDescription(
+      "No players matched. Check the spelling or try a first name."
+    );
+  }
+  const e = base(`🔍 Multiple players match "${name}"`);
+  const lines = matches.slice(0, 15).map((p) => {
+    const gem = devEmoji(p.player_devTrait);
+    const team = p.team_abbrName ? ` — ${p.team_abbrName}` : "";
+    return `${gem} **${p.player_fullName}** (${p.player_position ?? "?"}, ${p.player_ovr ?? "?"} OVR${team})`;
+  });
+  const more = matches.length > 15 ? `\n…and ${matches.length - 15} more.` : "";
+  return e.setDescription(
+    "Did you mean one of these? Search the full name:\n" + lines.join("\n") + more
+  );
+}
+
+// Scores for a week — each game as "Team SCORE vs SCORE Team" with helmets and
+// the winner bolded. No home/away or status distinction.
+export function scoresEmbed({ season, week, games }) {
+  const e = base(`🏟️ Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`);
+  if (!games.length) return e.setDescription("No games found for that week.");
+
+  const lines = games.map((g) => {
+    const e1 = teamEmojiByName(g.home);
+    const e2 = teamEmojiByName(g.away);
+    const oneWon = g.homeScore > g.awayScore;
+    const twoWon = g.awayScore > g.homeScore;
+    const t1 = oneWon ? `**${g.home} ${g.homeScore}**` : `${g.home} ${g.homeScore}`;
+    const t2 = twoWon ? `**${g.awayScore} ${g.away}**` : `${g.awayScore} ${g.away}`;
+    return `${e1} ${t1}  vs  ${t2} ${e2}`;
+  });
+  return e.setDescription(lines.join("\n"));
+}
+
+// ===== /compare, /team, /rivalry, /myteam ================================
+
+// Ratings worth comparing, by position group — reuses the /player mapping.
+function comparableRatings(a, b) {
+  const groupA = positionGroup(a.player_position);
+  const groupB = positionGroup(b.player_position);
+  // Same position group -> that group's keys. Mixed -> shared athletic core.
+  const keys =
+    groupA && groupA === groupB
+      ? POSITION_RATINGS[groupA]
+      : ["spd", "acc", "agi", "str", "awa", "inj", "playRecog"];
+  const labelOf = Object.fromEntries(ALL_RATINGS.map(([l, k]) => [k, l]));
+  return keys
+    .filter((k) => a[k] != null || b[k] != null)
+    .slice(0, 12)
+    .map((k) => [labelOf[k] ?? k, k]);
+}
+
+// Side-by-side player comparison.
+//   values — { a: number|null, b: number|null } from the trade value engine
+export function compareEmbed(a, b, teamA = null, teamB = null, values = {}) {
+  const nameA = a.player_fullName;
+  const nameB = b.player_fullName;
+  const logoA = teamEmojiByName(teamA?.team_name ?? a.team_name ?? "");
+  const logoB = teamEmojiByName(teamB?.team_name ?? b.team_name ?? "");
+
+  const out = [];
+  out.push(`# ⚖️ ${nameA} vs ${nameB}`);
+  out.push(
+    `### ${logoA} ${devEmoji(a.player_devTrait)} ${a.player_ovr ?? "?"} OVR ` +
+      `**vs** ${logoB} ${devEmoji(b.player_devTrait)} ${b.player_ovr ?? "?"} OVR`
+  );
+
+  const posLine = `**${a.player_position ?? "?"}** vs **${b.player_position ?? "?"}**`;
+  if (a.player_position !== b.player_position) {
+    out.push(`${posLine} — *different positions, comparing athletic traits*`);
+  } else {
+    out.push(posLine);
+  }
+
+  // Trade value, when the engine is available.
+  if (values.a != null || values.b != null) {
+    const va = values.a ?? 0;
+    const vb = values.b ?? 0;
+    const diff = va - vb;
+    const edge =
+      diff === 0
+        ? "even"
+        : diff > 0
+          ? `**${nameA}** +${diff}`
+          : `**${nameB}** +${Math.abs(diff)}`;
+    out.push("");
+    out.push("**Trade Value**");
+    out.push(`> ${values.a ?? "—"} vs ${values.b ?? "—"} — edge: ${edge}`);
+  }
+
+  // Bio comparison
+  out.push("");
+  out.push("**Profile**");
+  const bio = (p) => {
+    const age = p.player_age != null ? `${p.player_age}y` : "—";
+    const yrs = p.player_yrsPro != null ? `${p.player_yrsPro + 1} szn` : "—";
+    return `${age} · ${yrs}`;
+  };
+  out.push(`> **Age/Exp:** ${bio(a)} | ${bio(b)}`);
+  out.push(
+    `> **Dev:** ${a.player_devTrait ?? "—"} | ${b.player_devTrait ?? "—"}`
+  );
+  const contract = (p) => {
+    const yl = p.player_contractYrsLeft;
+    const cl = p.player_contractLength;
+    const len = yl != null && cl != null ? `${yl}/${cl}y` : "—";
+    return `${len} · ${fmtMoney(p.player_capHit)}`;
+  };
+  out.push(`> **Contract/Cap:** ${contract(a)} | ${contract(b)}`);
+
+  // Ratings with a winner marker per row
+  const pairs = comparableRatings(a, b);
+  if (pairs.length) {
+    out.push("");
+    out.push("**Ratings**");
+    for (const [label, key] of pairs) {
+      const va = a[key];
+      const vb = b[key];
+      let mark = "  ";
+      if (va != null && vb != null) {
+        if (va > vb) mark = "◀ ";
+        else if (vb > va) mark = "▶ ";
+      }
+      out.push(`> ${mark}**${label}:** ${va ?? "—"} vs ${vb ?? "—"}`);
+    }
+    out.push(`-# ◀ favors ${nameA} · ▶ favors ${nameB}`);
+  }
+
+  out.push("");
+  out.push(
+    `-# [${nameA}](<${VAULT_URL}/players/${encodeURIComponent(nameA)}>) · ` +
+      `[${nameB}](<${VAULT_URL}/players/${encodeURIComponent(nameB)}>)`
+  );
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  return { content, embeds: [], components: [] };
+}
+
+// Team card — record, owner, cap, top roster, trade block.
+export function teamEmbed(data) {
+  if (!data.found) {
+    const out = [`# 🔍 No team matching "${data.query}"`, ""];
+    if (data.teams?.length) {
+      out.push("**Try one of these:**");
+      out.push(data.teams.map((t) => `${teamEmojiByName(t)} ${t}`).join("\n").slice(0, 1500));
+    }
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  const { teamName, owner, record, roster, block, cap } = data;
+  const out = [];
+  out.push(`# ${teamEmojiByName(teamName)} ${teamName}`);
+
+  if (record) {
+    const rec = `${record.wins ?? 0}-${record.losses ?? 0}${record.ties ? `-${record.ties}` : ""}`;
+    const seed = record.seed ? ` · #${record.seed} seed` : "";
+    out.push(`### ${rec}${seed}${record.season != null ? ` · Season ${record.season}` : ""}`);
+  }
+  if (owner) out.push(`**Owner:** ${owner}`);
+
+  if (cap) {
+    const bits = [];
+    if (cap.grade != null) bits.push(`Grade **${cap.grade}**`);
+    if (cap.cap_ecs2026 != null) bits.push(`Cap space **$${cap.cap_ecs2026}M**`);
+    if (cap.draft_score != null) bits.push(`Draft **${cap.draft_score}**`);
+    if (bits.length) {
+      out.push("");
+      out.push("**Outlook**");
+      out.push(`> ${bits.join(" · ")}`);
+    }
+  }
+
+  const top = roster.filter((r) => r.player_ovr != null).slice(0, 8);
+  if (top.length) {
+    out.push("");
+    out.push(`**Top Players** *(${roster.length} on roster)*`);
+    for (const r of top) {
+      const url = `${VAULT_URL}/players/${encodeURIComponent(r.player_fullName)}`;
+      out.push(
+        `> [**${r.player_fullName}**](<${url}>) — ${r.player_position ?? "?"} · ${r.player_ovr} OVR`
+      );
+    }
+  }
+
+  if (block?.length) {
+    const players = block.filter((e) => e.entry_type !== "pick");
+    const picks = block.filter((e) => e.entry_type === "pick");
+    out.push("");
+    out.push("**On the Trade Block**");
+    for (const e of players.slice(0, 5)) {
+      out.push(`> ${e.player_fullName} — ${e.player_position ?? "?"} · ${e.player_ovr ?? "?"} OVR`);
+    }
+    for (const e of picks.slice(0, 3)) out.push(`> ${e.pick_label ?? "Pick"}`);
+    const extra = block.length - Math.min(players.length, 5) - Math.min(picks.length, 3);
+    if (extra > 0) out.push(`-# …and ${extra} more`);
+  }
+
+  out.push("");
+  out.push(`-# [View on XCFL Vault](<${VAULT_URL}/trade-block>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  return { content, embeds: [], components: [] };
+}
+
+// Head-to-head record between two league members.
+export function rivalryEmbed(r) {
+  if (!r) {
+    return {
+      content: "⚠️ Could not build that rivalry — check both usernames.",
+      embeds: [],
+      components: [],
+    };
+  }
+
+  const total = (r.user1_wins ?? 0) + (r.user2_wins ?? 0) + (r.ties ?? 0);
+  const out = [];
+  out.push(`# ⚔️ ${r.user1} vs ${r.user2}`);
+
+  if (!total) {
+    out.push("");
+    out.push("These two have never played each other.");
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  out.push(`### ${r.user1_wins}–${r.user2_wins}${r.ties ? `–${r.ties}` : ""}`);
+
+  const leader =
+    r.user1_wins > r.user2_wins
+      ? `**${r.user1}** leads the all-time series`
+      : r.user2_wins > r.user1_wins
+        ? `**${r.user2}** leads the all-time series`
+        : "All square";
+  out.push(`${leader} · ${total} meeting${total === 1 ? "" : "s"}`);
+
+  if (r.games?.length) {
+    out.push("");
+    out.push("**Recent Meetings**");
+    for (const g of r.games) {
+      const label = [
+        g.season != null ? `S${g.season}` : null,
+        g.week != null ? `W${g.week}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const aWon = g.aScore > g.bScore;
+      const bWon = g.bScore > g.aScore;
+      const left = aWon ? `**${g.aScore}**` : `${g.aScore}`;
+      const right = bWon ? `**${g.bScore}**` : `${g.bScore}`;
+      out.push(`> ${label} — ${r.user1} ${left} – ${right} ${r.user2}`);
+    }
+  }
+
+  if (r.source === "games") {
+    out.push("");
+    out.push("-# Tallied live from game history.");
+  }
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  return { content, embeds: [], components: [] };
+}
+
+// Shown when a Discord account isn't linked to a league member.
+export function notLinkedEmbed(discordTag) {
+  const out = [
+    "# 🔗 Account not linked",
+    "",
+    `Your Discord account (**${discordTag}**) isn't linked to a league member yet.`,
+    "",
+    "An admin can link it by setting **discord_user_id** on your LeagueMember record in the Vault.",
+    "",
+    `-# [Open XCFL Vault](<${VAULT_URL}>)`,
+  ];
+  return { content: out.join("\n"), embeds: [], components: [] };
+}
