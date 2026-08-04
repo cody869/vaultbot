@@ -1070,3 +1070,84 @@ export async function getTeamRosterPlayers(teamName) {
     .filter((x) => x.name)
     .sort((a, b) => b.ovr - a.ovr);
 }
+
+// --- writes (trade voting) ----------------------------------------------
+
+// Update one entity record. Base44's REST shape for writes isn't documented
+// here, so try the likely verbs in order and remember which one worked.
+let _writeVerb = null;
+
+export async function updateEntity(entity, id, data) {
+  const url = `${SERVER}/api/apps/${APP_ID}/entities/${entity}/${id}`;
+  const verbs = _writeVerb ? [_writeVerb] : ["PUT", "PATCH", "POST"];
+
+  let lastErr = null;
+  for (const method of verbs) {
+    try {
+      let res = await fetch(url, {
+        method,
+        headers: authHeaders(),
+        body: JSON.stringify(data),
+      });
+      if ((res.status === 401 || res.status === 403) &&
+          (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
+        await botLogin();
+        res = await fetch(url, {
+          method,
+          headers: authHeaders(),
+          body: JSON.stringify(data),
+        });
+      }
+      if (res.ok) {
+        if (!_writeVerb) {
+          _writeVerb = method;
+          console.log(`[WRITE] ${entity} updates use ${method}.`);
+        }
+        return await res.json().catch(() => ({}));
+      }
+      const body = await res.text().catch(() => "");
+      lastErr = new Error(`HTTP ${res.status} ${body.slice(0, 200)}`);
+      // 405/404 means wrong verb — try the next one.
+      if (![404, 405].includes(res.status)) break;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  console.error(`[WRITE] ${entity}/${id} update failed:`, lastErr?.message);
+  throw new Error(`Could not save to the Vault: ${lastErr?.message ?? "unknown error"}`);
+}
+
+// Trades awaiting committee review.
+export async function getPendingTrades() {
+  const rows = await list("TradeSubmission", {}, { sort: "-created_date", limit: 200 });
+  return rows.filter((t) => (t.status ?? "pending") === "pending");
+}
+
+export async function getTradeById(id) {
+  const rows = await list("TradeSubmission", {}, { limit: 500 });
+  return rows.find((t) => t.id === id) ?? null;
+}
+
+// Committee members who can vote, keyed for Discord lookups.
+export async function getCommitteeMembers() {
+  const members = await getLeagueMembers();
+  return members.filter((m) => m.is_committee);
+}
+
+// Look up players by name for enriching a trade message (current cycle).
+export async function getPlayersByNames(names = []) {
+  if (!names.length) return new Map();
+  const players = await getAllPlayers();
+  const wanted = new Set(names.map((n) => String(n).trim().toLowerCase()));
+  const out = new Map();
+  for (const p of players) {
+    const key = String(p.player_fullName ?? "").toLowerCase();
+    if (wanted.has(key)) out.set(key, p);
+  }
+  return out;
+}
+
+// All trade submissions, newest first (used by the approval announcer).
+export async function getAllTrades(limit = 300) {
+  return list("TradeSubmission", {}, { sort: "-created_date", limit });
+}
