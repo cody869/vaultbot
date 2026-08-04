@@ -19,11 +19,22 @@ import {
   getPlayersByNames,
   getMemberByDiscordId,
   findMemberByIdentity,
+  findMemberByTeam,
   memberDisplayName,
   updateEntity,
 } from "./vault.js";
 
 const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
+
+// Contract values arrive in raw dollars (1130000 -> $1.13M). Values under
+// 1000 are assumed to already be in millions.
+function fmtMoney(m) {
+  if (m == null) return null;
+  const n = Number(m);
+  if (!Number.isFinite(n)) return null;
+  const millions = n >= 1000 ? n / 1_000_000 : n;
+  return `$${millions.toFixed(2)}M`;
+}
 const TRADE_CHANNEL_ID = process.env.TRADE_CHANNEL_ID || null;
 // Approved trades are announced here. Rejections are resolved silently —
 // the review card updates in place and nothing else is posted.
@@ -80,16 +91,36 @@ function playerLine(name, player) {
 
   const head = `> [**${name}**](<${url}>) — ${bits.join(" · ")} ${devEmoji(player.player_devTrait)}`;
 
+  const lines = [head];
+
+  // Contract — the committee needs the cap picture to judge a trade.
+  const yl = player.player_contractYrsLeft;
+  const cl = player.player_contractLength;
+  const term =
+    yl != null && cl != null ? `${yl}/${cl} yrs` : yl != null ? `${yl} yrs left` : null;
+  const contract = [
+    term,
+    fmtMoney(player.player_capHit) ? `Cap ${fmtMoney(player.player_capHit)}` : null,
+    fmtMoney(player.player_contractSalary)
+      ? `Salary ${fmtMoney(player.player_contractSalary)}`
+      : null,
+    fmtMoney(player.player_capPenalty)
+      ? `Dead ${fmtMoney(player.player_capPenalty)}`
+      : null,
+  ].filter(Boolean);
+  if (contract.length) lines.push(`> -# ${contract.join(" · ")}`);
+
+  // Key attributes for the position.
   const group = attrGroup(player.player_position);
   const attrs = group ? CARD_ATTRS[group] : null;
-  if (!attrs) return head;
+  if (attrs) {
+    const shown = attrs
+      .filter(([, k]) => player[k] != null)
+      .map(([label, k]) => `${label} ${player[k]}`);
+    if (shown.length) lines.push(`> -# ${shown.join(" · ")}`);
+  }
 
-  const shown = attrs
-    .filter(([, k]) => player[k] != null)
-    .map(([label, k]) => `${label} ${player[k]}`);
-  if (!shown.length) return head;
-
-  return `${head}\n> -# ${shown.join(" · ")}`;
+  return lines.join("\n");
 }
 
 // How lopsided is this trade? Percentage gap between the two sides.
@@ -235,6 +266,36 @@ async function playersForTrade(trade) {
     console.error("[TRADE VOTE] player lookup failed:", err.message);
     return new Map();
   }
+}
+
+// Resolve both teams' owners to Discord ids for tagging. Missing owners or
+// unlinked Discord accounts are skipped rather than failing the post.
+async function tradeOwners(trade) {
+  const out = [];
+  for (const teamName of [trade.team1, trade.team2]) {
+    if (!teamName) continue;
+    try {
+      const member = await findMemberByTeam(teamName);
+      if (!member) {
+        console.log(`[TRADE VOTE] no owner found for ${teamName}`);
+        continue;
+      }
+      if (!member.discord_user_id) {
+        console.log(
+          `[TRADE VOTE] ${memberDisplayName(member)} (${teamName}) has no linked Discord id`
+        );
+        continue;
+      }
+      out.push({
+        team: teamName,
+        name: memberDisplayName(member),
+        discordId: String(member.discord_user_id),
+      });
+    } catch (err) {
+      console.error(`[TRADE VOTE] owner lookup failed for ${teamName}:`, err.message);
+    }
+  }
+  return out;
 }
 
 // Resolve the submitter to a safe display name, or null if we can't map it
@@ -413,7 +474,7 @@ const announced = new Set();
 
 // The public "this trade went through" post. Deliberately lighter than the
 // review card: what moved, who won the vote, and a link.
-export function approvalMessage(trade, players = new Map()) {
+export function approvalMessage(trade, players = new Map(), { owners = [] } = {}) {
   const t1 = trade.team1 ?? "Team 1";
   const t2 = trade.team2 ?? "Team 2";
   const votes = Array.isArray(trade.votes) ? trade.votes : [];
@@ -440,6 +501,13 @@ export function approvalMessage(trade, players = new Map()) {
   // Each team receives what the OTHER side sent.
   out.push(...sideBlock(t1, trade.team2_players, trade.team2_picks));
   out.push(...sideBlock(t2, trade.team1_players, trade.team1_picks));
+
+  // Tag the owners on both sides so they see it went through.
+  const tags = owners.filter((o) => o?.discordId).map((o) => `<@${o.discordId}>`);
+  if (tags.length) {
+    out.push("");
+    out.push(tags.join(" "));
+  }
 
   out.push("");
   out.push(
@@ -473,8 +541,17 @@ export async function announceApproval(client, trade) {
 
   try {
     const players = await playersForTrade(trade);
-    const msg = await channel.send(approvalMessage(trade, players));
-    console.log(`[TRADE VOTE] announced approved trade ${trade.id}`);
+    const owners = await tradeOwners(trade);
+    const payload = approvalMessage(trade, players, { owners });
+    // Ping only the two owners — nothing broader.
+    const msg = await channel.send({
+      ...payload,
+      allowedMentions: { users: owners.map((o) => o.discordId).filter(Boolean) },
+    });
+    console.log(
+      `[TRADE VOTE] announced approved trade ${trade.id}` +
+        ` (tagged ${owners.filter((o) => o.discordId).length} owner(s))`
+    );
     return msg;
   } catch (err) {
     console.error("[TRADE VOTE] announcement failed:", err.message);
