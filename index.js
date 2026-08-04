@@ -308,7 +308,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
           break;
         }
-        await interaction.editReply({ embeds: [tradeBlockEmbed(data)] });
+        // tradeBlockEmbed returns a full message payload (markdown content).
+        await interaction.editReply(tradeBlockEmbed(data));
         break;
       }
       case "trades": {
