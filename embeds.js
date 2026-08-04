@@ -88,13 +88,14 @@ export function tradeBlockEmbed({ team, entries }) {
   const lines = entries.slice(0, 25).map((t) => {
     const logo = teamEmojiByName(t.team_name);
     if (t.entry_type === "pick") {
-      return `${logo} 📋 **${t.pick_label ?? "Pick"}** — ${t.team_name}${t.pick_notes ? ` *(${t.pick_notes})*` : ""}`;
+      return `${logo} **${t.pick_label ?? "Pick"}** — ${t.team_name}${t.pick_notes ? ` *(${t.pick_notes})*` : ""}`;
     }
     
-    // Player line with OVR, position, and trade value
+    // Player line with link to player page, OVR, position, and trade value
+    const playerUrl = `${VAULT_URL}/players/${encodeURIComponent(t.player_fullName)}`;
     const ovr = t.player_ovr ? ` ${t.player_ovr} OVR` : "";
     const tradeValue = t.trade_value ? ` • TV: ${t.trade_value}` : "";
-    return `${logo} **${t.player_fullName}** (${t.player_position ?? "?"}${ovr}${tradeValue}) — ${t.team_name}`;
+    return `${logo} [**${t.player_fullName}**](${playerUrl}) (${t.player_position ?? "?"}${ovr}${tradeValue}) — ${t.team_name}`;
   });
   
   return e.setDescription(lines.join("\n"));
