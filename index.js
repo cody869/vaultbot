@@ -135,7 +135,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const byId = await getPlayerById(input);
         if (byId) {
           const team = await getRosterFor(byId.player_fullName);
-          await interaction.editReply({ embeds: [playerEmbed(byId, team)] });
+          // playerEmbed returns a full message payload (markdown content).
+          await interaction.editReply(playerEmbed(byId, team));
           break;
         }
 
@@ -155,7 +156,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const match = matches[0];
         const team = await getRosterFor(match.player_fullName);
-        await interaction.editReply({ embeds: [playerEmbed(match, team)] });
+        // playerEmbed returns a full message payload (markdown content).
+        await interaction.editReply(playerEmbed(match, team));
         break;
       }
       case "scores": {
