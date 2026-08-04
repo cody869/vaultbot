@@ -85,20 +85,35 @@ export function tradeBlockEmbed({ team, entries }) {
     );
   }
 
-  const lines = entries.slice(0, 25).map((t) => {
-    const logo = teamEmojiByName(t.team_name);
-    if (t.entry_type === "pick") {
-      return `${logo} **${t.pick_label ?? "Pick"}** — ${t.team_name}${t.pick_notes ? ` *(${t.pick_notes})*` : ""}`;
-    }
-    
-    // Player line with link to player page, OVR, position, and trade value
-    const playerUrl = `${VAULT_URL}/players/${encodeURIComponent(t.player_fullName)}`;
-    const ovr = t.player_ovr ? ` ${t.player_ovr} OVR` : "";
-    const tradeValue = t.trade_value ? ` • TV: ${t.trade_value}` : "";
-    return `${logo} [**${t.player_fullName}**](${playerUrl}) (${t.player_position ?? "?"}${ovr}${tradeValue}) — ${t.team_name}`;
+  // Group entries by team for cleaner display
+  const byTeam = {};
+  entries.slice(0, 25).forEach((t) => {
+    if (!byTeam[t.team_name]) byTeam[t.team_name] = [];
+    byTeam[t.team_name].push(t);
   });
-  
-  return e.setDescription(lines.join("\n"));
+
+  // Add fields for each team's entries
+  for (const teamName of Object.keys(byTeam).sort()) {
+    const teamEntries = byTeam[teamName];
+    const lines = teamEntries.map((t) => {
+      if (t.entry_type === "pick") {
+        return `📋 **${t.pick_label ?? "Pick"}**${t.pick_notes ? ` *(${t.pick_notes})*` : ""}`;
+      }
+      
+      const ovr = t.player_ovr ? ` ${t.player_ovr} OVR` : "";
+      const tradeValue = t.trade_value ? ` • TV: ${t.trade_value}` : "";
+      return `**${t.player_fullName}** (${t.player_position ?? "?"}${ovr}${tradeValue})`;
+    });
+    
+    const logo = teamEmojiByName(teamName);
+    e.addFields({
+      name: `${logo} ${teamName}`,
+      value: lines.join("\n"),
+      inline: false
+    });
+  }
+
+  return e;
 }
 
 // Shown when a team filter matches nothing — lists teams that do have entries.
