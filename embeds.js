@@ -41,7 +41,7 @@ function base(title) {
 }
 
 export function standingsEmbed({ season, rows }) {
-  const e = base(`📊 Standings — Season ${season ?? "?"}`);
+  const e = base(`Standings — Season ${season ?? "?"}`);
   if (!rows.length) return e.setDescription("No standings data found.");
 
   const lines = rows.slice(0, 32).map((r, i) => {
@@ -54,7 +54,7 @@ export function standingsEmbed({ season, rows }) {
 }
 
 export function statLeadersEmbed({ label, field, season, leaders }) {
-  const e = base(`🏈 ${label} Leaders — Season ${season ?? "?"}`);
+  const e = base(`${label} Leaders — Season ${season ?? "?"}`);
   if (!leaders.length) return e.setDescription("No stats found.");
 
   const lines = leaders.map((p, i) => {
@@ -69,14 +69,14 @@ export function statLeadersEmbed({ label, field, season, leaders }) {
 }
 
 export function powerRankingsEmbed({ week, rows }) {
-  const e = base(`🔥 Power Rankings — ${week ?? "Latest"}`);
+  const e = base(`Power Rankings — ${week ?? "Latest"}`);
   if (!rows.length) return e.setDescription("No power rankings posted yet.");
 
   const lines = rows.slice(0, 32).map((r) => {
     let move = "";
     if (r.previous_rank && r.previous_rank !== r.rank) {
       const diff = r.previous_rank - r.rank;
-      move = diff > 0 ? ` 🔺${diff}` : ` 🔻${Math.abs(diff)}`;
+      move = diff > 0 ? ` +${diff}` : ` -${Math.abs(diff)}`;
     }
     const logo = r.team_name ? `${teamEmojiByName(r.team_name)} ` : "";
     // PowerRanking carries a denormalized display_name; username may be an email.
@@ -95,7 +95,7 @@ export function tradeBlockEmbed({ team, entries }) {
     out.push(`# ${teamEmojiByName(team)} ${team}`);
     out.push(`### Trade Block`);
   } else {
-    out.push(`# 🔁 Trade Block`);
+    out.push(`# Trade Block`);
   }
 
   if (!entries.length) {
@@ -189,7 +189,7 @@ export function tradeBlockEmbed({ team, entries }) {
 
 // Shown when a team filter matches nothing — lists teams that do have entries.
 export function tradeBlockNoTeamEmbed(query, teams) {
-  const e = base(`🔍 No trade block for "${query}"`);
+  const e = base(`No trade block for "${query}"`);
   return e.setDescription(
     teams.length
       ? "Teams with entries on the block:\n" +
@@ -199,14 +199,14 @@ export function tradeBlockNoTeamEmbed(query, teams) {
 }
 
 export function tradesEmbed(trades) {
-  const e = base("📑 Recent Trades");
+  const e = base("Recent Trades");
   if (!trades.length) return e.setDescription("No trades found.");
 
   for (const t of trades.slice(0, 8)) {
     const t1 = [...(t.team1_players ?? []), ...(t.team1_picks ?? [])].join(", ") || "—";
     const t2 = [...(t.team2_players ?? []), ...(t.team2_picks ?? [])].join(", ") || "—";
     const badge =
-      { approved: "✅", rejected: "❌", vetoed: "🚫", pending: "⏳" }[t.status] ?? "•";
+      { approved: "✅", rejected: "❌", vetoed: "[vetoed]", pending: "[pending]" }[t.status] ?? "";
     e.addFields({
       name: `${badge} ${teamEmojiByName(t.team1)} ${t.team1} ↔ ${teamEmojiByName(t.team2)} ${t.team2}`,
       value: `**${t.team1} send:** ${t1}\n**${t.team2} send:** ${t2}`,
@@ -497,11 +497,11 @@ export function playerEmbed(p, team = null, view = "overview", data = {}) {
 // When a name is ambiguous, list the alternatives.
 export function playerChoicesEmbed(name, matches) {
   if (!matches.length) {
-    return base(`🔍 No player found for "${name}"`).setDescription(
+    return base(`No player found for "${name}"`).setDescription(
       "No players matched. Check the spelling or try a first name."
     );
   }
-  const e = base(`🔍 Multiple players match "${name}"`);
+  const e = base(`Multiple players match "${name}"`);
   const lines = matches.slice(0, 15).map((p) => {
     const gem = devEmoji(p.player_devTrait);
     const team = p.team_abbrName ? ` — ${p.team_abbrName}` : "";
@@ -516,7 +516,7 @@ export function playerChoicesEmbed(name, matches) {
 // Scores for a week — each game as "Team SCORE vs SCORE Team" with helmets and
 // the winner bolded. No home/away or status distinction.
 export function scoresEmbed({ season, week, games }) {
-  const e = base(`🏟️ Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`);
+  const e = base(`Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`);
   if (!games.length) return e.setDescription("No games found for that week.");
 
   const lines = games.map((g) => {
@@ -607,7 +607,7 @@ export function compareEmbed(a, b, teamA = null, teamB = null, values = {}) {
   const samePos = a.player_position === b.player_position;
 
   const out = [];
-  out.push(`# ⚖️ ${nameA} vs ${nameB}`);
+  out.push(`# ${nameA} vs ${nameB}`);
   out.push(
     `### ${logoA} ${devEmoji(a.player_devTrait)} ${a.player_ovr ?? "?"} OVR ` +
       `**vs** ${logoB} ${devEmoji(b.player_devTrait)} ${b.player_ovr ?? "?"} OVR`
@@ -710,7 +710,7 @@ export function compareEmbed(a, b, teamA = null, teamB = null, values = {}) {
 // Team card — record, owner, cap, top roster, trade block.
 export function teamEmbed(data) {
   if (!data.found) {
-    const out = [`# 🔍 No team matching "${data.query}"`, ""];
+    const out = [`# No team matching "${data.query}"`, ""];
     if (data.teams?.length) {
       out.push("**Try one of these:**");
       out.push(data.teams.map((t) => `${teamEmojiByName(t)} ${t}`).join("\n").slice(0, 1500));
@@ -778,7 +778,7 @@ export function teamEmbed(data) {
 export function rivalryEmbed(r) {
   if (!r) {
     return {
-      content: "⚠️ Could not build that rivalry — check both usernames.",
+      content: "Could not build that rivalry — check both usernames.",
       embeds: [],
       components: [],
     };
@@ -790,7 +790,7 @@ export function rivalryEmbed(r) {
 
   const total = (r.user1_wins ?? 0) + (r.user2_wins ?? 0) + (r.ties ?? 0);
   const out = [];
-  out.push(`# ⚔️ ${n1} vs ${n2}`);
+  out.push(`# ${n1} vs ${n2}`);
 
   if (!total) {
     out.push("");
@@ -839,7 +839,7 @@ export function rivalryEmbed(r) {
 // Shown when a Discord account isn't linked to a league member.
 export function notLinkedEmbed(discordTag) {
   const out = [
-    "# 🔗 Account not linked",
+    "# Account not linked",
     "",
     `Your Discord account (**${discordTag}**) isn't linked to a league member yet.`,
     "",
