@@ -219,7 +219,7 @@ export function tradeMessage(
   }
 
   out.push("");
-  out.push(`-# [Open in XCFL Vault](<${VAULT_URL}/trade-voting>)`);
+  out.push(`-# [Open in XCFL Vault](<${VAULT_URL}/trade-committee>)`);
 
   let content = out.join("\n");
   if (content.length > 2000) content = content.slice(0, 1997) + "…";
@@ -247,7 +247,7 @@ function voteRows(trade, decided) {
     new ButtonBuilder()
       .setStyle(ButtonStyle.Link)
       .setLabel("Vote in App")
-      .setURL(`${VAULT_URL}/trade-voting`)
+      .setURL(`${VAULT_URL}/trade-committee`)
   );
   return [row];
 }
@@ -486,7 +486,8 @@ export function approvalMessage(trade, players = new Map(), { owners = [] } = {}
   out.push(`### ${teamEmojiByName(t1)} ${t1}  ↔  ${teamEmojiByName(t2)} ${t2}`);
 
   const sideBlock = (teamName, playerNames = [], picks = []) => {
-    const lines = [``, `**${teamEmojiByName(teamName)} ${teamName} receives**`];
+    const teamLink = `${VAULT_URL}/teams/${encodeURIComponent(teamName)}`;
+    const lines = [``, `**${teamEmojiByName(teamName)} [${teamName}](<${teamLink}>) receives**`];
     if (!playerNames.length && !picks.length) {
       lines.push("> *nothing*");
       return lines;
@@ -514,7 +515,7 @@ export function approvalMessage(trade, players = new Map(), { owners = [] } = {}
     `-# Approved ${approve.length}\u2013${reject.length}` +
       (approve.length ? ` — ${approve.map((v) => v.voter_name).join(", ")}` : "")
   );
-  out.push(`-# [View in XCFL Vault](<${VAULT_URL}/trades>)`);
+  out.push(`-# [View in XCFL Vault](<${VAULT_URL}/trade-committee>)`);
 
   let content = out.join("\n");
   if (content.length > 2000) content = content.slice(0, 1997) + "\u2026";
