@@ -13,7 +13,7 @@
 //   VAULT_PUBLIC_URL     already used by embeds.js for links
 
 import crypto from "node:crypto";
-import { SlashCommandBuilder } from "discord.js";
+import { SlashCommandBuilder, MessageFlags } from "discord.js";
 import { list, updateEntity } from "./vault.js";
 import { playerUrl, teamUrl, routeUrl } from "./embeds.js";
 import { teamEmojiByName } from "./emoji.js";
@@ -119,8 +119,8 @@ export function newsMessage(a) {
     out.push(`> ${links.map((l) => `[${l.label || "Link"}](${l.url})`).join(" · ")}`);
   }
 
-  // Bare URL last so Discord unfurls the cover photo as the message preview.
-  if (a.cover_image_url) out.push(a.cover_image_url);
+  // No bare cover URL and no auto-unfurls — the post is plain text with inline
+  // links only. See SUPPRESS_EMBEDS in postArticle().
 
   let content = out.join("\n");
   if (PING_ROLE_ID && (a.is_staff_post || a.category === "Announcement")) {
@@ -131,16 +131,48 @@ export function newsMessage(a) {
 
 // --- posting --------------------------------------------------------------
 
+// The record itself is the lock. Before sending anything to Discord we stamp
+// discord_message_id with a claim token and re-read to confirm WE own it. If a
+// second container (deploy overlap) or a restart raced us, the re-read shows a
+// different token and we back off — so the article posts exactly once even
+// though the in-memory `handled` Set was empty after a restart.
+async function claim(a) {
+  const token = `posting:${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+  await updateEntity(ENTITY, a.id, { discord_message_id: token });
+
+  // Confirm the claim stuck and nobody overwrote it between write and read.
+  const [fresh] = (await list(ENTITY, { id: a.id }, { limit: 1 })) || [];
+  const current = fresh?.discord_message_id;
+  if (current !== token) {
+    console.log(`[NEWS] claim lost for ${a.id} (now ${current}) — another instance has it`);
+    return null;
+  }
+  return token;
+}
+
 async function postArticle(client, a) {
   const channel = await client.channels.fetch(CONTENT_CHANNEL_ID);
   if (!channel?.isTextBased?.()) {
     throw new Error(`CONTENT_CHANNEL_ID ${CONTENT_CHANNEL_ID} is not a text channel`);
   }
 
-  const msg = await channel.send({
-    content: newsMessage(a),
-    allowedMentions: { parse: PING_ROLE_ID ? ["roles"] : [] },
-  });
+  // Take the lock BEFORE sending. If we don't win it, do nothing.
+  const token = await claim(a);
+  if (!token) return;
+
+  let msg;
+  try {
+    msg = await channel.send({
+      content: newsMessage(a),
+      allowedMentions: { parse: PING_ROLE_ID ? ["roles"] : [] },
+      // SuppressEmbeds: no link previews and no image unfurl — plain text + inline links only.
+      flags: MessageFlags.SuppressEmbeds,
+    });
+  } catch (err) {
+    // Send failed after we claimed — release the claim so a later tick retries.
+    await updateEntity(ENTITY, a.id, { discord_message_id: "" }).catch(() => {});
+    throw err;
+  }
 
   let threadId = "";
   let threadUrl = "";
@@ -159,13 +191,32 @@ async function postArticle(client, a) {
     }
   }
 
-  await updateEntity(ENTITY, a.id, {
+  // Replace the claim token with the real message id. Retry a couple of times:
+  // if this write is lost the article would look unposted and repost next tick,
+  // which is the exact bug we're fixing.
+  const finalUpdate = {
     discord_message_id: msg.id,
     discord_message_url: threadUrl || msg.url || "",
     discord_thread_id: threadId,
     discord_posted_at: new Date().toISOString(),
     discord_sync_hash: syncHash(a),
-  });
+  };
+  let saved = false;
+  for (let attempt = 1; attempt <= 3 && !saved; attempt++) {
+    try {
+      await updateEntity(ENTITY, a.id, finalUpdate);
+      saved = true;
+    } catch (err) {
+      console.warn(`[NEWS] stamp attempt ${attempt} failed for ${a.id}: ${err.message}`);
+      await new Promise((r) => setTimeout(r, 500 * attempt));
+    }
+  }
+  if (!saved) {
+    // The message is live but we couldn't record its id. Leave the claim token
+    // in place (NOT empty) so the watcher treats it as handled and never
+    // reposts. It just won't get edit-sync or a thread jump link.
+    console.error(`[NEWS] could not persist message id for ${a.id}; left claim token to prevent a repost`);
+  }
 
   console.log(
     `[NEWS] posted "${a.title}" (${a.id}) → ${msg.id}${threadId ? ` thread ${threadId}` : ""}`
@@ -175,7 +226,11 @@ async function postArticle(client, a) {
 async function editArticle(client, a) {
   const channel = await client.channels.fetch(CONTENT_CHANNEL_ID);
   const msg = await channel.messages.fetch(a.discord_message_id);
-  await msg.edit({ content: newsMessage(a), allowedMentions: { parse: [] } });
+  await msg.edit({
+    content: newsMessage(a),
+    allowedMentions: { parse: [] },
+    flags: MessageFlags.SuppressEmbeds,
+  });
   await updateEntity(ENTITY, a.id, { discord_sync_hash: syncHash(a) });
   console.log(`[NEWS] updated "${a.title}" (${a.id})`);
 }
@@ -212,9 +267,13 @@ async function tick(client, { seed = false } = {}) {
   for (const a of rows) {
     if (!a?.id || handled.has(a.id)) continue;
 
+    // A non-empty discord_message_id means posted, skipped, or currently being
+    // claimed by another instance (`posting:…`). Any of those = leave it alone.
+    const alreadyTaken = !!a.discord_message_id;
+
     // --- brand new story ---
-    if (isDue(a) && !a.discord_message_id) {
-      handled.add(a.id); // claim up front so a race can't double-post
+    if (isDue(a) && !alreadyTaken) {
+      handled.add(a.id); // fast in-process guard; the record claim is the real lock
 
       // First boot on an app that already has articles: mark the backlog as
       // handled rather than dumping it all into #content.
@@ -242,10 +301,13 @@ async function tick(client, { seed = false } = {}) {
     }
 
     // --- already posted, but the article changed ---
+    // Only real Discord message ids qualify — not "skipped-backfill" and not a
+    // "posting:…" claim token still mid-flight.
     if (
       a.status === "published" &&
       a.discord_message_id &&
       a.discord_message_id !== "skipped-backfill" &&
+      !a.discord_message_id.startsWith("posting:") &&
       a.discord_sync_hash &&
       a.discord_sync_hash !== syncHash(a)
     ) {
