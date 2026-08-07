@@ -158,6 +158,35 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("news")
+    .setDescription("Latest articles from the Vault newsroom")
+    .addStringOption((o) =>
+      o
+        .setName("category")
+        .setDescription("Filter by category")
+        .addChoices(
+          { name: "League News", value: "League News" },
+          { name: "Team Report", value: "Team Report" },
+          { name: "Analysis", value: "Analysis" },
+          { name: "Recap", value: "Recap" },
+          { name: "Draft", value: "Draft" },
+          { name: "Trade Talk", value: "Trade Talk" },
+          { name: "Interview", value: "Interview" },
+          { name: "Op-Ed", value: "Op-Ed" },
+          { name: "Rumor Mill", value: "Rumor Mill" },
+          { name: "Announcement", value: "Announcement" },
+          { name: "History", value: "History" }
+        )
+    )
+    .addIntegerOption((o) =>
+      o
+        .setName("count")
+        .setDescription("How many to show (1-10)")
+        .setMinValue(1)
+        .setMaxValue(10)
+    ),
+
+  new SlashCommandBuilder()
     .setName('bug-status')
     .setDescription('View all bug reports and their status'),
 
