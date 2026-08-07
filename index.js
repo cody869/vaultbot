@@ -6,6 +6,7 @@ import { registerCommands } from "./deploy-commands.js";
 import { startScheduler } from "./scheduler.js";
 import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.js";
 import { handleTradeVote, startTradeWatcher } from "./tradeVoting.js";
+import { startNewsWatcher, handleNews } from "./news.js";
 import bugReportCommands from "./bugReport.js";
 import {
   getStandings,
@@ -72,6 +73,7 @@ client.once(Events.ClientReady, async (c) => {
   }, 240_000);
   startScheduler(c);
   startTradeWatcher(c);
+  startNewsWatcher(c);
 });
 
 // Reject instead of hanging forever if a Vault read stalls.
@@ -480,6 +482,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       case "resolve-bug": {
         await bugReportCommands.resolveBug.execute(interaction);
+        break;
+      }
+      case "news": {
+        await handleNews(interaction);
         break;
       }
       default:
