@@ -52,6 +52,13 @@ async function loadFonts() {
 // small in-memory cache so repeated calls in the same process don't
 // re-fetch the same team's logo every time
 const logoCache = new Map();
+
+// PNG files start with this exact 8-byte signature -- cheap, reliable way
+// to catch "the request succeeded but what came back wasn't really a PNG"
+// (an HTML error page, a truncated response, etc.), which a bare `res.ok`
+// check doesn't catch since the HTTP status can still be 200.
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 async function loadLogoDataUri(url) {
   if (logoCache.has(url)) return logoCache.get(url);
 
@@ -63,6 +70,14 @@ async function loadLogoDataUri(url) {
   } else {
     buf = fs.readFileSync(url);
   }
+
+  if (buf.length < 512 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    throw new Error(
+      `Logo at ${url} doesn't look like a real PNG (${buf.length} bytes) -- ` +
+      `request likely succeeded with a non-image response instead of failing outright.`
+    );
+  }
+
   const dataUri = 'data:image/png;base64,' + buf.toString('base64');
   logoCache.set(url, dataUri);
   return dataUri;
