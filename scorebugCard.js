@@ -290,17 +290,31 @@ async function renderScorebugCard(game) {
     });
   }
 
-  const tree = {
-    type: 'div',
-    props: {
-      style: {
-        width: W, height: H, display: 'flex', flexDirection: 'column',
-        position: 'relative', overflow: 'hidden', borderRadius: 10,
-        border: '3px solid #D4A843'
-      },
-      children
-    }
-  };
+  // Satori doesn't reliably clip a rotated child through two nested
+  // overflow:hidden boundaries -- confirmed by direct testing, it silently
+  // leaves a strip of the base color uncovered at the bottom edge. The
+  // outer wrapper (for stacking the strip under the scorebug) was
+  // introducing exactly that second boundary even when there's no strip
+  // to stack, so skip it entirely in the common no-strip case and put the
+  // border/radius/clip directly on the single card div instead.
+  let tree;
+  if (hasStrip) {
+    tree = {
+      type: 'div',
+      props: {
+        style: {
+          width: W, height: H, display: 'flex', flexDirection: 'column',
+          position: 'relative', overflow: 'hidden', borderRadius: 10,
+          border: '3px solid #D4A843'
+        },
+        children
+      }
+    };
+  } else {
+    scorebug.props.style.borderRadius = 10;
+    scorebug.props.style.border = '3px solid #D4A843';
+    tree = scorebug;
+  }
 
   const svg = await satori(tree, { width: W, height: H, fonts });
   const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: W * 2 } });
