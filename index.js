@@ -7,6 +7,8 @@ import { startScheduler } from "./scheduler.js";
 import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.js";
 import { handleTradeVote, startTradeWatcher } from "./tradeVoting.js";
 import { startNewsWatcher, handleNews } from "./news.js";
+import { startScorebugWatcher } from "./scorebugWatcher.js";
+import { buildScorebugAttachments } from "./scorebugHelper.js";
 import bugReportCommands from "./bugReport.js";
 import {
   getStandings,
@@ -74,6 +76,7 @@ client.once(Events.ClientReady, async (c) => {
   startScheduler(c);
   startTradeWatcher(c);
   startNewsWatcher(c);
+  startScorebugWatcher(c);
 });
 
 // Reject instead of hanging forever if a Vault read stalls.
@@ -447,7 +450,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const week = interaction.options.getInteger("week") ?? undefined;
         const season = interaction.options.getInteger("season") ?? undefined;
         const data = await getScores(week, season);
-        await interaction.editReply({ embeds: [scoresEmbed(data)] });
+        const { rows } = await getStandings(data.season);
+        const files = await buildScorebugAttachments(data, rows);
+        await interaction.editReply({ embeds: [scoresEmbed(data)], files });
         break;
       }
       case "power": {
