@@ -15,6 +15,7 @@ import {
   scoresEmbed,
   powerRankingsEmbed,
 } from "./embeds.js";
+import { buildScorebugAttachments } from "./scorebugHelper.js";
 import { readFileSync, writeFileSync } from "node:fs";
 
 // Where we remember the last-posted score signature. Railway's filesystem is
@@ -67,19 +68,25 @@ function cfg() {
   };
 }
 
-// Build the embeds for the configured content list.
+// Build the embeds (and, for scores, scorebug card attachments) for the
+// configured content list.
 async function buildEmbeds(content) {
   const embeds = [];
+  let files = [];
   for (const item of content) {
     try {
       if (item === "standings") embeds.push(standingsEmbed(await getStandings()));
-      else if (item === "scores") embeds.push(scoresEmbed(await getScores()));
-      else if (item === "power") embeds.push(powerRankingsEmbed(await getPowerRankings()));
+      else if (item === "scores") {
+        const data = await getScores();
+        embeds.push(scoresEmbed(data));
+        const { rows } = await getStandings(data.season);
+        files = await buildScorebugAttachments(data, rows);
+      } else if (item === "power") embeds.push(powerRankingsEmbed(await getPowerRankings()));
     } catch (err) {
       console.error(`Autopost: failed to build ${item}:`, err.message);
     }
   }
-  return embeds;
+  return { embeds, files };
 }
 
 async function post(client, content) {
@@ -107,10 +114,10 @@ async function post(client, content) {
       console.error("Autopost: channel not found or not text-based.");
       return;
     }
-    const embeds = await buildEmbeds(content);
+    const { embeds, files } = await buildEmbeds(content);
     if (embeds.length) {
       // Discord allows up to 10 embeds per message.
-      await channel.send({ embeds: embeds.slice(0, 10) });
+      await channel.send({ embeds: embeds.slice(0, 10), files });
       console.log(`📤 Autoposted: ${content.join(", ")}`);
       // Persist the signature only after a successful send.
       if (onlyOnChange && currentSig) {
