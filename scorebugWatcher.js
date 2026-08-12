@@ -20,11 +20,13 @@
 //   SCOREBUG_STATE_FILE    optional — default /tmp/xcfl-scorebug-posted.json
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { AttachmentBuilder } from "discord.js";
+import { AttachmentBuilder, EmbedBuilder } from "discord.js";
 import { list, getStandings } from "./vault.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
-import { isGameFinal } from "./scorebugHelper.js";
+import { isGameFinal, getGameContributors } from "./scorebugHelper.js";
+
+const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 
 const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
 const POLL_MS = Number(process.env.SCOREBUG_POLL_SECONDS || 60) * 1000;
@@ -87,17 +89,26 @@ async function postCard(client, g, standingsRows) {
     ? { abbr: awayAbbr, score: g.user2_score, record: recordFor(standingsRows, awayAbbr) }
     : { abbr: homeAbbr, score: g.user1_score, record: recordFor(standingsRows, homeAbbr) };
 
-  const png = await renderScorebugCard({ week: g.week, teamA, teamB });
-  const file = new AttachmentBuilder(png, {
-    name: `scorebug-${awayAbbr}-${homeAbbr}-wk${g.week ?? "x"}.png`,
+  const png = await renderScorebugCard({
+    week: g.week, teamA, teamB,
+    contributors: await getGameContributors(g.scheduleId, g.cycle),
   });
+  const filename = `scorebug-${awayAbbr}-${homeAbbr}-wk${g.week ?? "x"}.png`;
+  const file = new AttachmentBuilder(png, { name: filename });
+
+  const gameUrl = `${VAULT_URL}/games/${g.id}`;
+  const embed = new EmbedBuilder()
+    .setTitle(`${g.awayTeam} @ ${g.homeTeam} — View Recap`)
+    .setURL(gameUrl)
+    .setColor(0xd4a843)
+    .setImage(`attachment://${filename}`);
 
   const channel = await client.channels.fetch(CHANNEL_ID);
   if (!channel || !channel.isTextBased()) {
     throw new Error("channel not found or not text-based");
   }
-  await channel.send({ files: [file] });
-  console.log(`[SCOREBUG] posted: ${awayAbbr} ${g.user2_score} @ ${homeAbbr} ${g.user1_score} (wk ${g.week})`);
+  await channel.send({ embeds: [embed], files: [file] });
+  console.log(`[SCOREBUG] posted: ${awayAbbr} ${g.user2_score} @ ${homeAbbr} ${g.user1_score} (wk ${g.week}) -> ${gameUrl}`);
 }
 
 async function tick(client, { seed = false } = {}) {
