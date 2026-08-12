@@ -8,6 +8,9 @@
 // Environment:
 //   CONTENT_CHANNEL_ID   required — the #content channel (654425873004625929)
 //   NEWS_PING_ROLE_ID    optional — pinged only on staff posts / Announcements
+//   NEWS_PING_EVERYONE   optional — "all" pings @everyone on every post,
+//                        "staff" only on staff/Announcement posts (default),
+//                        "off" never. Defaults to "all".
 //   NEWS_POLL_SECONDS    optional — default 60
 //   NEWS_SEED_HOURS      optional — default 24 (first-boot backlog grace window)
 //   VAULT_PUBLIC_URL     already used by embeds.js for links
@@ -23,6 +26,25 @@ const CONTENT_CHANNEL_ID = process.env.CONTENT_CHANNEL_ID || "654425873004625929
 const POLL_MS = Number(process.env.NEWS_POLL_SECONDS || 60) * 1000;
 const SEED_HOURS = Number(process.env.NEWS_SEED_HOURS || 24);
 const PING_ROLE_ID = process.env.NEWS_PING_ROLE_ID || "";
+
+// @everyone policy: "all" (default) | "staff" | "off".
+const PING_EVERYONE = (process.env.NEWS_PING_EVERYONE || "all").toLowerCase();
+
+// Decide whether a given article should ping @everyone.
+function shouldPingEveryone(a) {
+  if (PING_EVERYONE === "off") return false;
+  if (PING_EVERYONE === "staff") return !!a.is_staff_post || a.category === "Announcement";
+  return true; // "all"
+}
+
+// Discord suppresses @everyone / role pings unless the send explicitly allows
+// them. Build the allow-list to match exactly what the message contains.
+function allowedMentionsFor(a) {
+  const parse = [];
+  if (shouldPingEveryone(a)) parse.push("everyone");
+  if (PING_ROLE_ID && (a.is_staff_post || a.category === "Announcement")) parse.push("roles");
+  return { parse };
+}
 
 const articleUrl = (a) => routeUrl(`/news/${encodeURIComponent(a.slug || a.id)}`);
 
@@ -123,9 +145,16 @@ export function newsMessage(a) {
   // links only. See SUPPRESS_EMBEDS in postArticle().
 
   let content = out.join("\n");
+
+  // Build the mention prefix. @everyone leads; a configured role ping stacks
+  // after it (role ping still limited to staff/Announcement, as before).
+  const mentions = [];
+  if (shouldPingEveryone(a)) mentions.push("@everyone");
   if (PING_ROLE_ID && (a.is_staff_post || a.category === "Announcement")) {
-    content = `<@&${PING_ROLE_ID}>\n${content}`;
+    mentions.push(`<@&${PING_ROLE_ID}>`);
   }
+  if (mentions.length) content = `${mentions.join(" ")}\n${content}`;
+
   return content.length > 1950 ? `${content.slice(0, 1947)}…` : content;
 }
 
@@ -164,7 +193,7 @@ async function postArticle(client, a) {
   try {
     msg = await channel.send({
       content: newsMessage(a),
-      allowedMentions: { parse: PING_ROLE_ID ? ["roles"] : [] },
+      allowedMentions: allowedMentionsFor(a),
       // SuppressEmbeds: no link previews and no image unfurl — plain text + inline links only.
       flags: MessageFlags.SuppressEmbeds,
     });
