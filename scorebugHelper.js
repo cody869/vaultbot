@@ -8,6 +8,7 @@
 import { AttachmentBuilder } from "discord.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
+import { list } from "./vault.js";
 
 // Discord allows up to 10 file attachments per message. A full week's slate
 // can run past that, so cards are capped and the rest still show up in the
@@ -32,6 +33,80 @@ function recordFor(standingsRows, teamAbbr) {
   if (!row) return undefined;
   const { wins = 0, losses = 0, ties = 0 } = row;
   return ties ? `${wins}-${losses}-${ties}` : `${wins}-${losses}`;
+}
+
+// Top passer/rusher/receiver for one game, read from WeeklyStats.
+// Game.scheduleId links to WeeklyStats.schedule_id -- confirmed against the
+// live entity schemas, not guessed. team_abbrName lives directly on each
+// WeeklyStats row (no roster join needed).
+//
+// Server-side filters aren't always honored (same caveat vault.js's other
+// readers work around), so this tries a narrow request first and re-checks
+// every row in memory regardless -- a false-positive from an ignored filter
+// never slips through.
+export async function getGameContributors(scheduleId, cycle) {
+  if (scheduleId == null) return [];
+
+  let rows;
+  try {
+    rows = await list("WeeklyStats", { schedule_id: scheduleId });
+    rows = rows.filter((r) => r.schedule_id === scheduleId);
+  } catch (err) {
+    console.error(`[SCOREBUG] WeeklyStats fetch failed: ${err.message}`);
+    return [];
+  }
+
+  if (!rows.length) {
+    // Narrow filter came back empty -- Base44 filters aren't always
+    // honored, so fall back to a cycle-scoped broad fetch and filter here.
+    try {
+      const broad = await list("WeeklyStats", { cycle }, { limit: 5000 });
+      rows = broad.filter((r) => r.schedule_id === scheduleId);
+    } catch (err) {
+      console.error(`[SCOREBUG] WeeklyStats broad fetch failed: ${err.message}`);
+      return [];
+    }
+  }
+  if (!rows.length) return [];
+
+  const topBy = (field, qualifyField) => {
+    const qualifying = rows.filter((r) => (r[qualifyField] ?? 0) > 0);
+    if (!qualifying.length) return null;
+    return qualifying.reduce((best, r) =>
+      (r[field] ?? 0) > (best[field] ?? 0) ? r : best
+    );
+  };
+
+  const contributors = [];
+
+  const passer = topBy("pass_yds", "pass_att");
+  if (passer) {
+    contributors.push({
+      name: passer.player_full_name,
+      team: passer.team_abbrName,
+      line: `${passer.pass_yds ?? 0} yds · ${passer.pass_tds ?? 0} TD · ${passer.pass_ints ?? 0} INT`,
+    });
+  }
+
+  const rusher = topBy("rush_yds", "rush_att");
+  if (rusher) {
+    contributors.push({
+      name: rusher.player_full_name,
+      team: rusher.team_abbrName,
+      line: `${rusher.rush_yds ?? 0} yds · ${rusher.rush_tds ?? 0} TD · ${rusher.rush_att ?? 0} car`,
+    });
+  }
+
+  const receiver = topBy("rec_yds", "rec_catches");
+  if (receiver) {
+    contributors.push({
+      name: receiver.player_full_name,
+      team: receiver.team_abbrName,
+      line: `${receiver.rec_catches ?? 0} rec · ${receiver.rec_yds ?? 0} yds · ${receiver.rec_tds ?? 0} TD`,
+    });
+  }
+
+  return contributors;
 }
 
 /**
@@ -66,7 +141,8 @@ export async function buildScorebugAttachments(scoresData, standingsRows) {
       : { abbr: homeAbbr, score: g.homeScore, record: recordFor(standingsRows, homeAbbr) };
 
     try {
-      const png = await renderScorebugCard({ week, teamA, teamB });
+      const contributors = await getGameContributors(g.scheduleId, g.cycle);
+      const png = await renderScorebugCard({ week, teamA, teamB, contributors });
       attachments.push(
         new AttachmentBuilder(png, {
           name: `scorebug-${awayAbbr}-${homeAbbr}-wk${week ?? "x"}.png`,
