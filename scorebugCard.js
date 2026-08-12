@@ -151,7 +151,7 @@ async function renderScorebugCard(game) {
     props: {
       style: {
         width: W, height: CARD_H, display: 'flex', position: 'relative',
-        overflow: 'hidden', background: A.color
+        overflow: 'hidden', background: `linear-gradient(90deg, ${A.color} 0%, #000000 78%)`
       },
       children: [
         {
@@ -162,7 +162,7 @@ async function renderScorebugCard(game) {
               width: seam.size, height: seam.size,
               top: seam.top, left: seam.left,
               transform: `rotate(${SEAM_ANGLE}deg)`,
-              background: B.color
+              background: `linear-gradient(90deg, #000000 22%, ${B.color} 100%)`
             }
           }
         },
