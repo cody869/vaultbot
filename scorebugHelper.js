@@ -14,6 +14,17 @@ import { abbrFromName } from "./emoji.js";
 // text embed as usual -- nothing is silently dropped, just not imaged.
 const MAX_CARDS_PER_MESSAGE = 10;
 
+// A game is "final" once it has real scores -- but this league's export
+// uses 0-0 as the not-yet-played placeholder, not null, so a null check
+// alone isn't enough. A genuine 0-0 final is effectively impossible in
+// football, so treating 0-0 as "not played" is a safe, simple signal given
+// there's no separate played/unplayed flag in the data.
+export function isGameFinal(scoreA, scoreB) {
+  if (scoreA == null || scoreB == null) return false;
+  if (scoreA === 0 && scoreB === 0) return false;
+  return true;
+}
+
 function recordFor(standingsRows, teamAbbr) {
   const row = standingsRows.find(
     (r) => (r.team_abbrName || "").toUpperCase() === teamAbbr
@@ -35,7 +46,7 @@ export async function buildScorebugAttachments(scoresData, standingsRows) {
   for (const g of games) {
     if (attachments.length >= MAX_CARDS_PER_MESSAGE) break;
     // Only completed games have a real final score to show.
-    if (g.homeScore == null || g.awayScore == null) continue;
+    if (!isGameFinal(g.homeScore, g.awayScore)) continue;
 
     const homeAbbr = abbrFromName(g.home);
     const awayAbbr = abbrFromName(g.away);
