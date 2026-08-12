@@ -11,9 +11,5 @@
     "start": "node index.js",
     "deploy": "node deploy-commands.js"
   },
-  "dependencies": {
-    "@base44/sdk": "^0.8.0",
-    "discord.js": "^14.16.3",
-    "dotenv": "^16.4.5"
-  }
+  "dependencies": { "@base44/sdk": "^0.8.0", "@resvg/resvg-js": "^2.6.2", "discord.js": "^14.16.3", "dotenv": "^16.4.5", "satori": "^0.29.0" }
 }
