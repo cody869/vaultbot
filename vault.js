@@ -248,6 +248,8 @@ export async function getScores(week, seasonNumber) {
       homeScore: g.user1_score ?? 0,
       awayScore: g.user2_score ?? 0,
       status: g.status, // 2=regular, 3=playoff (per export)
+      scheduleId: g.scheduleId ?? null,
+      cycle: g.cycle ?? null,
     }))
     // Final scores first by margin, just for stable ordering.
     .sort((a, b) => b.homeScore + b.awayScore - (a.homeScore + a.awayScore));
