@@ -24,6 +24,7 @@ import { AttachmentBuilder } from "discord.js";
 import { list, getStandings } from "./vault.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
+import { isGameFinal } from "./scorebugHelper.js";
 
 const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
 const POLL_MS = Number(process.env.SCOREBUG_POLL_SECONDS || 60) * 1000;
@@ -56,7 +57,7 @@ function savePosted(posted) {
 }
 
 function isFinal(g) {
-  return g.user1_score != null && g.user2_score != null;
+  return isGameFinal(g.user1_score, g.user2_score);
 }
 
 function importedTime(g) {
