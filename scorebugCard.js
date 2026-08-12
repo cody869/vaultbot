@@ -9,11 +9,18 @@
 //     week: 5,
 //     teamA: { abbr: 'NE',  score: 27, record: '3-1' }, // left side
 //     teamB: { abbr: 'JAX', score: 20, record: '2-2' }, // right side
+//     contributors: [                                    // optional
+//       { name: 'J. Allen', team: 'NE', line: '312 yds · 3 TD · 1 INT' },
+//       { name: 'I. Pacheco', team: 'JAX', line: '63 yds · 1 TD · 17 car' },
+//     ],
 //   });
 //   fs.writeFileSync('out.png', png);
 //
 // Convention: pass the WINNER as teamA (left side gets the bolder
 // treatment implicitly via card order) -- sort by score before calling.
+// When `contributors` is present (1-3 entries), the card grows a footer
+// strip below the scorebug with a name/team/stat-line chip per entry. With
+// no contributors, the card is just the original compact scorebug.
 
 import fs from 'fs';
 import path from 'path';
@@ -25,7 +32,8 @@ import { getTeam } from './teamLogos.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const W = 900;
-const H = 200;
+const CARD_H = 200; // height of the scorebug portion itself, always this
+const STRIP_H = 92;  // added height when contributors are present
 const SEAM_ANGLE = 10;
 const LOGO_SIZE = 480;
 
@@ -63,8 +71,41 @@ async function loadLogoDataUri(url) {
 function seamRectGeometry(angleDeg, size = 700) {
   const rad = (angleDeg * Math.PI) / 180;
   const cx = W / 2 + (size / 2) * Math.cos(rad);
-  const cy = H / 2 + (size / 2) * Math.sin(rad);
+  const cy = CARD_H / 2 + (size / 2) * Math.sin(rad);
   return { left: cx - size / 2, top: cy - size / 2, size };
+}
+
+// Lays out however many contributor chips are given (1-3) into evenly
+// spaced columns across the strip width.
+function contributorChips(contributors) {
+  const margin = 24;
+  const usable = W - margin * 2;
+  const colWidth = usable / contributors.length;
+  return contributors.map((c, i) => ({
+    type: 'div',
+    props: {
+      style: {
+        position: 'absolute', display: 'flex', flexDirection: 'column',
+        top: 20, left: margin + i * colWidth, width: colWidth - 16
+      },
+      children: [
+        {
+          type: 'div',
+          props: {
+            style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Barlow', fontSize: 17 },
+            children: `${c.name} — ${c.team}`
+          }
+        },
+        {
+          type: 'div',
+          props: {
+            style: { display: 'flex', color: 'rgba(255,255,255,0.6)', fontFamily: 'Barlow', fontSize: 15, marginTop: 4 },
+            children: c.line
+          }
+        }
+      ]
+    }
+  }));
 }
 
 /**
@@ -72,12 +113,15 @@ function seamRectGeometry(angleDeg, size = 700) {
  * @param {number} game.week
  * @param {{abbr: string, score: number, record?: string, logoUrl?: string}} game.teamA - left side
  * @param {{abbr: string, score: number, record?: string, logoUrl?: string}} game.teamB - right side
+ * @param {{name: string, team: string, line: string}[]} [game.contributors] - optional, 1-3 entries
  * @returns {Promise<Buffer>} PNG bytes
  */
 async function renderScorebugCard(game) {
-  const { week, teamA, teamB } = game;
+  const { week, teamA, teamB, contributors } = game;
   const A = { ...getTeam(teamA.abbr), ...teamA };
   const B = { ...getTeam(teamB.abbr), ...teamB };
+  const hasStrip = Array.isArray(contributors) && contributors.length > 0;
+  const H = hasStrip ? CARD_H + STRIP_H : CARD_H;
 
   const [fonts, logoA, logoB] = await Promise.all([
     loadFonts(),
@@ -87,13 +131,12 @@ async function renderScorebugCard(game) {
 
   const seam = seamRectGeometry(SEAM_ANGLE);
 
-  const tree = {
+  const scorebug = {
     type: 'div',
     props: {
       style: {
-        width: W, height: H, display: 'flex', position: 'relative',
-        overflow: 'hidden', borderRadius: 10,
-        border: '3px solid #D4A843', background: A.color
+        width: W, height: CARD_H, display: 'flex', position: 'relative',
+        overflow: 'hidden', background: A.color
       },
       children: [
         {
@@ -114,7 +157,7 @@ async function renderScorebugCard(game) {
             src: logoA, width: LOGO_SIZE, height: LOGO_SIZE,
             style: {
               position: 'absolute',
-              top: (H - LOGO_SIZE) / 2, left: -LOGO_SIZE * 0.15,
+              top: (CARD_H - LOGO_SIZE) / 2, left: -LOGO_SIZE * 0.15,
               opacity: 0.2
             }
           }
@@ -125,7 +168,7 @@ async function renderScorebugCard(game) {
             src: logoB, width: LOGO_SIZE, height: LOGO_SIZE,
             style: {
               position: 'absolute',
-              top: (H - LOGO_SIZE) / 2, right: -LOGO_SIZE * 0.15,
+              top: (CARD_H - LOGO_SIZE) / 2, right: -LOGO_SIZE * 0.15,
               opacity: 0.2
             }
           }
@@ -207,6 +250,40 @@ async function renderScorebugCard(game) {
           }
         }
       ].filter(Boolean)
+    }
+  };
+
+  const children = [scorebug];
+  if (hasStrip) {
+    children.push({
+      type: 'div',
+      props: {
+        style: { width: W, height: STRIP_H, display: 'flex', position: 'relative', background: '#12161C' },
+        children: [
+          {
+            type: 'div',
+            props: {
+              style: {
+                position: 'absolute', display: 'flex', top: 0, left: 0,
+                width: W, height: 1, background: 'rgba(212,168,67,0.4)'
+              }
+            }
+          },
+          ...contributorChips(contributors)
+        ]
+      }
+    });
+  }
+
+  const tree = {
+    type: 'div',
+    props: {
+      style: {
+        width: W, height: H, display: 'flex', flexDirection: 'column',
+        position: 'relative', overflow: 'hidden', borderRadius: 10,
+        border: '3px solid #D4A843'
+      },
+      children
     }
   };
 
