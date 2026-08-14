@@ -1,7 +1,7 @@
 // deploy-commands.js — registers slash commands with Discord.
 // Run this once (and again whenever you change commands): npm run deploy
 import "dotenv/config";
-import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } from "discord.js";
+import { REST, Routes, SlashCommandBuilder } from "discord.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -223,14 +223,11 @@ export const commands = [
       o
         .setName("rosters")
         .setDescription("Also pull all 32 rosters and free agents (slow)")
-    )
-    // Commissioner-only: an export hits EA hard and overwrites league data.
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    ),
 
   new SlashCommandBuilder()
     .setName("ea-status")
-    .setDescription("Show the EA connection status")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    .setDescription("Show the EA connection status"),
 ].map((c) => c.toJSON());
 
 // Registers the current command set with Discord. Safe to call on every
