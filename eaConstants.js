@@ -17,7 +17,7 @@
 // --- Madden version -------------------------------------------------
 // Bump both when the league moves to a new Madden.
 const TWO_DIGIT_YEAR = "26";
-const YEAR = "2026";
+const YEAR = "2027";
 
 // --- OAuth ----------------------------------------------------------
 const AUTH_SOURCE = 317239;
