@@ -20,6 +20,23 @@ const EXPORT_URL = (process.env.MADDEN_EXPORT_URL || "").replace(/\/$/, "");
 const WEEK_BATCH = 2;
 const TEAM_BATCH = 4;
 
+/*
+ * The eight per-week datasets. The key is BOTH the URL suffix and the option
+ * value, so adding one here is all that's needed to expose it.
+ */
+const WEEK_DATASETS = {
+  schedules: (c) => c.getSchedules,
+  passing: (c) => c.getPassingStats,
+  rushing: (c) => c.getRushingStats,
+  receiving: (c) => c.getReceivingStats,
+  defense: (c) => c.getDefensiveStats,
+  kicking: (c) => c.getKickingStats,
+  punting: (c) => c.getPuntingStats,
+  teamstats: (c) => c.getTeamStats,
+};
+
+const ALL_DATASETS = Object.keys(WEEK_DATASETS);
+
 function requireUrl() {
   if (!EXPORT_URL) {
     throw new Error("MADDEN_EXPORT_URL is not set — nowhere to send the export.");
@@ -71,31 +88,15 @@ function resolveWeeks(mode, leagueInfo) {
     .map((weekIndex) => ({ weekIndex, stage }));
 }
 
-async function exportWeek(client, leagueId, platform, { weekIndex, stage }) {
-  const [passing, schedules, teamstats, defense, punting, receiving, kicking, rushing] =
-    await Promise.all([
-      client.getPassingStats(leagueId, stage, weekIndex),
-      client.getSchedules(leagueId, stage, weekIndex),
-      client.getTeamStats(leagueId, stage, weekIndex),
-      client.getDefensiveStats(leagueId, stage, weekIndex),
-      client.getPuntingStats(leagueId, stage, weekIndex),
-      client.getReceivingStats(leagueId, stage, weekIndex),
-      client.getKickingStats(leagueId, stage, weekIndex),
-      client.getRushingStats(leagueId, stage, weekIndex),
-    ]);
-
+async function exportWeek(client, leagueId, platform, { weekIndex, stage }, datasets) {
   // Madden's weekIndex is 0-based; the export path is 1-based.
   const base = `/${platform}/${leagueId}/week/${stagePrefix(stage)}/${weekIndex + 1}`;
-  await Promise.all([
-    post(`${base}/passing`, passing),
-    post(`${base}/schedules`, schedules),
-    post(`${base}/teamstats`, teamstats),
-    post(`${base}/defense`, defense),
-    post(`${base}/punting`, punting),
-    post(`${base}/receiving`, receiving),
-    post(`${base}/kicking`, kicking),
-    post(`${base}/rushing`, rushing),
-  ]);
+  await Promise.all(
+    datasets.map(async (key) => {
+      const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
+      await post(`${base}/${key}`, data);
+    })
+  );
 }
 
 async function exportRosters(client, leagueId, platform, teamList, onProgress) {
@@ -121,16 +122,22 @@ async function exportRosters(client, leagueId, platform, teamList, onProgress) {
  * @param {"current"|"surrounding"|"all"} opts.mode   which weeks to pull
  * @param {boolean}  opts.rosters      also pull all 32 rosters + free agents
  * @param {boolean}  opts.leagueInfo   also pull teams + standings
+ * @param {string[]} opts.datasets     which per-week datasets (default: all 8)
  * @param {Function} opts.onProgress   async (text) => void, for editReply
  */
 async function runExport({
   mode = "current",
   rosters = false,
   leagueInfo: wantLeagueInfo = true,
+  datasets = ALL_DATASETS,
   onProgress,
 } = {}) {
   requireUrl();
   const progress = onProgress || (async () => {});
+
+  const unknown = datasets.filter((d) => !WEEK_DATASETS[d]);
+  if (unknown.length) throw new Error(`Unknown dataset(s): ${unknown.join(", ")}`);
+  if (!datasets.length) throw new Error("No datasets selected — nothing to export.");
 
   await progress("Connecting to EA…");
   const { client, leagueId } = await getConnectedClient();
@@ -138,7 +145,12 @@ async function runExport({
 
   const info = await client.getLeagueInfo(leagueId);
   const weeks = resolveWeeks(mode, info);
-  const summary = { weeks: weeks.length, rosters: 0, leagueInfo: false };
+  const summary = {
+    weeks: weeks.length,
+    datasets: datasets.length,
+    rosters: 0,
+    leagueInfo: false,
+  };
 
   if (wantLeagueInfo) {
     await progress("Exporting teams and standings…");
@@ -151,12 +163,20 @@ async function runExport({
     summary.leagueInfo = true;
   }
 
-  for (let i = 0; i < weeks.length; i += WEEK_BATCH) {
-    const batch = weeks.slice(i, i + WEEK_BATCH);
-    await progress(`Exporting weeks ${i + 1}-${Math.min(i + WEEK_BATCH, weeks.length)} of ${weeks.length}…`);
+  // A narrow pull is 1-2 requests per week instead of 8, so more weeks can go
+  // in parallel without hitting EA any harder than a full export already does.
+  const weekBatch = datasets.length > 2 ? WEEK_BATCH : 6;
+
+  for (let i = 0; i < weeks.length; i += weekBatch) {
+    const batch = weeks.slice(i, i + weekBatch);
+    await progress(
+      `Exporting weeks ${i + 1}-${Math.min(i + weekBatch, weeks.length)} of ${weeks.length}…`
+    );
     // Sequential per batch, parallel within it — mirrors snallabot's memory
     // guard for the "all weeks" case, which is otherwise a huge payload.
-    await Promise.all(batch.map((w) => exportWeek(client, leagueId, platform, w)));
+    await Promise.all(
+      batch.map((w) => exportWeek(client, leagueId, platform, w, datasets))
+    );
   }
 
   if (rosters) {
@@ -189,4 +209,5 @@ export {
   runExport,
   resolveWeeks,
   getLeagueFingerprint,
+  ALL_DATASETS,
 };
