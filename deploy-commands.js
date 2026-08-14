@@ -1,7 +1,7 @@
 // deploy-commands.js — registers slash commands with Discord.
 // Run this once (and again whenever you change commands): npm run deploy
 import "dotenv/config";
-import { REST, Routes, SlashCommandBuilder } from "discord.js";
+import { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } from "discord.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -205,6 +205,32 @@ export const commands = [
         .setDescription('How was this bug fixed?')
         .setRequired(true)
     ),
+
+  new SlashCommandBuilder()
+    .setName("export")
+    .setDescription("Pull a fresh Madden export from EA into the Vault")
+    .addStringOption((o) =>
+      o
+        .setName("scope")
+        .setDescription("Which weeks to pull (defaults to the current week)")
+        .addChoices(
+          { name: "Current week", value: "current" },
+          { name: "Surrounding weeks (prev / current / next)", value: "surrounding" },
+          { name: "All weeks (slow)", value: "all" }
+        )
+    )
+    .addBooleanOption((o) =>
+      o
+        .setName("rosters")
+        .setDescription("Also pull all 32 rosters and free agents (slow)")
+    )
+    // Commissioner-only: an export hits EA hard and overwrites league data.
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName("ea-status")
+    .setDescription("Show the EA connection status")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 ].map((c) => c.toJSON());
 
 // Registers the current command set with Discord. Safe to call on every
