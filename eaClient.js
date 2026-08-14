@@ -250,7 +250,7 @@ async function refreshBlazeSession(token, session) {
       componentId: 2060,
       commandId: 801,
       requestPayload: {},
-      componentName: "careermode",
+      componentName: "franchisemode",
     });
     return session;
   } catch (e) {
@@ -281,7 +281,7 @@ async function createEAClient(token, session) {
         componentId: 2060,
         commandId: 801,
         requestPayload: {},
-        componentName: "careermode",
+        componentName: "franchisemode",
       });
       return res.responseInfo.value.leagues;
     },
@@ -292,7 +292,7 @@ async function createEAClient(token, session) {
         componentId: 2060,
         commandId: 811,
         requestPayload: { leagueId },
-        componentName: "careermode",
+        componentName: "franchisemode",
       });
       return res.responseInfo.value;
     },
