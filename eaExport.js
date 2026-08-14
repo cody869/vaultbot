@@ -99,9 +99,50 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
   );
 }
 
+// Free agents come back as one payload roughly 8x the size of a team roster,
+// which exceeds Base44's function gateway timeout no matter how the import
+// batches its writes. Split the player array and post each chunk as its own
+// roster payload — 50 keeps every request the same shape and size as a team
+// roster, which already imports cleanly.
+const FA_CHUNK = 50;
+
+function chunkRosterPayload(payload, size) {
+  if (Array.isArray(payload)) {
+    const out = [];
+    for (let i = 0; i < payload.length; i += size) out.push(payload.slice(i, i + size));
+    return out.length ? out : [payload];
+  }
+  if (!payload || typeof payload !== "object") return [payload];
+
+  // The wrapper key differs between EA endpoints, so find the player array by
+  // shape (largest array of objects) rather than hardcoding a name.
+  let key = null;
+  for (const [k, v] of Object.entries(payload)) {
+    if (!Array.isArray(v) || v.length === 0) continue;
+    if (typeof v[0] !== "object" || v[0] === null) continue;
+    if (!key || v.length > payload[key].length) key = k;
+  }
+  if (!key || payload[key].length <= size) return [payload];
+
+  const arr = payload[key];
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push({ ...payload, [key]: arr.slice(i, i + size) });
+  }
+  return out;
+}
+
 async function exportRosters(client, leagueId, platform, teamList, onProgress) {
   const freeAgents = await client.getFreeAgents(leagueId);
-  await post(`/${platform}/${leagueId}/freeagents/roster`, freeAgents);
+  const faChunks = chunkRosterPayload(freeAgents, FA_CHUNK);
+  // Sequential on purpose: parallel chunks would put several full-league
+  // reads on the import function at once and reintroduce the timeout.
+  for (let i = 0; i < faChunks.length; i++) {
+    await post(`/${platform}/${leagueId}/freeagents/roster`, faChunks[i]);
+    if (onProgress && faChunks.length > 1) {
+      await onProgress(`Free agents ${i + 1}/${faChunks.length}`);
+    }
+  }
 
   for (let i = 0; i < teamList.length; i += TEAM_BATCH) {
     const batch = teamList.slice(i, i + TEAM_BATCH);
