@@ -219,6 +219,15 @@ export const commands = [
           { name: "All weeks (slow)", value: "all" }
         )
     )
+    .addStringOption((o) =>
+      o
+        .setName("data")
+        .setDescription("Which data to pull (defaults to everything)")
+        .addChoices(
+          { name: "Everything", value: "all" },
+          { name: "Schedules only", value: "schedules" }
+        )
+    )
     .addBooleanOption((o) =>
       o
         .setName("rosters")
