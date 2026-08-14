@@ -10,6 +10,8 @@ import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { buildScorebugAttachments } from "./scorebugHelper.js";
 import bugReportCommands from "./bugReport.js";
+import { handleExport, handleEaStatus } from "./eaCommands.js";
+import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
 import {
   getStandings,
   getStatLeaders,
@@ -77,6 +79,9 @@ client.once(Events.ClientReady, async (c) => {
   startTradeWatcher(c);
   startNewsWatcher(c);
   startScorebugWatcher(c);
+  // Keeps the EA tokens alive (the refresh chain dies after ~10 days idle)
+  // and, if EA_AUTO_EXPORT=true, exports when the league actually changes.
+  startEAWatcher();
 });
 
 // Reject instead of hanging forever if a Vault read stalls.
@@ -493,6 +498,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleNews(interaction);
         break;
       }
+      case "export": {
+        await handleExport(interaction);
+        break;
+      }
+      case "ea-status": {
+        await handleEaStatus(interaction);
+        break;
+      }
       default:
         await interaction.editReply("Unknown command.");
     }
@@ -519,6 +532,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     console.log(`👋 ${signal} received — shutting down cleanly.`);
+    stopEAWatcher();
     client.destroy();
     process.exit(0);
   });
