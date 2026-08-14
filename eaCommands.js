@@ -50,9 +50,19 @@ export async function handleExport(interaction) {
   }
 
   const mode = interaction.options.getString("scope") ?? "current";
+  const dataOpt = interaction.options.getString("data") ?? "all";
   const rosters = interaction.options.getBoolean("rosters") ?? false;
+
+  // "Schedules only" means exactly that — no stat categories, and no
+  // teams/standings either, so a schedule backfill can't overwrite current
+  // league info with a stale snapshot.
+  const datasets = dataOpt === "schedules" ? ["schedules"] : undefined;
+  const wantLeagueInfo = dataOpt !== "schedules";
+
   const started = Date.now();
-  console.log(`[EA] /export scope=${mode} rosters=${rosters} by ${interaction.user.tag}`);
+  console.log(
+    `[EA] /export scope=${mode} data=${dataOpt} rosters=${rosters} by ${interaction.user.tag}`
+  );
 
   // Discord only lets an interaction be edited for 15 minutes, and a full
   // roster pull can approach that. Throttle progress edits, and never let a
@@ -68,7 +78,13 @@ export async function handleExport(interaction) {
     }
   };
 
-  inFlight = runExport({ mode, rosters, onProgress });
+  inFlight = runExport({
+    mode,
+    rosters,
+    datasets,
+    leagueInfo: wantLeagueInfo,
+    onProgress,
+  });
   try {
     const summary = await inFlight;
     const secs = Math.round((Date.now() - started) / 1000);
@@ -77,6 +93,7 @@ export async function handleExport(interaction) {
       [
         "# Madden Export complete",
         `> Weeks: ${summary.weeks}`,
+        `> Per week: ${dataOpt === "schedules" ? "schedules only" : "all 8 datasets"}`,
         `> League info: ${summary.leagueInfo ? "teams + standings" : "skipped"}`,
         `> Rosters: ${summary.rosters ? `${summary.rosters} teams + free agents` : "skipped"}`,
         `> Took ${secs}s`,
