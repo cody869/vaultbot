@@ -11,7 +11,39 @@ import { getConnection } from "./eaTokenStore.js";
 // who fires the command.
 let inFlight = null;
 
+/*
+ * Who may run these.
+ *
+ * Deliberately NOT gated with setDefaultMemberPermissions(ManageGuild):
+ * Discord hides such commands outright from anyone lacking the permission,
+ * which locks out a commissioner who isn't a server admin. An allowlist of
+ * Discord user ids keeps control in this repo instead of in server roles.
+ *
+ * EA_ADMIN_IDS: comma-separated Discord user ids.
+ */
+function isAuthorized(interaction) {
+  const allowed = (process.env.EA_ADMIN_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // Fail closed. An unset allowlist must not mean "everyone" — an export
+  // overwrites league data.
+  if (!allowed.length) return false;
+  return allowed.includes(interaction.user.id);
+}
+
+async function denied(interaction) {
+  const configured = Boolean((process.env.EA_ADMIN_IDS || "").trim());
+  console.log(`[EA] denied ${interaction.commandName} for ${interaction.user.tag} (${interaction.user.id})`);
+  await interaction.editReply(
+    configured
+      ? "That command is limited to the league's export admins."
+      : "EA commands aren't enabled yet — set EA_ADMIN_IDS to your Discord user id."
+  );
+}
+
 export async function handleExport(interaction) {
+  if (!isAuthorized(interaction)) return denied(interaction);
   if (inFlight) {
     await interaction.editReply("An export is already running. Give it a minute.");
     return;
@@ -62,6 +94,7 @@ export async function handleExport(interaction) {
 }
 
 export async function handleEaStatus(interaction) {
+  if (!isAuthorized(interaction)) return denied(interaction);
   try {
     const conn = await getConnection();
     const expiry = new Date(conn.token.expiry);
