@@ -15,6 +15,35 @@ import { Stage, PRESEASON_WEEKS, SEASON_WEEKS } from "./eaConstants.js";
 
 const EXPORT_URL = (process.env.MADDEN_EXPORT_URL || "").replace(/\/$/, "");
 
+/*
+ * How to address the destination.
+ *
+ *   "path"   — append snallabot's URL paths (/{platform}/{league}/leagueteams,
+ *              /week/reg/5/passing, ...). Correct for a snallabot-compatible
+ *              relay like a webhook.site bin.
+ *
+ *   "direct" — POST every payload to MADDEN_EXPORT_URL unchanged.
+ *              Correct for Base44 functions: maddenWebhook identifies data by
+ *              calling detectPayloadType(body), and never looks at the URL.
+ *              Base44 also routes functions at an exact URL, so appending a
+ *              path makes it hunt for a function literally named
+ *              "maddenWebhook/xbsx/850949/leagueteams" and 404.
+ *
+ * Every stat record carries weekIndex/seasonIndex/stageIndex in the body, so
+ * nothing is lost by dropping the path.
+ */
+const EXPORT_MODE = (process.env.MADDEN_EXPORT_MODE || "path").toLowerCase();
+const DIRECT = EXPORT_MODE === "direct";
+
+/*
+ * Teams/standings are only sent when the destination can parse them. A
+ * snallabot-compatible relay routes on the URL path, so it can; maddenWebhook
+ * sniffs the body and has no branch for those two shapes. Override with
+ * MADDEN_EXPORT_LEAGUE_INFO=true if a handler gets added later.
+ */
+const LEAGUE_INFO_SUPPORTED =
+  process.env.MADDEN_EXPORT_LEAGUE_INFO === "true" || !DIRECT;
+
 // EA rate-limits and this bot shares a Railway container with the gateway
 // connection — keep concurrency low so a big export can't starve Discord.
 const WEEK_BATCH = 2;
@@ -59,10 +88,13 @@ function requireUrl() {
 
 async function post(pathname, data, retries = 3) {
   const body = JSON.stringify(data);
+  // In direct mode the path is dropped from the request but kept for logs and
+  // error messages, so failures still say WHICH payload broke.
+  const url = DIRECT ? EXPORT_URL : `${EXPORT_URL}${pathname}`;
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const res = await fetch(`${EXPORT_URL}${pathname}`, {
+      const res = await fetch(url, {
         method: "POST",
         body,
         headers: { "Content-Type": "application/json" },
@@ -196,7 +228,14 @@ async function runExport({
     leagueInfo: false,
   };
 
-  if (wantLeagueInfo) {
+  if (wantLeagueInfo && !LEAGUE_INFO_SUPPORTED) {
+    // maddenWebhook's detectPayloadType only recognizes weekly stats, rosters,
+    // and game schedules. Teams/standings payloads fall through to 'unknown'
+    // and come back 400, which would abort the whole export. Skip them rather
+    // than fail. Set MADDEN_EXPORT_LEAGUE_INFO=true once a handler exists.
+    console.log("[EA] skipping teams/standings — destination has no handler for them");
+    summary.leagueInfo = "skipped (unsupported)";
+  } else if (wantLeagueInfo) {
     await progress("Exporting teams and standings…");
     const [teams, standings] = await Promise.all([
       client.getTeams(leagueId),
