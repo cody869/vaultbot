@@ -13,6 +13,13 @@ import bugReportCommands from "./bugReport.js";
 import { handleExport, handleEaStatus } from "./eaCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
 import {
+  handleFantasyCommand,
+  handleFantasyAutocomplete,
+  startDraftWatcher,
+  announceWeek,
+} from "./fantasyCommands.js";
+import { startFantasyWatcher } from "./fantasyLeague.js";
+import {
   getStandings,
   getStatLeaders,
   getPowerRankings,
@@ -82,6 +89,12 @@ client.once(Events.ClientReady, async (c) => {
   // Keeps the EA tokens alive (the refresh chain dies after ~10 days idle)
   // and, if EA_AUTO_EXPORT=true, exports when the league actually changes.
   startEAWatcher();
+  // Fantasy: 60s clock pings + autopicks during the draft; 10m scoring pass
+  // that finds the earliest unscored week and posts results once it is final.
+  startDraftWatcher(c);
+  startFantasyWatcher(c, {
+    onWeekScored: (league, week, result) => announceWeek(c, league, week, result),
+  });
 });
 
 // Reject instead of hanging forever if a Vault read stalls.
@@ -245,6 +258,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.respond([]);
         } catch {}
       }
+    } else if (interaction.commandName === "fantasy") {
+      // Serves /fantasy pick and /fantasy queue from the cached draft pool.
+      await handleFantasyAutocomplete(interaction);
     }
     return;
   }
@@ -504,6 +520,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       case "ea-status": {
         await handleEaStatus(interaction);
+        break;
+      }
+      case "fantasy": {
+        // Already deferred above — handleFantasyCommand only uses editReply.
+        await handleFantasyCommand(interaction);
         break;
       }
       default:
