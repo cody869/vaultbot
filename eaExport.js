@@ -18,7 +18,21 @@ const EXPORT_URL = (process.env.MADDEN_EXPORT_URL || "").replace(/\/$/, "");
 // EA rate-limits and this bot shares a Railway container with the gateway
 // connection — keep concurrency low so a big export can't starve Discord.
 const WEEK_BATCH = 2;
-const TEAM_BATCH = 4;
+
+/*
+ * Roster pacing. Rosters are the heavy part: 33 POSTs of 250KB+ each.
+ * Relays and serverless endpoints drop these when they arrive in bursts, and
+ * the drop is silent — the POST returns 200 from the relay while the forward
+ * behind it never lands. Lower the batch and add a delay if that happens.
+ *
+ *   EA_TEAM_BATCH=1     fully sequential, slowest and safest
+ *   EA_ROSTER_DELAY_MS  pause between batches, e.g. 1000
+ */
+const TEAM_BATCH = Math.max(1, Number(process.env.EA_TEAM_BATCH || 2));
+const ROSTER_DELAY_MS = Math.max(0, Number(process.env.EA_ROSTER_DELAY_MS || 750));
+const POST_TIMEOUT_MS = Math.max(5000, Number(process.env.EA_POST_TIMEOUT_MS || 60000));
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /*
  * The eight per-week datasets. The key is BOTH the URL suffix and the option
@@ -43,14 +57,39 @@ function requireUrl() {
   }
 }
 
-async function post(pathname, data) {
-  const res = await fetch(`${EXPORT_URL}${pathname}`, {
-    method: "POST",
-    body: JSON.stringify(data),
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!res.ok) {
-    throw new Error(`Export POST ${pathname} failed: ${res.status} ${await res.text()}`);
+async function post(pathname, data, retries = 3) {
+  const body = JSON.stringify(data);
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await fetch(`${EXPORT_URL}${pathname}`, {
+        method: "POST",
+        body,
+        headers: { "Content-Type": "application/json" },
+        // Roster payloads are large; without a timeout a stalled connection
+        // hangs the whole export until Discord's interaction window expires.
+        signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+      });
+
+      if (res.ok) return;
+
+      // 4xx (except 429) won't fix themselves — fail immediately rather than
+      // hammering the endpoint three times with the same bad request.
+      const retryable = res.status === 429 || res.status >= 500;
+      const detail = `${res.status} ${(await res.text()).slice(0, 200)}`;
+      if (!retryable || attempt === retries - 1) {
+        throw new Error(`Export POST ${pathname} failed: ${detail}`);
+      }
+      console.warn(`[EA] ${pathname} -> ${detail}, retrying`);
+    } catch (e) {
+      if (e.message?.startsWith("Export POST")) throw e;
+      if (attempt === retries - 1) {
+        throw new Error(`Export POST ${pathname} failed: ${e.message}`);
+      }
+      console.warn(`[EA] ${pathname} -> ${e.message}, retrying`);
+    }
+
+    await sleep(500 * 2 ** attempt);
   }
 }
 
@@ -99,52 +138,16 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
   );
 }
 
-// Free agents come back as one payload roughly 8x the size of a team roster,
-// which exceeds Base44's function gateway timeout no matter how the import
-// batches its writes. Split the player array and post each chunk as its own
-// roster payload — 50 keeps every request the same shape and size as a team
-// roster, which already imports cleanly.
-const FA_CHUNK = 50;
-
-function chunkRosterPayload(payload, size) {
-  if (Array.isArray(payload)) {
-    const out = [];
-    for (let i = 0; i < payload.length; i += size) out.push(payload.slice(i, i + size));
-    return out.length ? out : [payload];
-  }
-  if (!payload || typeof payload !== "object") return [payload];
-
-  // The wrapper key differs between EA endpoints, so find the player array by
-  // shape (largest array of objects) rather than hardcoding a name.
-  let key = null;
-  for (const [k, v] of Object.entries(payload)) {
-    if (!Array.isArray(v) || v.length === 0) continue;
-    if (typeof v[0] !== "object" || v[0] === null) continue;
-    if (!key || v.length > payload[key].length) key = k;
-  }
-  if (!key || payload[key].length <= size) return [payload];
-
-  const arr = payload[key];
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) {
-    out.push({ ...payload, [key]: arr.slice(i, i + size) });
-  }
-  return out;
-}
-
 async function exportRosters(client, leagueId, platform, teamList, onProgress) {
   const freeAgents = await client.getFreeAgents(leagueId);
-  const faChunks = chunkRosterPayload(freeAgents, FA_CHUNK);
-  // Sequential on purpose: parallel chunks would put several full-league
-  // reads on the import function at once and reintroduce the timeout.
-  for (let i = 0; i < faChunks.length; i++) {
-    await post(`/${platform}/${leagueId}/freeagents/roster`, faChunks[i]);
-    if (onProgress && faChunks.length > 1) {
-      await onProgress(`Free agents ${i + 1}/${faChunks.length}`);
-    }
-  }
+  await post(`/${platform}/${leagueId}/freeagents/roster`, freeAgents);
 
   for (let i = 0; i < teamList.length; i += TEAM_BATCH) {
+    // Pace the batches. The failure this prevents is silent: a relay or
+    // serverless endpoint accepts the POST (200) but drops the work behind it
+    // when several 250KB bodies land at once.
+    if (i > 0 && ROSTER_DELAY_MS) await sleep(ROSTER_DELAY_MS);
+
     const batch = teamList.slice(i, i + TEAM_BATCH);
     await Promise.all(
       batch.map(async (team, offset) => {
