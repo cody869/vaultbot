@@ -2,6 +2,7 @@
 // Run this once (and again whenever you change commands): npm run deploy
 import "dotenv/config";
 import { REST, Routes, SlashCommandBuilder } from "discord.js";
+import { fantasyCommand } from "./fantasyDeployCommands.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -237,6 +238,9 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("ea-status")
     .setDescription("Show the EA connection status"),
+
+  // /fantasy and its subcommands (best ball league).
+  ...fantasyCommand,
 ].map((c) => c.toJSON());
 
 // Registers the current command set with Discord. Safe to call on every
