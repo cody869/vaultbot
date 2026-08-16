@@ -28,6 +28,7 @@ import { fileURLToPath } from 'url';
 import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
 import { getTeam } from './teamLogos.js';
+import { stripWhiteBackground } from './logoTransparency.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -78,7 +79,12 @@ async function loadLogoDataUri(url) {
     );
   }
 
-  const dataUri = 'data:image/png;base64,' + buf.toString('base64');
+  // A few assets in the source repo (Dolphins confirmed) are flat opaque
+  // PNGs with a baked-in white square instead of a transparent background.
+  // No-op for logos that are already transparent -- see logoTransparency.js.
+  const cleaned = stripWhiteBackground(buf);
+
+  const dataUri = 'data:image/png;base64,' + cleaned.toString('base64');
   logoCache.set(url, dataUri);
   return dataUri;
 }
