@@ -11,20 +11,78 @@
  *     a timer and hammering EA for nothing.
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
 import { getConnectedClient } from "./eaTokenStore.js";
-import { runExport, getLeagueFingerprint } from "./eaExport.js";
+import { runExport, runRosterExport, getLeagueFingerprint } from "./eaExport.js";
 
 const POLL_MINUTES = Number(process.env.EA_POLL_MINUTES || 15);
 const AUTO_EXPORT = process.env.EA_AUTO_EXPORT === "true";
+
+// Rosters change on trades/signings/cuts, not on games, so they get their own
+// cadence rather than riding the game-completion fingerprint. 0 disables.
+const ROSTER_HOURS = Number(process.env.EA_ROSTER_HOURS ?? 48);
+
+// The timestamp lives on the Railway volume next to the EA tokens. Holding it
+// in memory would mean every deploy restarts the 48h clock, so a bot that
+// redeploys often would either never export rosters or export on every boot.
+const ROSTER_STATE_PATH = process.env.EA_ROSTER_STATE_PATH || "/data/ea-roster.json";
 
 let lastKey = null;
 let timer = null;
 let running = false;
 
+async function readRosterState() {
+  try {
+    return JSON.parse(await fs.readFile(ROSTER_STATE_PATH, "utf8"));
+  } catch {
+    return { lastRosterExportAt: 0 };
+  }
+}
+
+async function writeRosterState(state) {
+  try {
+    await fs.mkdir(path.dirname(ROSTER_STATE_PATH), { recursive: true });
+    const tmp = `${ROSTER_STATE_PATH}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(state, null, 2));
+    await fs.rename(tmp, ROSTER_STATE_PATH);
+  } catch (e) {
+    // Losing the timestamp only costs an extra export later; never fatal.
+    console.error("[EA] could not persist roster export state:", e.message);
+  }
+}
+
+/**
+ * Export rosters if the interval has elapsed. Runs regardless of
+ * EA_AUTO_EXPORT — keeping rosters current is useful even when game exports
+ * are manual (the fantasy draft pool reads the Roster entity for team
+ * assignments).
+ */
+async function maybeExportRosters() {
+  if (!ROSTER_HOURS || ROSTER_HOURS <= 0) return;
+
+  const state = await readRosterState();
+  const last = Number(state.lastRosterExportAt) || 0;
+  const dueAt = last + ROSTER_HOURS * 3600 * 1000;
+  if (Date.now() < dueAt) return;
+
+  // Stamp BEFORE the export. If it fails we wait a full interval rather than
+  // retrying every poll and hammering EA through an outage.
+  await writeRosterState({ lastRosterExportAt: Date.now() });
+
+  const label = last ? `${Math.round((Date.now() - last) / 3600000)}h since last` : "first run";
+  console.log(`[EA] roster export due (${label})`);
+  const summary = await runRosterExport();
+  console.log(`[EA] roster export complete — ${summary.rosters} teams`);
+}
+
 async function tick() {
   if (running) return;
   running = true;
   try {
+    // Rosters first — this is also a token touch, so it doubles as keep-alive.
+    await maybeExportRosters();
+
     if (!AUTO_EXPORT) {
       // Keep-alive only: touching the client refreshes the token and session.
       await getConnectedClient();
@@ -59,7 +117,8 @@ async function tick() {
 function startEAWatcher() {
   if (timer) return;
   console.log(
-    `[EA] watcher starting (every ${POLL_MINUTES}m, auto-export ${AUTO_EXPORT ? "on" : "off"})`
+    `[EA] watcher starting (every ${POLL_MINUTES}m, auto-export ${AUTO_EXPORT ? "on" : "off"}` +
+      `, roster export ${ROSTER_HOURS > 0 ? `every ${ROSTER_HOURS}h` : "off"})`
   );
   // Small delay so this doesn't compete with the player cache warm at boot.
   setTimeout(tick, 30_000);
