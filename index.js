@@ -46,7 +46,7 @@ import {
 } from "./vault.js";
 import {
   standingsEmbed,
-  statLeadersEmbed,
+  statLeadersView,
   powerRankingsEmbed,
   tradeBlockEmbed,
   tradeBlockNoTeamEmbed,
@@ -133,6 +133,39 @@ async function renderPlayerView(player, team, view) {
       `${payload.components?.length ?? 0} component row(s)`
   );
   return payload;
+}
+
+// Remembers each user's requested leaderboard size so switching categories
+// keeps their "count". Bounded so it cannot grow without limit.
+const leadersCount = new Map();
+function rememberedCount(userId) {
+  return leadersCount.get(userId) ?? 10;
+}
+setInterval(() => {
+  if (leadersCount.size > 500) leadersCount.clear();
+}, 60 * 60 * 1000);
+
+// The category dropdown under a stat-leaders card.
+async function handleLeadersViewSelect(interaction) {
+  // Edit in place rather than posting a new message.
+  await interaction.deferUpdate();
+  try {
+    const category = interaction.values?.[0] ?? "passing_yds";
+    const data = await withTimeout(
+      getStatLeaders(category, rememberedCount(interaction.user.id)),
+      20_000,
+      "Stat leaders"
+    );
+    await interaction.editReply(statLeadersView({ ...data, category }));
+  } catch (err) {
+    console.error("Leaders view error:", err);
+    try {
+      await interaction.followUp({
+        content: `${err.message || "Could not switch categories."}`,
+        ephemeral: true,
+      });
+    } catch {}
+  }
 }
 
 // The Overview / Full Ratings / Weekly / Season dropdown under a player card.
@@ -274,6 +307,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // Stat-leaders category switcher — also before the trade handler.
+  if (
+    interaction.isStringSelectMenu() &&
+    interaction.customId.startsWith("leaders_view:")
+  ) {
+    await handleLeadersViewSelect(interaction);
+    return;
+  }
+
   // Committee vote buttons — checked before the trade-builder router.
   if (interaction.isButton() && interaction.customId.startsWith("tvote:")) {
     await handleTradeVote(interaction);
@@ -309,7 +351,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const category = interaction.options.getString("category");
         const count = interaction.options.getInteger("count") ?? 10;
         const data = await getStatLeaders(category, Math.min(count, 25));
-        await interaction.editReply({ embeds: [statLeadersEmbed(data)] });
+        // Carry the category and count so the dropdown can re-query with the
+        // same size the user originally asked for.
+        await interaction.editReply(
+          statLeadersView({ ...data, category })
+        );
+        leadersCount.set(interaction.user.id, Math.min(count, 25));
         break;
       }
       case "player": {
