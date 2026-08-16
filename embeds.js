@@ -4,7 +4,7 @@ import {
   ActionRowBuilder,
   StringSelectMenuBuilder,
 } from "discord.js";
-import { teamEmoji, teamEmojiByName, devEmoji } from "./emoji.js";
+import { teamEmoji, teamEmojiByName, abbrFromName, devEmoji } from "./emoji.js";
 
 const VAULT_COLOR = 0x1d4ed8; // XCFL blue
 const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
@@ -77,19 +77,103 @@ export function standingsEmbed({ season, rows }) {
   return e.setDescription(lines.join("\n"));
 }
 
-export function statLeadersEmbed({ label, field, season, leaders }) {
-  const e = base(`${label} Leaders — Season ${season ?? "?"}`, ROUTES.leaders);
-  if (!leaders.length) return e.setDescription("No stats found.");
+// Category groups for the leaders dropdown. Values must match STAT_CONFIG
+// keys in vault.js.
+export const LEADER_CATEGORIES = {
+  passing_yds: "Passing Yds",
+  passing_tds: "Passing TDs",
+  passing_ints: "Passing INTs",
+  rushing_yds: "Rushing Yds",
+  rushing_tds: "Rushing TDs",
+  fumbles: "Fumbles",
+  receptions: "Receptions",
+  receiving_yds: "Receiving Yds",
+  receiving_tds: "Receiving TDs",
+  sacks: "Sacks",
+  def_ints: "Defensive INTs",
+  forced_fumbles: "Forced Fumbles",
+};
 
-  const lines = leaders.map((p, i) => {
+// Discord allows max 25 options per select; we have 12, so one menu is fine.
+function leadersViewRow(category) {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`leaders_view:${category}`)
+    .setPlaceholder(LEADER_CATEGORIES[category] ?? "Pick a category")
+    .addOptions(
+      Object.entries(LEADER_CATEGORIES).map(([value, label]) => ({
+        label,
+        value,
+        default: value === category,
+      }))
+    );
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+/**
+ * Resolve a team abbreviation for a leaderboard row.
+ *
+ * team_abbrName is the normal source, but it can be null on rows written
+ * before the abbreviation was populated (or patched in by hand). Falling back
+ * to the display name keeps the helmet and the tag from rendering blank --
+ * which is what produced entries like "Jayden Daniels ()".
+ */
+function rowTeamAbbr(p) {
+  return (
+    p.team_abbrName ||
+    abbrFromName(p.team_displayName) ||
+    abbrFromName(p.team_name) ||
+    ""
+  );
+}
+
+/**
+ * Stat leaders as a live card: plain content plus a category dropdown, matching
+ * the /player card. Returns a full message payload rather than an embed.
+ */
+export function statLeadersView({ category, label, field, season, leaders }) {
+  const out = [];
+  out.push(`# ${label} Leaders`);
+  out.push(`### Season ${season ?? "?"}`);
+
+  if (!leaders.length) {
+    out.push("");
+    out.push("> No stats on file for this category yet.");
+    out.push("");
+    out.push(`-# [View on XCFL Vault](<${VAULT_URL}${ROUTES.leaders}>)`);
+    return { content: out.join("\n"), embeds: [], components: [leadersViewRow(category)] };
+  }
+
+  const top = leaders[0]?.[field] ?? 0;
+  const medals = ["\u{1F947}", "\u{1F948}", "\u{1F949}"];
+
+  out.push("");
+  for (let i = 0; i < leaders.length; i++) {
+    const p = leaders[i];
     const raw = p[field] ?? 0;
-    // Sacks come as decimals (e.g. 0.5); show one decimal only when needed.
+    // Sacks arrive as decimals (0.5); show a decimal only when there is one.
     const val = Number.isInteger(raw) ? raw.toLocaleString() : raw.toFixed(1);
-    const team = p.team_abbrName ?? "";
-    const logo = teamEmoji(team);
-    return `\`${String(i + 1).padStart(2)}\` ${logo} **${val}**  ${p.player_fullName} *(${team})*`;
-  });
-  return e.setDescription(lines.join("\n"));
+    const abbr = rowTeamAbbr(p);
+    const helmet = abbr ? teamEmoji(abbr) : teamEmojiByName(p.team_displayName);
+    const rank = medals[i] ?? `\`${String(i + 1).padStart(2)}\``;
+    const teamTag = abbr ? ` *(${abbr})*` : "";
+    const gp = p.gamesPlayed ? ` \u00b7 ${p.gamesPlayed} GP` : "";
+
+    // Simple proportional bar so the gap between leaders is visible at a glance.
+    const pct = top > 0 ? Math.max(0, Math.min(1, raw / top)) : 0;
+    const filled = Math.round(pct * 10);
+    const bar = "\u2588".repeat(filled) + "\u2591".repeat(10 - filled);
+
+    out.push(`${rank} ${helmet} **${val}** ${p.player_fullName}${teamTag}`);
+    out.push(`-# \`${bar}\`${gp}`);
+  }
+
+  out.push("");
+  out.push(`-# [View on XCFL Vault](<${VAULT_URL}${ROUTES.leaders}>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "\u2026";
+
+  return { content, embeds: [], components: [leadersViewRow(category)] };
 }
 
 export function powerRankingsEmbed({ week, rows }) {
