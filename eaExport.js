@@ -273,6 +273,31 @@ async function runExport({
 }
 
 /**
+ * Rosters only — no weeks, no stats, no league info.
+ *
+ * runExport() can't express this: it rejects an empty `datasets` array, so
+ * asking it for rosters alone would still pull a week of stats. Rosters change
+ * on their own schedule (trades, signings, cuts) rather than when a game is
+ * played, so they get their own cadence.
+ */
+async function runRosterExport({ onProgress } = {}) {
+  requireUrl();
+  const progress = onProgress || (async () => {});
+
+  await progress("Connecting to EA…");
+  const { client, leagueId } = await getConnectedClient();
+  const platform = client.getSystemConsole();
+
+  const info = await client.getLeagueInfo(leagueId);
+  const teamList = info.teamIdInfoList || [];
+
+  await progress("Exporting rosters…");
+  await exportRosters(client, leagueId, platform, teamList, progress);
+
+  return { rosters: teamList.length };
+}
+
+/**
  * Cheap poll of league state. Returns a fingerprint that changes when the
  * league advances or a game finishes — use it to trigger an auto-export
  * instead of exporting on a blind timer.
@@ -290,6 +315,7 @@ async function getLeagueFingerprint() {
 
 export {
   runExport,
+  runRosterExport,
   resolveWeeks,
   getLeagueFingerprint,
   ALL_DATASETS,
