@@ -21,7 +21,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
-import { list, getStandings } from "./vault.js";
+import { list, getStandings, getCurrentCycle } from "./vault.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
 import { isGameFinal, getGameContributors } from "./scorebugHelper.js";
@@ -120,7 +120,15 @@ async function tick(client, { seed = false } = {}) {
     return;
   }
 
-  const finals = games.filter(isFinal);
+  // Only the CURRENT cycle is "from here on out" -- a historical CSV
+  // backfill (old seasons, old cycle) must never reach postCard, no matter
+  // how recent its updated_date looks or whether this is a seed pass.
+  // This is the actual fix for the Aug 2026 import flood: the old seed/
+  // cutoff guard below only protected first boot, so a bulk import landing
+  // mid-process (bot already running) skipped it entirely and posted every
+  // historical game as if it were live.
+  const currentCycle = await getCurrentCycle();
+  const finals = games.filter((g) => g.cycle === currentCycle && isFinal(g));
   if (!finals.length) return;
 
   const posted = loadPosted();
