@@ -28,29 +28,26 @@ import {
   makePick,
   shuffle,
   computeDeadline,
+  clockMinutes,
   rosterCounts,
   eligiblePositions,
-  invalidatePool,
   processExpiredClocks,
 } from './fantasyDraft.js';
 
 import {
   generateSchedule,
   scoreWeek,
-  recalcStandings,
   rankTeams,
   advanceLeague,
 } from './fantasyLeague.js';
 
 import {
   LEAGUE_DEFAULTS,
-  LINEUP_SLOTS,
   ROSTER_MIN,
   STAT_FIELDS,
   KEY_FIELDS,
   GAME_FIELDS,
   resolveKey,
-  round2,
 } from './fantasyConfig.js';
 
 const PLAIN = { flags: MessageFlags.SuppressEmbeds };
@@ -136,6 +133,9 @@ export async function handleFantasyCommand(interaction) {
 
   switch (sub) {
     case 'setup': return cmdSetup(interaction);
+    case 'config': return cmdConfig(interaction);
+    case 'pause': return cmdPause(interaction);
+    case 'resume': return cmdResume(interaction);
     case 'join': return cmdJoin(interaction);
     case 'leave': return cmdLeave(interaction);
     case 'start': return cmdStart(interaction);
@@ -152,6 +152,171 @@ export async function handleFantasyCommand(interaction) {
     default:
       return interaction.editReply({ content: `Unknown subcommand: ${sub}`, ...PLAIN });
   }
+}
+
+
+function fmtClock(minutes) {
+  const m = Number(minutes) || 0;
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem ? `${h}h ${rem}m` : `${h}h`;
+}
+
+// ---------------------------------------------------------------------------
+// config / pause / resume
+// ---------------------------------------------------------------------------
+
+async function cmdConfig(interaction) {
+  if (!isCommissioner(interaction)) {
+    return interaction.editReply({ content: 'Commissioner only.', ...PLAIN });
+  }
+  const league = await getLeague();
+  if (!league) return interaction.editReply({ content: 'No league found — run `/fantasy setup` first.', ...PLAIN });
+
+  const clockMin = interaction.options.getInteger('pick_minutes');
+  const clockHrs = interaction.options.getInteger('pick_hours');
+  const quietStart = interaction.options.getInteger('quiet_start');
+  const quietEnd = interaction.options.getInteger('quiet_end');
+  const tz = interaction.options.getInteger('tz_offset');
+  const applyNow = interaction.options.getBoolean('apply_now');
+
+  const updates = {};
+  if (clockMin != null && clockHrs != null) {
+    return interaction.editReply({
+      content: 'Pick one: `pick_minutes` or `pick_hours`, not both.',
+      ...PLAIN,
+    });
+  }
+  if (clockMin != null) updates.pick_clock_minutes = clockMin;
+  if (clockHrs != null) updates.pick_clock_minutes = clockHrs * 60;
+  if (quietStart != null) updates.quiet_start_hour = quietStart;
+  if (quietEnd != null) updates.quiet_end_hour = quietEnd;
+  if (tz != null) updates.timezone_offset_hours = tz;
+
+  // No options → just report the current settings.
+  if (!Object.keys(updates).length) {
+    const qs = league.quiet_start_hour ?? LEAGUE_DEFAULTS.quiet_start_hour;
+    const qe = league.quiet_end_hour ?? LEAGUE_DEFAULTS.quiet_end_hour;
+    return interaction.editReply({
+      content: [
+        '# Draft settings',
+        `**Pick clock:** ${fmtClock(clockMinutes(league))}`,
+        `**Quiet hours:** ${qs === qe ? '_disabled_' : `${qs}:00–${qe}:00 (UTC${(league.timezone_offset_hours ?? LEAGUE_DEFAULTS.timezone_offset_hours) >= 0 ? '+' : ''}${league.timezone_offset_hours ?? LEAGUE_DEFAULTS.timezone_offset_hours})`}`,
+        `**Draft:** ${league.draft_status}${league.draft_paused ? ' — **PAUSED**' : ''}`,
+        `**Rounds:** ${league.roster_size} · **Teams:** ${league.team_slots}`,
+        '',
+        '-# Change with e.g. `/fantasy config pick_minutes:90`. Set quiet_start and quiet_end to the same value to disable the overnight pause.',
+      ].join('\n'),
+      ...PLAIN,
+    });
+  }
+
+  const merged = { ...league, ...updates };
+
+  // Mid-draft clock changes don't move the pick already running unless asked,
+  // so nobody loses time they were counting on.
+  let deadlineNote = 'Applies to the next pick.';
+  if (applyNow && merged.draft_status === 'in_progress' && !merged.draft_paused) {
+    updates.current_pick_deadline = computeDeadline(merged).toISOString();
+    deadlineNote = `Current pick's deadline reset to ${relTime(updates.current_pick_deadline)}.`;
+  }
+
+  await updateEntity(ENTITIES.league, league.id, updates);
+  invalidate(ENTITIES.league);
+
+  const lines = ['# Draft settings updated'];
+  if (updates.pick_clock_minutes != null) lines.push(`**Pick clock:** ${fmtClock(updates.pick_clock_minutes)}`);
+  if (updates.quiet_start_hour != null || updates.quiet_end_hour != null) {
+    const qs = merged.quiet_start_hour, qe = merged.quiet_end_hour;
+    lines.push(`**Quiet hours:** ${qs === qe ? 'disabled' : `${qs}:00–${qe}:00`}`);
+  }
+  if (updates.timezone_offset_hours != null) lines.push(`**TZ offset:** UTC${updates.timezone_offset_hours >= 0 ? '+' : ''}${updates.timezone_offset_hours}`);
+  lines.push('');
+  lines.push(`-# ${deadlineNote}`);
+
+  return interaction.editReply({ content: lines.join('\n'), ...PLAIN });
+}
+
+async function cmdPause(interaction) {
+  if (!isCommissioner(interaction)) {
+    return interaction.editReply({ content: 'Commissioner only.', ...PLAIN });
+  }
+  const league = await getLeague();
+  if (!league) return interaction.editReply({ content: 'No league found.', ...PLAIN });
+  if (league.draft_status !== 'in_progress') {
+    return interaction.editReply({ content: 'The draft is not running.', ...PLAIN });
+  }
+  if (league.draft_paused) {
+    return interaction.editReply({ content: 'Already paused. Resume with `/fantasy resume`.', ...PLAIN });
+  }
+
+  const remainingMs = league.current_pick_deadline
+    ? new Date(league.current_pick_deadline).getTime() - Date.now()
+    : null;
+
+  await updateEntity(ENTITIES.league, league.id, {
+    draft_paused: true,
+    paused_at: new Date().toISOString(),
+  });
+  invalidate(ENTITIES.league);
+
+  const left = remainingMs != null && remainingMs > 0
+    ? fmtClock(Math.round(remainingMs / 60000))
+    : 'no time';
+
+  return interaction.editReply({
+    content: [
+      '# Draft paused',
+      `The clock is frozen with **${left}** left on the current pick. No autopicks will fire.`,
+      'Picks can still be made manually while paused.',
+      '',
+      'Resume with `/fantasy resume`.',
+    ].join('\n'),
+    ...PLAIN,
+  });
+}
+
+async function cmdResume(interaction) {
+  if (!isCommissioner(interaction)) {
+    return interaction.editReply({ content: 'Commissioner only.', ...PLAIN });
+  }
+  const league = await getLeague();
+  if (!league) return interaction.editReply({ content: 'No league found.', ...PLAIN });
+  if (!league.draft_paused) {
+    return interaction.editReply({ content: 'The draft is not paused.', ...PLAIN });
+  }
+
+  // Shift the deadline forward by however long we were paused, so whoever is
+  // on the clock gets back exactly the time they had left rather than a fresh
+  // clock or an already-expired one.
+  const pausedMs = league.paused_at ? Date.now() - new Date(league.paused_at).getTime() : 0;
+  const updates = { draft_paused: false, paused_at: null };
+
+  if (league.current_pick_deadline && pausedMs > 0) {
+    const shifted = new Date(new Date(league.current_pick_deadline).getTime() + pausedMs);
+    updates.current_pick_deadline = shifted.toISOString();
+  } else if (!league.current_pick_deadline) {
+    // Defensive: no deadline on record, so start a fresh clock.
+    updates.current_pick_deadline = computeDeadline(league).toISOString();
+  }
+
+  await updateEntity(ENTITIES.league, league.id, updates);
+  invalidate(ENTITIES.league);
+
+  const teams = await getTeams(league.id);
+  const onClock = teamOnTheClock({ ...league, ...updates }, teams);
+
+  return interaction.editReply({
+    content: [
+      '# Draft resumed',
+      `Paused for ${fmtClock(Math.round(pausedMs / 60000))} — that time was added back to the clock.`,
+      onClock
+        ? `On the clock: <@${onClock.team.discord_user_id}> (${teamLabel(onClock.team)}) — ${relTime(updates.current_pick_deadline)}`
+        : 'Draft complete.',
+    ].join('\n'),
+    ...PLAIN,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +337,8 @@ async function cmdSetup(interaction) {
     cycle: process.env.FANTASY_CYCLE || null,
     status: 'setup',
     draft_status: 'pending',
+    draft_paused: false,
+    paused_at: null,
     draft_order: [],
     current_pick_number: 1,
     current_pick_deadline: null,
@@ -617,10 +784,12 @@ async function cmdDoctor(interaction) {
 
   const offensive = stats.find((r) => resolveKey(r, STAT_FIELDS.passYds) || resolveKey(r, STAT_FIELDS.recYds));
   const defensive = stats.find((r) => resolveKey(r, STAT_FIELDS.defSacks) || resolveKey(r, STAT_FIELDS.defInts));
+  const s84 = games.filter((g) => Number(g.season_number) === 84).length;
 
   const out = [
     '# Fantasy field doctor',
-    `WeeklyStats rows: ${stats.length} · Game rows: ${games.length}`,
+    `WeeklyStats rows: ${stats.length} · Game rows: ${games.length} (${s84} in S84)`,
+    stats.length ? '' : '**WeeklyStats is empty** — nothing to verify until the first week imports.',
     '',
     ...report('Identity fields', statRow, KEY_FIELDS),
     '',
@@ -638,6 +807,7 @@ async function cmdDoctor(interaction) {
     ...report('Game fields', gameRow, GAME_FIELDS),
     '',
     '_Anything marked ✗ scores as zero. Fix the candidate list in fantasyConfig.js._',
+    '_Known gaps: def_tds and def_safeties are not in the WeeklyStats schema, so defensive/return TDs and safeties always score 0._',
   ];
 
   return interaction.editReply({ content: out.join('\n').slice(0, 1900), ...PLAIN });
@@ -654,6 +824,9 @@ export function startDraftWatcher(client, { intervalMs = 60 * 1000 } = {}) {
     try {
       const league = await getLeague();
       if (!league || league.draft_status !== 'in_progress') return;
+      // Paused: no autopicks, no "on the clock" pings. Everything resumes
+      // where it left off when the commissioner runs /fantasy resume.
+      if (league.draft_paused) return;
 
       const channelId = league.channel_id || process.env.FANTASY_CHANNEL_ID;
       if (!channelId) return;
