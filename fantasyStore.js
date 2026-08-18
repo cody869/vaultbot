@@ -232,6 +232,10 @@ export async function getPlayers() {
   return cachedList('Player', 10 * 60 * 1000);
 }
 
+export async function getRosters() {
+  return cachedList('Roster', 10 * 60 * 1000);
+}
+
 export async function getGames() {
   return cachedList('Game', 2 * 60 * 1000);
 }
