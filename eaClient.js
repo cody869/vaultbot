@@ -327,6 +327,90 @@ async function createEAClient(token, session) {
         returnFreeAgents: true,
         teamId: 0,
       }),
+
+    /*
+     * Franchise admin write commands. componentId=2060 is confirmed (same
+     * component getLeagues/getLeagueInfo above use). commandId=0 is
+     * UNVERIFIED — the two commandIds we could independently confirm
+     * (Mobile_GetMyLeagues=801, Mobile_Career_GetLeagueHub=811) are NOT 0,
+     * so this is an open question, not settled. Payload field names are
+     * decompiled from the app itself (AdminAction_PostBody,
+     * ClearCapPenalties_PostBody, ForceResult_PostBody,
+     * ToggleAutoPilot_PostBody — namespace MCA.DataContainers) and should
+     * be solid regardless of how the commandId question shakes out.
+     * Test toggleAutoPilot first — reversible, visible in-app.
+     */
+    bootUser: (leagueId, bootedUserId) =>
+      sendBlazeRequest(token, validSession, {
+        commandName: "Mobile_UserAdmin_BootUser",
+        componentId: 2060,
+        commandId: 0,
+        requestPayload: { leagueId, bootedUserId },
+        componentName: "franchisemode",
+      }),
+
+    addAdmin: (leagueId, newAdminUserId) =>
+      sendBlazeRequest(token, validSession, {
+        commandName: "Mobile_UserAdmin_AddAdmin",
+        componentId: 2060,
+        commandId: 0,
+        requestPayload: { leagueId, newAdminUserId },
+        componentName: "franchisemode",
+      }),
+
+    removeAdmin: (leagueId, newAdminUserId) =>
+      sendBlazeRequest(token, validSession, {
+        commandName: "Mobile_UserAdmin_RemoveAdmin",
+        componentId: 2060,
+        commandId: 0,
+        requestPayload: { leagueId, newAdminUserId },
+        componentName: "franchisemode",
+      }),
+
+    clearCapPenalties: (leagueId, clearedUserId) =>
+      sendBlazeRequest(token, validSession, {
+        commandName: "Mobile_UserAdmin_ClearCapPenalties",
+        componentId: 2060,
+        commandId: 0,
+        requestPayload: { leagueId, clearedUserId },
+        componentName: "franchisemode",
+      }),
+
+    toggleAutoPilot: (leagueId, toggleAutoPilotUserId, actionTimeout = 0) =>
+      sendBlazeRequest(token, validSession, {
+        commandName: "Mobile_UserAdmin_ToggleAutoPilot",
+        componentId: 2060,
+        commandId: 0,
+        requestPayload: { leagueId, actionTimeout, ToggleAutoPilotUserId: toggleAutoPilotUserId },
+        componentName: "franchisemode",
+      }),
+
+    forceHomeWin: (leagueId, seasonGameKey) =>
+      sendBlazeRequest(token, validSession, {
+        commandName: "Mobile_GameSchedule_ForceHomeWin",
+        componentId: 2060,
+        commandId: 0,
+        requestPayload: { leagueId, seasonGameKey },
+        componentName: "franchisemode",
+      }),
+
+    forceAwayWin: (leagueId, seasonGameKey) =>
+      sendBlazeRequest(token, validSession, {
+        commandName: "Mobile_GameSchedule_ForceAwayWin",
+        componentId: 2060,
+        commandId: 0,
+        requestPayload: { leagueId, seasonGameKey },
+        componentName: "franchisemode",
+      }),
+
+    forceNoWin: (leagueId, seasonGameKey) =>
+      sendBlazeRequest(token, validSession, {
+        commandName: "Mobile_GameSchedule_ForceNoWin",
+        componentId: 2060,
+        commandId: 0,
+        requestPayload: { leagueId, seasonGameKey },
+        componentName: "franchisemode",
+      }),
   };
 }
 
