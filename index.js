@@ -11,7 +11,7 @@ import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { buildScorebugAttachments } from "./scorebugHelper.js";
 import bugReportCommands from "./bugReport.js";
 import { handleExport, handleEaStatus } from "./eaCommands.js";
-import { handleAdminCommand } from "./adminCommands.js";
+import { handleAdminCommand, suggestForceWinGames } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
 import {
   handleFantasyCommand,
@@ -295,6 +295,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } else if (interaction.commandName === "fantasy") {
       // Serves /fantasy pick and /fantasy queue from the cached draft pool.
       await handleFantasyAutocomplete(interaction);
+    } else if (interaction.commandName === "admin") {
+      // Only force-home-win/force-away-win/force-no-win have an
+      // autocomplete option ("game"); other /admin subcommands use plain
+      // user/integer options with no autocomplete to serve.
+      try {
+        const focused = String(interaction.options.getFocused() ?? "");
+        await interaction.respond(await suggestForceWinGames(focused));
+      } catch (err) {
+        console.error("[AUTOCOMPLETE] admin failed:", err.message);
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
     }
     return;
   }
