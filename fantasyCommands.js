@@ -155,6 +155,19 @@ export async function handleFantasyCommand(interaction) {
 }
 
 
+/**
+ * Describe how the regular season length compares to a full round robin.
+ * With N teams a complete round robin needs N-1 weeks; a shorter window means
+ * each team plays fewer distinct opponents. Surfacing this avoids a surprise
+ * when the schedule generates at the end of the draft.
+ */
+function weeksNote(league) {
+  const weeks = (league.regular_season_end_week ?? 0) - (league.scoring_start_week ?? 0) + 1;
+  const needed = (league.team_slots ?? 12) - 1;
+  if (weeks >= needed) return `${weeks} wks · full round robin`;
+  return `${weeks} wks · each team plays ${weeks} of ${needed} opponents`;
+}
+
 function fmtClock(minutes) {
   const m = Number(minutes) || 0;
   if (m < 60) return `${m}m`;
@@ -180,6 +193,8 @@ async function cmdConfig(interaction) {
   const quietEnd = interaction.options.getInteger('quiet_end');
   const tz = interaction.options.getInteger('tz_offset');
   const applyNow = interaction.options.getBoolean('apply_now');
+  const startWeek = interaction.options.getInteger('start_week');
+  const endWeek = interaction.options.getInteger('end_week');
 
   const updates = {};
   if (clockMin != null && clockHrs != null) {
@@ -194,6 +209,31 @@ async function cmdConfig(interaction) {
   if (quietEnd != null) updates.quiet_end_hour = quietEnd;
   if (tz != null) updates.timezone_offset_hours = tz;
 
+  // Season weeks. Locked once the schedule exists — changing them afterwards
+  // would leave matchups stranded on weeks that are no longer played.
+  if (startWeek != null || endWeek != null) {
+    if (league.schedule_generated) {
+      return interaction.editReply({
+        content: 'The schedule is already generated — season weeks are locked. Matchups would be stranded on weeks that no longer exist.',
+        ...PLAIN,
+      });
+    }
+    const s2 = startWeek ?? league.scoring_start_week ?? LEAGUE_DEFAULTS.scoring_start_week;
+    const e2 = endWeek ?? league.regular_season_end_week ?? LEAGUE_DEFAULTS.regular_season_end_week;
+    const playoffStart = league.playoff_start_week ?? LEAGUE_DEFAULTS.playoff_start_week;
+    if (s2 >= e2) {
+      return interaction.editReply({ content: `Start week (${s2}) must be before the end week (${e2}).`, ...PLAIN });
+    }
+    if (e2 >= playoffStart) {
+      return interaction.editReply({
+        content: `Regular season must end before the playoffs begin (week ${playoffStart}).`,
+        ...PLAIN,
+      });
+    }
+    if (startWeek != null) updates.scoring_start_week = startWeek;
+    if (endWeek != null) updates.regular_season_end_week = endWeek;
+  }
+
   // No options → just report the current settings.
   if (!Object.keys(updates).length) {
     const qs = league.quiet_start_hour ?? LEAGUE_DEFAULTS.quiet_start_hour;
@@ -203,6 +243,9 @@ async function cmdConfig(interaction) {
         '# Draft settings',
         `**Pick clock:** ${fmtClock(clockMinutes(league))}`,
         `**Quiet hours:** ${qs === qe ? '_disabled_' : `${qs}:00–${qe}:00 (UTC${(league.timezone_offset_hours ?? LEAGUE_DEFAULTS.timezone_offset_hours) >= 0 ? '+' : ''}${league.timezone_offset_hours ?? LEAGUE_DEFAULTS.timezone_offset_hours})`}`,
+        `**Regular season:** weeks ${league.scoring_start_week}–${league.regular_season_end_week}` +
+          ` (${weeksNote(league)})`,
+        `**Playoffs:** weeks ${league.playoff_start_week}–${league.final_week_end}, ${league.playoff_teams} teams`,
         `**Draft:** ${league.draft_status}${league.draft_paused ? ' — **PAUSED**' : ''}`,
         `**Rounds:** ${league.roster_size} · **Teams:** ${league.team_slots}`,
         '',
@@ -232,6 +275,9 @@ async function cmdConfig(interaction) {
     lines.push(`**Quiet hours:** ${qs === qe ? 'disabled' : `${qs}:00–${qe}:00`}`);
   }
   if (updates.timezone_offset_hours != null) lines.push(`**TZ offset:** UTC${updates.timezone_offset_hours >= 0 ? '+' : ''}${updates.timezone_offset_hours}`);
+  if (updates.scoring_start_week != null || updates.regular_season_end_week != null) {
+    lines.push(`**Regular season:** weeks ${merged.scoring_start_week}–${merged.regular_season_end_week} (${weeksNote(merged)})`);
+  }
   lines.push('');
   lines.push(`-# ${deadlineNote}`);
 
