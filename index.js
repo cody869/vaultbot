@@ -11,6 +11,7 @@ import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { buildScorebugAttachments } from "./scorebugHelper.js";
 import bugReportCommands from "./bugReport.js";
 import { handleExport, handleEaStatus } from "./eaCommands.js";
+import { handleAdminCommand } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
 import {
   handleFantasyCommand,
@@ -567,6 +568,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       case "ea-status": {
         await handleEaStatus(interaction);
+        break;
+      }
+      case "admin": {
+        await handleAdminCommand(interaction);
         break;
       }
       case "fantasy": {
