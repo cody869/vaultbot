@@ -6,13 +6,10 @@ import {
   STAT_FIELDS,
   KEY_FIELDS,
   GAME_FIELDS,
-  DEFENSIVE_POSITIONS,
-  fantasyPosition,
   pointsAllowedScore,
   readNumber,
   readString,
   normalizeName,
-  playerKey,
   isDefenseKey,
   round2,
 } from './fantasyConfig.js';
@@ -143,9 +140,18 @@ export function optimalLineup(entries) {
 // Week assembly
 // ---------------------------------------------------------------------------
 
-/** Index this week's stat rows by player identity key and by team. */
+/**
+ * Index this week's stat rows.
+ *
+ * WeeklyStats has no position field, so offensive rows are keyed by normalized
+ * player name (plus a name|team key for disambiguating duplicate names), and
+ * team defense simply collects EVERY row for that team — offensive players
+ * carry no def_* values, so summing across all of them is safe and avoids
+ * needing a position join at scoring time.
+ */
 export function indexWeeklyStats(statRows, { season, week }) {
-  const byPlayerKey = new Map();
+  const byName = new Map();
+  const byNameTeam = new Map();
   const defenseByTeam = new Map();
 
   for (const row of statRows) {
@@ -155,36 +161,34 @@ export function indexWeeklyStats(statRows, { season, week }) {
     if (week != null && rowWeek !== week) continue;
 
     const name = readString(row, KEY_FIELDS.playerName);
-    const rawPos = readString(row, KEY_FIELDS.playerPosition).toUpperCase();
     const team = readString(row, KEY_FIELDS.teamName);
+    if (!name) continue;
 
-    const fPos = fantasyPosition(rawPos);
-    if (fPos) {
-      const key = playerKey(name, fPos);
-      // A player can have multiple rows (passing + rushing splits in some
-      // exports). Merge rather than overwrite.
-      const existing = byPlayerKey.get(key);
-      byPlayerKey.set(key, existing ? mergeStatRows(existing, row) : row);
-    }
+    const nKey = normalizeName(name);
+    // A player can appear on more than one row (passing / rushing splits in
+    // some exports) — merge rather than overwrite.
+    byName.set(nKey, byName.has(nKey) ? mergeStatRows(byName.get(nKey), row) : row);
 
-    if (DEFENSIVE_POSITIONS.has(rawPos) && team) {
+    if (team) {
+      const ntKey = `${nKey}|${normalizeName(team)}`;
+      byNameTeam.set(ntKey, byNameTeam.has(ntKey) ? mergeStatRows(byNameTeam.get(ntKey), row) : row);
+
       const tKey = normalizeName(team);
       if (!defenseByTeam.has(tKey)) defenseByTeam.set(tKey, []);
       defenseByTeam.get(tKey).push(row);
     }
   }
 
-  return { byPlayerKey, defenseByTeam };
+  return { byName, byNameTeam, defenseByTeam };
 }
 
+/** Combine two rows for the same player (some exports split pass/rush lines). */
 function mergeStatRows(a, b) {
   const merged = { ...a };
   for (const candidates of Object.values(STAT_FIELDS)) {
     for (const key of candidates) {
       if (b[key] !== undefined && b[key] !== null) {
-        const av = Number(a[key]) || 0;
-        const bv = Number(b[key]) || 0;
-        merged[key] = av + bv;
+        merged[key] = (Number(a[key]) || 0) + (Number(b[key]) || 0);
         break;
       }
     }
@@ -212,7 +216,12 @@ export function pointsAllowedByTeam(gameRows, { season, week }) {
   return map;
 }
 
-/** True when every scheduled game for the week has a result. */
+/**
+ * True when every scheduled game for the week has a result.
+ * Game.status is the game TYPE (1 = regular, 2 = playoff), not a completion
+ * flag, so a played game is detected purely by a non-zero score. A genuine
+ * 0-0 final is not reachable in Madden.
+ */
 export function weekIsComplete(gameRows, { season, week }) {
   const games = gameRows.filter((g) => {
     const gSeason = readNumber(g, GAME_FIELDS.season);
@@ -225,9 +234,7 @@ export function weekIsComplete(gameRows, { season, week }) {
   for (const g of games) {
     const homeScore = readNumber(g, GAME_FIELDS.homeScore);
     const awayScore = readNumber(g, GAME_FIELDS.awayScore);
-    const statusRaw = readString(g, GAME_FIELDS.status).toLowerCase();
-    const statusSaysDone = ['final', 'complete', 'completed', 'played', 'true'].includes(statusRaw);
-    if (statusSaysDone || homeScore > 0 || awayScore > 0) played += 1;
+    if (homeScore > 0 || awayScore > 0) played += 1;
   }
   return { complete: played === games.length, played, total: games.length };
 }
@@ -236,7 +243,7 @@ export function weekIsComplete(gameRows, { season, week }) {
  * Score one fantasy team for one week.
  * roster: [{ key, name, position, nfl_team }]
  */
-export function scoreRosterWeek(roster, { byPlayerKey, defenseByTeam, paByTeam }) {
+export function scoreRosterWeek(roster, { byName, byNameTeam, defenseByTeam, paByTeam }) {
   const entries = roster.map((slot) => {
     if (isDefenseKey(slot.key)) {
       const teamKey = normalizeName(slot.nfl_team || slot.name);
@@ -256,7 +263,13 @@ export function scoreRosterWeek(roster, { byPlayerKey, defenseByTeam, paByTeam }
       };
     }
 
-    const row = byPlayerKey.get(slot.key);
+    // Prefer the name+team match so two players sharing a name can't collide;
+    // fall back to name alone, since a drafted player may have been traded to
+    // a different XCFL team mid-season.
+    const nKey = normalizeName(slot.name);
+    const row = (slot.nfl_team ? byNameTeam.get(`${nKey}|${normalizeName(slot.nfl_team)}`) : null)
+      || byName.get(nKey);
+
     if (!row) {
       return { key: slot.key, name: slot.name, position: slot.position, nfl_team: slot.nfl_team, points: 0, played: false, breakdown: {}, raw: {} };
     }
