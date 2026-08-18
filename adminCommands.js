@@ -3,16 +3,24 @@
 //
 // index.js already calls interaction.deferReply() before the command
 // switch — everything here uses editReply(), matching eaCommands.js.
+//
+// Deliberately EA-only, not Vault-backed: every picker here (team, game)
+// reads straight from the league's live Blaze data (getLeagueInfo), not
+// Vault's LeagueMember table. That table is a snapshot that only updates on
+// import, so a team that changed hands or a player who just joined could be
+// stale or missing there. EA's own data can't be stale — it's the save file.
 
 import { SlashCommandBuilder } from "discord.js";
 import { getConnectedClient } from "./eaTokenStore.js";
-import { getMemberByDiscordId, memberDisplayName } from "./vault.js";
 
 // Reuses the same allowlist /export and /ea-status already gate on — these
 // are all "can touch the live EA league" actions, so one list covers all of
 // them. Not gated with setDefaultMemberPermissions(ManageGuild) for the same
 // reason as eaCommands.js: that hides the command outright from a
-// commissioner who isn't a server admin.
+// commissioner who isn't a server admin. True hiding from the command
+// picker needs Discord's own per-guild command permissions, set by whoever
+// has Manage Server — this allowlist only controls what happens if someone
+// runs it, not whether they can see it.
 function isAuthorized(interaction) {
   const allowed = (process.env.EA_ADMIN_IDS || "")
     .split(",")
@@ -38,32 +46,42 @@ export const adminCommandBuilder = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName("boot-user")
-      .setDescription("Remove a member from the league")
-      .addUserOption((o) => o.setName("member").setDescription("Discord user to boot").setRequired(true))
+      .setDescription("Remove a team's owner from the league")
+      .addIntegerOption((o) =>
+        o.setName("team").setDescription("Start typing a team name, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
   )
   .addSubcommand((sub) =>
     sub
       .setName("add-admin")
       .setDescription("Grant in-game commissioner rights")
-      .addUserOption((o) => o.setName("member").setDescription("Discord user to promote").setRequired(true))
+      .addIntegerOption((o) =>
+        o.setName("team").setDescription("Start typing a team name, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
   )
   .addSubcommand((sub) =>
     sub
       .setName("remove-admin")
       .setDescription("Revoke in-game commissioner rights")
-      .addUserOption((o) => o.setName("member").setDescription("Discord user to demote").setRequired(true))
+      .addIntegerOption((o) =>
+        o.setName("team").setDescription("Start typing a team name, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
   )
   .addSubcommand((sub) =>
     sub
       .setName("clear-cap-penalties")
       .setDescription("Clear a team's salary cap penalties")
-      .addUserOption((o) => o.setName("member").setDescription("Team owner").setRequired(true))
+      .addIntegerOption((o) =>
+        o.setName("team").setDescription("Start typing a team name, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
   )
   .addSubcommand((sub) =>
     sub
       .setName("toggle-autopilot")
-      .setDescription("Toggle a member's autopilot status")
-      .addUserOption((o) => o.setName("member").setDescription("Discord user").setRequired(true))
+      .setDescription("Toggle a team's autopilot status")
+      .addIntegerOption((o) =>
+        o.setName("team").setDescription("Start typing a team name, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
       .addIntegerOption((o) => o.setName("timeout").setDescription("Action timeout in seconds (0 = default)"))
   )
   .addSubcommand((sub) =>
@@ -91,17 +109,42 @@ export const adminCommandBuilder = new SlashCommandBuilder()
       )
   );
 
-// Schedule data is a live EA call — too slow to re-fetch on every keystroke
-// (Discord gives autocomplete a 3s budget total). Cache briefly, same idea
-// as vault.js's player cache.
-let _scheduleCache = null;
-async function getCachedSchedule() {
-  if (_scheduleCache && Date.now() - _scheduleCache.at < 60_000) return _scheduleCache.games;
+// Both pickers (team, game) come off the same live getLeagueInfo() call —
+// one shared cache instead of two, so picking a team then a game in the
+// same session doesn't double the EA calls. 60s matches the game picker's
+// prior cache window; Discord's 3s autocomplete budget is why this exists
+// at all rather than calling EA on every keystroke.
+let _leagueInfoCache = null;
+async function getCachedLeagueInfo() {
+  if (_leagueInfoCache && Date.now() - _leagueInfoCache.at < 60_000) {
+    return { leagueInfo: _leagueInfoCache.leagueInfo, leagueId: _leagueInfoCache.leagueId, client: _leagueInfoCache.client };
+  }
   const { client, leagueId } = await getConnectedClient();
   const leagueInfo = await client.getLeagueInfo(leagueId);
-  const games = leagueInfo.gameScheduleHubInfo.leagueSchedule;
-  _scheduleCache = { at: Date.now(), games };
-  return games;
+  _leagueInfoCache = { at: Date.now(), leagueInfo, leagueId, client };
+  return { leagueInfo, leagueId, client };
+}
+
+// Autocomplete for the "team" option. userAdminHubInfo.userInfoMap is keyed
+// by Blaze userId and only contains human-controlled teams (CPU teams never
+// appear — correct, since there's no user to boot/toggle/etc.). The value
+// sent back IS the real Blaze userId, so resolveTarget below needs no
+// further lookup or matching step.
+export async function suggestAdminTeams(focused) {
+  try {
+    const { leagueInfo } = await getCachedLeagueInfo();
+    const q = String(focused ?? "").trim().toLowerCase();
+    return Object.entries(leagueInfo.userAdminHubInfo.userInfoMap)
+      .filter(([, info]) => !q || info.teamName?.toLowerCase().includes(q) || info.userName?.toLowerCase().includes(q))
+      .slice(0, 25)
+      .map(([userId, info]) => ({
+        name: `${info.teamName} — ${info.userName}${info.isAdmin ? " (admin)" : ""}${info.autoPilot ? " (autopilot)" : ""}`,
+        value: Number(userId),
+      }));
+  } catch (err) {
+    console.error("[ADMIN] team autocomplete failed:", err.message);
+    return [];
+  }
 }
 
 // Autocomplete for the force-win/no-win "game" option. Matches on the
@@ -109,7 +152,8 @@ async function getCachedSchedule() {
 // currently allows forcing a result for that game.
 export async function suggestForceWinGames(focused) {
   try {
-    const games = await getCachedSchedule();
+    const { leagueInfo } = await getCachedLeagueInfo();
+    const games = leagueInfo.gameScheduleHubInfo.leagueSchedule;
     const q = String(focused ?? "").trim().toLowerCase();
     return games
       .filter((g) => !g.seasonGameInfo.isGamePlayed)
@@ -127,32 +171,12 @@ export async function suggestForceWinGames(focused) {
   }
 }
 
-// Resolve a Discord user -> Blaze userId via the league's own admin data
-// (userAdminHubInfo.userInfoMap, keyed by Blaze userId). Matches on
-// team_name first (most reliable), falling back to username.
-function findBlazeUserId(userInfoMap, member) {
-  for (const [userId, info] of Object.entries(userInfoMap)) {
-    if (info.teamName === member.team_name) return Number(userId);
-  }
-  for (const [userId, info] of Object.entries(userInfoMap)) {
-    if (info.userName === member.username) return Number(userId);
-  }
-  return null;
-}
-
 async function resolveTarget(interaction) {
-  const discordUser = interaction.options.getUser("member");
-  const member = await getMemberByDiscordId(discordUser.id);
-  if (!member) {
-    throw new Error(`<@${discordUser.id}> isn't linked to a league member.`);
-  }
-  const { client, leagueId } = await getConnectedClient();
-  const leagueInfo = await client.getLeagueInfo(leagueId);
-  const blazeUserId = findBlazeUserId(leagueInfo.userAdminHubInfo.userInfoMap, member);
-  if (blazeUserId == null) {
-    throw new Error(`Couldn't match ${memberDisplayName(member)} to a Blaze user id in this league.`);
-  }
-  return { client, leagueId, member, blazeUserId };
+  const blazeUserId = interaction.options.getInteger("team");
+  const { leagueInfo, leagueId, client } = await getCachedLeagueInfo();
+  const info = leagueInfo.userAdminHubInfo.userInfoMap[String(blazeUserId)];
+  const label = info ? `${info.teamName} (${info.userName})` : `user ${blazeUserId}`;
+  return { client, leagueId, blazeUserId, label };
 }
 
 export async function handleAdminCommand(interaction) {
@@ -164,34 +188,34 @@ export async function handleAdminCommand(interaction) {
   try {
     switch (sub) {
       case "boot-user": {
-        const { client, leagueId, member, blazeUserId } = await resolveTarget(interaction);
+        const { client, leagueId, blazeUserId, label } = await resolveTarget(interaction);
         await client.bootUser(leagueId, blazeUserId);
-        await interaction.editReply(`Booted **${memberDisplayName(member)}** from the league.`);
+        await interaction.editReply(`Booted **${label}** from the league.`);
         break;
       }
       case "add-admin": {
-        const { client, leagueId, member, blazeUserId } = await resolveTarget(interaction);
+        const { client, leagueId, blazeUserId, label } = await resolveTarget(interaction);
         await client.addAdmin(leagueId, blazeUserId);
-        await interaction.editReply(`Granted commissioner rights to **${memberDisplayName(member)}**.`);
+        await interaction.editReply(`Granted commissioner rights to **${label}**.`);
         break;
       }
       case "remove-admin": {
-        const { client, leagueId, member, blazeUserId } = await resolveTarget(interaction);
+        const { client, leagueId, blazeUserId, label } = await resolveTarget(interaction);
         await client.removeAdmin(leagueId, blazeUserId);
-        await interaction.editReply(`Revoked commissioner rights from **${memberDisplayName(member)}**.`);
+        await interaction.editReply(`Revoked commissioner rights from **${label}**.`);
         break;
       }
       case "clear-cap-penalties": {
-        const { client, leagueId, member, blazeUserId } = await resolveTarget(interaction);
+        const { client, leagueId, blazeUserId, label } = await resolveTarget(interaction);
         await client.clearCapPenalties(leagueId, blazeUserId);
-        await interaction.editReply(`Cleared cap penalties for **${memberDisplayName(member)}**'s team.`);
+        await interaction.editReply(`Cleared cap penalties for **${label}**.`);
         break;
       }
       case "toggle-autopilot": {
-        const { client, leagueId, member, blazeUserId } = await resolveTarget(interaction);
+        const { client, leagueId, blazeUserId, label } = await resolveTarget(interaction);
         const timeout = interaction.options.getInteger("timeout") ?? 0;
         await client.toggleAutoPilot(leagueId, blazeUserId, timeout);
-        await interaction.editReply(`Toggled autopilot for **${memberDisplayName(member)}**.`);
+        await interaction.editReply(`Toggled autopilot for **${label}**.`);
         break;
       }
       case "force-home-win":
@@ -202,8 +226,8 @@ export async function handleAdminCommand(interaction) {
 
         // Re-check against fresh-ish cached data — the picker could be
         // showing a slightly stale list if EA's state changed mid-typing.
-        const games = await getCachedSchedule();
-        const game = games.find((g) => g.seasonGameKey === seasonGameKey);
+        const { leagueInfo } = await getCachedLeagueInfo();
+        const game = leagueInfo.gameScheduleHubInfo.leagueSchedule.find((g) => g.seasonGameKey === seasonGameKey);
         const label = game ? game.seasonGameInfo.matchup : `game ${seasonGameKey}`;
         if (game && !game.canForceWin && sub !== "force-no-win") {
           await interaction.editReply(`Force-win isn't available for **${label}** right now.`);
