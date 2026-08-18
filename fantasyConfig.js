@@ -10,7 +10,7 @@ export const LEAGUE_DEFAULTS = {
   season_number: 84,
   team_slots: 12,
   roster_size: 12,
-  scoring_start_week: 3,
+  scoring_start_week: 5,
   regular_season_end_week: 13,
   playoff_start_week: 14,
   final_week_start: 16,
