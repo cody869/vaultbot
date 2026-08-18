@@ -70,20 +70,62 @@ export const adminCommandBuilder = new SlashCommandBuilder()
     sub
       .setName("force-home-win")
       .setDescription("Force the home team to win a scheduled game")
-      .addIntegerOption((o) => o.setName("season_game_key").setDescription("Game's seasonGameKey").setRequired(true))
+      .addIntegerOption((o) =>
+        o.setName("game").setDescription("Start typing a matchup, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
   )
   .addSubcommand((sub) =>
     sub
       .setName("force-away-win")
       .setDescription("Force the away team to win a scheduled game")
-      .addIntegerOption((o) => o.setName("season_game_key").setDescription("Game's seasonGameKey").setRequired(true))
+      .addIntegerOption((o) =>
+        o.setName("game").setDescription("Start typing a matchup, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
   )
   .addSubcommand((sub) =>
     sub
       .setName("force-no-win")
       .setDescription("Clear a forced result back to normal")
-      .addIntegerOption((o) => o.setName("season_game_key").setDescription("Game's seasonGameKey").setRequired(true))
+      .addIntegerOption((o) =>
+        o.setName("game").setDescription("Start typing a matchup, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
   );
+
+// Schedule data is a live EA call — too slow to re-fetch on every keystroke
+// (Discord gives autocomplete a 3s budget total). Cache briefly, same idea
+// as vault.js's player cache.
+let _scheduleCache = null;
+async function getCachedSchedule() {
+  if (_scheduleCache && Date.now() - _scheduleCache.at < 60_000) return _scheduleCache.games;
+  const { client, leagueId } = await getConnectedClient();
+  const leagueInfo = await client.getLeagueInfo(leagueId);
+  const games = leagueInfo.gameScheduleHubInfo.leagueSchedule;
+  _scheduleCache = { at: Date.now(), games };
+  return games;
+}
+
+// Autocomplete for the force-win/no-win "game" option. Matches on the
+// matchup text ("Bengals @ Ravens") and shows the week + whether EA
+// currently allows forcing a result for that game.
+export async function suggestForceWinGames(focused) {
+  try {
+    const games = await getCachedSchedule();
+    const q = String(focused ?? "").trim().toLowerCase();
+    return games
+      .filter((g) => !g.seasonGameInfo.isGamePlayed)
+      .filter((g) => !q || g.seasonGameInfo.matchup.toLowerCase().includes(q))
+      .slice(0, 25)
+      .map((g) => ({
+        name: `${g.seasonGameInfo.matchup} — ${g.seasonGameInfo.displayedWeek}${
+          g.canForceWin ? "" : " (not forceable right now)"
+        }`,
+        value: g.seasonGameKey,
+      }));
+  } catch (err) {
+    console.error("[ADMIN] game autocomplete failed:", err.message);
+    return [];
+  }
+}
 
 // Resolve a Discord user -> Blaze userId via the league's own admin data
 // (userAdminHubInfo.userInfoMap, keyed by Blaze userId). Matches on
@@ -156,11 +198,22 @@ export async function handleAdminCommand(interaction) {
       case "force-away-win":
       case "force-no-win": {
         const { client, leagueId } = await getConnectedClient();
-        const seasonGameKey = interaction.options.getInteger("season_game_key");
+        const seasonGameKey = interaction.options.getInteger("game");
+
+        // Re-check against fresh-ish cached data — the picker could be
+        // showing a slightly stale list if EA's state changed mid-typing.
+        const games = await getCachedSchedule();
+        const game = games.find((g) => g.seasonGameKey === seasonGameKey);
+        const label = game ? game.seasonGameInfo.matchup : `game ${seasonGameKey}`;
+        if (game && !game.canForceWin && sub !== "force-no-win") {
+          await interaction.editReply(`Force-win isn't available for **${label}** right now.`);
+          break;
+        }
+
         if (sub === "force-home-win") await client.forceHomeWin(leagueId, seasonGameKey);
         if (sub === "force-away-win") await client.forceAwayWin(leagueId, seasonGameKey);
         if (sub === "force-no-win") await client.forceNoWin(leagueId, seasonGameKey);
-        await interaction.editReply(`Updated result for game ${seasonGameKey}.`);
+        await interaction.editReply(`Updated result for **${label}**.`);
         break;
       }
     }
