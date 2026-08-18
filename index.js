@@ -11,7 +11,7 @@ import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { buildScorebugAttachments } from "./scorebugHelper.js";
 import bugReportCommands from "./bugReport.js";
 import { handleExport, handleEaStatus } from "./eaCommands.js";
-import { handleAdminCommand, suggestForceWinGames } from "./adminCommands.js";
+import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
 import {
   handleFantasyCommand,
@@ -296,12 +296,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // Serves /fantasy pick and /fantasy queue from the cached draft pool.
       await handleFantasyAutocomplete(interaction);
     } else if (interaction.commandName === "admin") {
-      // Only force-home-win/force-away-win/force-no-win have an
-      // autocomplete option ("game"); other /admin subcommands use plain
-      // user/integer options with no autocomplete to serve.
+      // Two different autocompletes live on this command: "team" (live EA
+      // roster search) on most subcommands, "game" (matchup search) on the
+      // force-win/no-win ones. Route by which option is actually focused.
       try {
-        const focused = String(interaction.options.getFocused() ?? "");
-        await interaction.respond(await suggestForceWinGames(focused));
+        const { name, value } = interaction.options.getFocused(true);
+        const focused = String(value ?? "");
+        const choices = name === "game" ? await suggestForceWinGames(focused) : await suggestAdminTeams(focused);
+        await interaction.respond(choices);
       } catch (err) {
         console.error("[AUTOCOMPLETE] admin failed:", err.message);
         try {
