@@ -14,6 +14,52 @@ export const fantasyCommand = [
       .setDescription('Create the league (commissioner only)'))
 
     .addSubcommand((s) => s
+      .setName('config')
+      .setDescription('View or change draft settings (commissioner only)')
+      .addIntegerOption((o) => o
+        .setName('pick_minutes')
+        .setDescription('Minutes per pick (e.g. 90). Use this OR pick_hours.')
+        .setMinValue(1)
+        .setMaxValue(10080)
+        .setRequired(false))
+      .addIntegerOption((o) => o
+        .setName('pick_hours')
+        .setDescription('Hours per pick (e.g. 8). Use this OR pick_minutes.')
+        .setMinValue(1)
+        .setMaxValue(168)
+        .setRequired(false))
+      .addIntegerOption((o) => o
+        .setName('quiet_start')
+        .setDescription('Hour the overnight clock pause begins (0-23)')
+        .setMinValue(0)
+        .setMaxValue(23)
+        .setRequired(false))
+      .addIntegerOption((o) => o
+        .setName('quiet_end')
+        .setDescription('Hour it resumes (0-23). Same as quiet_start = disabled.')
+        .setMinValue(0)
+        .setMaxValue(23)
+        .setRequired(false))
+      .addIntegerOption((o) => o
+        .setName('tz_offset')
+        .setDescription('UTC offset for quiet hours (-7 = PDT)')
+        .setMinValue(-12)
+        .setMaxValue(14)
+        .setRequired(false))
+      .addBooleanOption((o) => o
+        .setName('apply_now')
+        .setDescription("Reset the current pick's deadline to the new clock")
+        .setRequired(false)))
+
+    .addSubcommand((s) => s
+      .setName('pause')
+      .setDescription('Freeze the draft clock (commissioner only)'))
+
+    .addSubcommand((s) => s
+      .setName('resume')
+      .setDescription('Resume the draft, restoring remaining clock (commissioner only)'))
+
+    .addSubcommand((s) => s
       .setName('join')
       .setDescription('Claim one of the 12 spots')
       .addStringOption((o) => o
