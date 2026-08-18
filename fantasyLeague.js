@@ -28,8 +28,14 @@ import { LEAGUE_DEFAULTS, round2 } from './fantasyConfig.js';
 // ---------------------------------------------------------------------------
 
 /**
- * Circle-method round robin. 12 teams over weeks 3-13 is exactly 11 rounds,
- * so every team plays every other team once — no repeats, no byes.
+ * Circle-method round robin. For N teams it always produces N-1 rounds, so 12
+ * teams generate 11 weeks of play regardless of when the season starts.
+ *
+ * Starting later than that allows means the tail has to be dropped — see
+ * generateSchedule, which truncates at regular_season_end_week. Every round is
+ * internally complete (all 12 teams play, 6 games), so truncating simply means
+ * each team plays fewer distinct opponents; it never leaves anyone idle or
+ * creates a repeat pairing.
  */
 export function buildRoundRobin(teamIds, startWeek) {
   const teams = [...teamIds];
@@ -64,7 +70,22 @@ export async function generateSchedule(league, teams) {
   if (existing.length) return { created: 0, skipped: true };
 
   const ids = teams.map((t) => t.id);
-  const pairs = buildRoundRobin(ids, league.scoring_start_week ?? LEAGUE_DEFAULTS.scoring_start_week);
+  const startWeek = league.scoring_start_week ?? LEAGUE_DEFAULTS.scoring_start_week;
+  const endWeek = league.regular_season_end_week ?? LEAGUE_DEFAULTS.regular_season_end_week;
+
+  const allPairs = buildRoundRobin(ids, startWeek);
+  // Drop any round that would run past the regular season into the playoffs.
+  // With 12 teams the generator always emits 11 rounds; a start week later
+  // than (endWeek - 10) means some pairings simply do not get played.
+  const pairs = allPairs.filter((p) => p.week <= endWeek);
+  const droppedRounds = new Set(allPairs.filter((p) => p.week > endWeek).map((p) => p.week)).size;
+  if (droppedRounds > 0) {
+    console.log(
+      `[fantasy] schedule: weeks ${startWeek}-${endWeek} fits ${endWeek - startWeek + 1} of ` +
+      `${ids.length - 1} round-robin rounds; ${droppedRounds} dropped. ` +
+      `Each team plays ${endWeek - startWeek + 1} of ${ids.length - 1} opponents.`
+    );
+  }
 
   const payloads = pairs.map((p) => ({
     league_id: league.id,
