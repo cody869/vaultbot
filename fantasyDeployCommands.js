@@ -46,6 +46,18 @@ export const fantasyCommand = [
         .setMinValue(-12)
         .setMaxValue(14)
         .setRequired(false))
+      .addIntegerOption((o) => o
+        .setName('start_week')
+        .setDescription('XCFL week fantasy scoring begins (pre-draft only)')
+        .setMinValue(1)
+        .setMaxValue(18)
+        .setRequired(false))
+      .addIntegerOption((o) => o
+        .setName('end_week')
+        .setDescription('Last regular-season week (pre-draft only)')
+        .setMinValue(1)
+        .setMaxValue(18)
+        .setRequired(false))
       .addBooleanOption((o) => o
         .setName('apply_now')
         .setDescription("Reset the current pick's deadline to the new clock")
