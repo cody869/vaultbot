@@ -16,7 +16,9 @@ export const LEAGUE_DEFAULTS = {
   final_week_start: 16,
   final_week_end: 17,
   playoff_teams: 6,
-  pick_clock_hours: 8,
+  pick_clock_minutes: 480, // 8h. Canonical clock field — minutes so short
+                           // clocks (a live 90-second draft) are expressible.
+  pick_clock_hours: 8,     // legacy; read only if minutes is unset
   quiet_start_hour: 23, // 11pm — clock pauses
   quiet_end_hour: 8,    // 8am  — clock resumes
   timezone_offset_hours: -7, // America/Los_Angeles (PDT). Used only for quiet hours.
@@ -37,6 +39,97 @@ export const BENCH_COUNT = LEAGUE_DEFAULTS.roster_size - STARTER_COUNT;    // 4
 // Roster construction rules enforced during the draft.
 export const ROSTER_MIN = { QB: 1, HB: 2, WR: 3, TE: 1, DEF: 1 };
 export const ROSTER_MAX = { QB: 3, HB: 6, WR: 7, TE: 3, DEF: 2 };
+
+// ---------------------------------------------------------------------------
+// Runtime configuration
+// ---------------------------------------------------------------------------
+// The constants above are DEFAULTS. A live league stores its own format and
+// scoring on the FantasyLeague row so the commissioner can change them from
+// Discord without a deploy. Always read config through these resolvers rather
+// than importing the constants directly.
+
+export const POSITION_ORDER = ['QB', 'HB', 'WR', 'TE', 'DEF'];
+
+/** Lineup slots for a league, falling back to the defaults. */
+export function resolveLineup(league) {
+  if (!league) return LINEUP_SLOTS;
+  const counts = {
+    QB: league.lineup_qb,
+    HB: league.lineup_hb,
+    WR: league.lineup_wr,
+    TE: league.lineup_te,
+    DEF: league.lineup_def,
+  };
+  // If the row carries no lineup at all, use the defaults untouched.
+  if (Object.values(counts).every((v) => v == null)) return LINEUP_SLOTS;
+
+  const fallback = Object.fromEntries(LINEUP_SLOTS.map((l) => [l.position, l.count]));
+  return POSITION_ORDER
+    .map((pos) => ({
+      slot: pos,
+      position: pos,
+      count: counts[pos] == null ? fallback[pos] ?? 0 : Number(counts[pos]),
+    }))
+    .filter((l) => l.count > 0);
+}
+
+export function starterCount(league) {
+  return resolveLineup(league).reduce((n, s) => n + s.count, 0);
+}
+
+export function rosterSizeOf(league) {
+  return Number(league?.roster_size ?? LEAGUE_DEFAULTS.roster_size);
+}
+
+export function benchCount(league) {
+  return Math.max(0, rosterSizeOf(league) - starterCount(league));
+}
+
+/**
+ * Roster minimums and maximums derived from the lineup.
+ * Minimum = the number of starting slots at that position, so a legal roster
+ * can always field a full lineup. Maximum scales with the slot count and the
+ * bench so a 3-WR league can stack receivers but a 1-QB league can't hoard QBs.
+ */
+export function resolveRosterLimits(league) {
+  const lineup = resolveLineup(league);
+  const bench = benchCount(league);
+  const min = {}, max = {};
+  for (const { position, count } of lineup) {
+    min[position] = count;
+    // DEF is a special case: nobody needs three team defenses.
+    max[position] = position === 'DEF'
+      ? Math.min(count + 1, count + bench)
+      : count + bench;
+  }
+  return { min, max };
+}
+
+/** Scoring rules for a league, merged over the defaults. */
+export function resolveScoring(league) {
+  if (!league) return SCORING;
+  const overrides = {
+    reception: league.score_ppr,
+    passYdsPerPoint: league.score_pass_yds_per_point,
+    passTD: league.score_pass_td,
+    passInt: league.score_pass_int,
+    rushYdsPerPoint: league.score_rush_yds_per_point,
+    rushTD: league.score_rush_td,
+    recYdsPerPoint: league.score_rec_yds_per_point,
+    recTD: league.score_rec_td,
+    fumbleLost: league.score_fumble_lost,
+    defSack: league.score_def_sack,
+    defInt: league.score_def_int,
+    defFumbleRec: league.score_def_fumble_rec,
+    defSafety: league.score_def_safety,
+    defTD: league.score_def_td,
+  };
+  const out = { ...SCORING };
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v != null && v !== '' && !isNaN(Number(v))) out[k] = Number(v);
+  }
+  return out;
+}
 
 // Madden position -> fantasy position. Anything not listed is undraftable.
 export const POSITION_MAP = {
@@ -118,46 +211,61 @@ export function pointsAllowedScore(pa) {
 // doctor command can show it.
 
 export const STAT_FIELDS = {
-  passYds:   ['passYds', 'passingYards', 'pass_yds', 'passTotalYds', 'passYards'],
-  passTDs:   ['passTDs', 'passTD', 'passingTouchdowns', 'pass_tds', 'passTotalTDs'],
-  passInts:  ['passInts', 'passInt', 'passingInterceptions', 'pass_ints', 'passTotalInts'],
-  passSacks: ['passSacks', 'sacked', 'passTotalSacks'],
-  rushYds:   ['rushYds', 'rushingYards', 'rush_yds', 'rushTotalYds', 'rushYards'],
-  rushTDs:   ['rushTDs', 'rushTD', 'rushingTouchdowns', 'rush_tds', 'rushTotalTDs'],
-  rushFum:   ['rushFum', 'rushFumbles', 'fumblesLost', 'rushTotalFum'],
-  recCatches:['recCatches', 'receptions', 'recCatch', 'rec_catches', 'recTotalCatches'],
-  recYds:    ['recYds', 'receivingYards', 'rec_yds', 'recTotalYds', 'recYards'],
-  recTDs:    ['recTDs', 'recTD', 'receivingTouchdowns', 'rec_tds', 'recTotalTDs'],
-  recFum:    ['recFum', 'recFumbles'],
-  twoPt:     ['twoPtConv', 'twoPointConv', 'twoPt'],
-  // Defense (individual player rows, summed to a team total)
-  defSacks:  ['defSacks', 'sacks', 'def_sacks', 'defTotalSacks'],
-  defInts:   ['defInts', 'defInt', 'interceptions', 'def_ints', 'defTotalInts'],
-  defFumRec: ['defFumRec', 'fumblesRecovered', 'defFumbleRec', 'defTotalFumRec'],
-  defTDs:    ['defTDs', 'defTD', 'defensiveTouchdowns', 'defTotalTDs'],
-  defSafeties:['defSafeties', 'safeties', 'defSafety'],
-  defTackles:['defTotalTackles', 'defTackles', 'tackles'],
+  // VERIFIED against base44/entities/WeeklyStats.jsonc (Aug 2026). The export
+  // is snake_case; camelCase variants are kept only as defensive fallbacks.
+  passYds:    ['pass_yds', 'passYds', 'passingYards'],
+  passTDs:    ['pass_tds', 'passTDs', 'passingTouchdowns'],
+  passInts:   ['pass_ints', 'passInts', 'passingInterceptions'],
+  passSacks:  ['pass_sacks', 'passSacks'],
+  rushYds:    ['rush_yds', 'rushYds', 'rushingYards'],
+  rushTDs:    ['rush_tds', 'rushTDs', 'rushingTouchdowns'],
+  rushFum:    ['rush_fum', 'rushFum', 'fumblesLost'],
+  recCatches: ['rec_catches', 'recCatches', 'receptions'],
+  recYds:     ['rec_yds', 'recYds', 'receivingYards'],
+  recTDs:     ['rec_tds', 'recTDs', 'receivingTouchdowns'],
+  recFum:     ['rec_fum', 'recFum'],
+  // Defense — individual player rows, summed to a team total.
+  defSacks:   ['def_sacks', 'defSacks'],
+  defInts:    ['def_ints', 'defInts'],
+  defFumRec:  ['def_fum_rec', 'defFumRec'],
+  defForcedFum: ['def_forced_fum', 'defForcedFum'],
+  defTackles: ['def_total_tackles', 'defTotalTackles'],
+  // NOT PRESENT in the current WeeklyStats schema. Left mapped so that if the
+  // export ever starts carrying them, scoring picks them up with no code
+  // change. Until then these score 0 — see the DEF caveat in INSTALL.md.
+  defTDs:     ['def_tds', 'defTDs'],
+  defSafeties:['def_safeties', 'defSafeties'],
 };
 
-// Keys that identify which player / team / week a stat row belongs to.
+// Identity fields on a WeeklyStats row.
+// NOTE: WeeklyStats carries NO position field. Offensive stat rows are matched
+// to drafted players by normalized name (with team as a tiebreak), and team
+// defense is summed across every row for that team — so position is never
+// needed at scoring time.
 export const KEY_FIELDS = {
-  playerName: ['player_fullName', 'playerName', 'fullName', 'name', 'player_name'],
-  playerPosition: ['player_position', 'position', 'playerPosition', 'pos'],
-  playerId: ['player_id', 'playerId', 'rosterId', 'id'],
-  teamName: ['team_name', 'teamName', 'team_displayName', 'teamDisplayName', 'team'],
-  teamAbbr: ['team_abbrName', 'teamAbbr', 'abbrName', 'team_abbr'],
-  week: ['week', 'weekIndex', 'week_number', 'weekNumber'],
-  season: ['season_number', 'seasonIndex', 'season', 'seasonNumber'],
+  playerName: ['player_full_name', 'player_fullName', 'playerName'],
+  playerId: ['player_id', 'playerId'],
+  rosterId: ['roster_id', 'madden_roster_id', 'rosterId'],
+  teamName: ['team_name', 'teamName', 'team_displayName'],
+  teamAbbr: ['team_abbrName', 'teamAbbr'],
+  week: ['week_index', 'week', 'weekIndex'],
+  season: ['season_index', 'season_number', 'seasonIndex'],
+  cycle: ['cycle'],
 };
 
+// VERIFIED against base44/entities/Game.jsonc.
+// user1 is the HOME side and user2 the AWAY side (confirmed against the S83
+// playoff run: Titans beat the Eagles 43-38 in week 23 as the away team).
+// `status` is the game TYPE (1 = regular season, 2 = playoff), NOT a
+// completion flag — never use it to decide whether a game has been played.
 export const GAME_FIELDS = {
-  week: ['week', 'week_number', 'weekIndex', 'weekNumber'],
-  season: ['season_number', 'seasonIndex', 'season', 'seasonNumber'],
-  homeTeam: ['home_team', 'homeTeam', 'home_team_name', 'homeTeamName', 'home'],
-  awayTeam: ['away_team', 'awayTeam', 'away_team_name', 'awayTeamName', 'away'],
-  homeScore: ['home_score', 'homeScore', 'home_points', 'homeTeamScore'],
-  awayScore: ['away_score', 'awayScore', 'away_points', 'awayTeamScore'],
-  status: ['status', 'game_status', 'gameStatus', 'is_complete', 'completed'],
+  week: ['week', 'week_number'],
+  season: ['season_number', 'seasonIndex'],
+  homeTeam: ['homeTeam', 'home_team'],
+  awayTeam: ['awayTeam', 'away_team'],
+  homeScore: ['user1_score', 'home_score', 'homeScore'],
+  awayScore: ['user2_score', 'away_score', 'awayScore'],
+  gameType: ['status'],
 };
 
 /** Return the first candidate key that is present (and non-null) on the row. */
