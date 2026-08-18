@@ -3,6 +3,7 @@
 import "dotenv/config";
 import { REST, Routes, SlashCommandBuilder } from "discord.js";
 import { fantasyCommand } from "./fantasyDeployCommands.js";
+import { adminCommandBuilder } from "./adminCommands.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -238,6 +239,8 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("ea-status")
     .setDescription("Show the EA connection status"),
+
+  adminCommandBuilder,
 
   // /fantasy and its subcommands (best ball league).
   ...fantasyCommand,
