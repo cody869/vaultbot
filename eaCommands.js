@@ -50,8 +50,22 @@ export async function handleExport(interaction) {
   }
 
   const mode = interaction.options.getString("scope") ?? "current";
+  const week = interaction.options.getInteger("week") ?? undefined;
   const dataOpt = interaction.options.getString("data") ?? "all";
   const rosters = interaction.options.getBoolean("rosters") ?? false;
+
+  if (mode === "week" && week == null) {
+    await interaction.editReply(
+      '# Madden Export\n> Scope is "Specific week" but no week number was given — add the `week` option.'
+    );
+    return;
+  }
+  if (mode !== "week" && week != null) {
+    await interaction.editReply(
+      `# Madden Export\n> The \`week\` option only applies when scope is "Specific week" — set scope to that, or drop the week option.`
+    );
+    return;
+  }
 
   // "Schedules only" means exactly that — no stat categories, and no
   // teams/standings either, so a schedule backfill can't overwrite current
@@ -61,7 +75,7 @@ export async function handleExport(interaction) {
 
   const started = Date.now();
   console.log(
-    `[EA] /export scope=${mode} data=${dataOpt} rosters=${rosters} by ${interaction.user.tag}`
+    `[EA] /export scope=${mode}${mode === "week" ? ` week=${week}` : ""} data=${dataOpt} rosters=${rosters} by ${interaction.user.tag}`
   );
 
   // Discord only lets an interaction be edited for 15 minutes, and a full
@@ -80,6 +94,7 @@ export async function handleExport(interaction) {
 
   inFlight = runExport({
     mode,
+    week,
     rosters,
     datasets,
     leagueInfo: wantLeagueInfo,
@@ -92,7 +107,7 @@ export async function handleExport(interaction) {
     await interaction.editReply(
       [
         "# Madden Export complete",
-        `> Weeks: ${summary.weeks}`,
+        `> Weeks: ${summary.weeks}${mode === "week" ? ` (week ${week})` : ""}`,
         `> Per week: ${dataOpt === "schedules" ? "schedules only" : "all 8 datasets"}`,
         `> League info: ${summary.leagueInfo ? "teams + standings" : "skipped"}`,
         `> Rosters: ${summary.rosters ? `${summary.rosters} teams + free agents` : "skipped"}`,
