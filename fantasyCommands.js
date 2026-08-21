@@ -43,7 +43,7 @@ import {
 
 import {
   LEAGUE_DEFAULTS,
-  ROSTER_MIN,
+  resolveRosterLimits,
   STAT_FIELDS,
   KEY_FIELDS,
   GAME_FIELDS,
@@ -683,9 +683,12 @@ async function cmdTeam(interaction) {
   const sorted = [...roster].sort((a, b) => (order[a.position] ?? 9) - (order[b.position] ?? 9) || a.pick - b.pick);
 
   const lines = sorted.map((p) => `\`${p.position.padEnd(3)}\` ${p.name} · ${p.nfl_team} _(${p.round}.${String(((p.pick - 1) % (league.draft_order?.length || 12)) + 1).padStart(2, '0')})_`);
-  const needs = Object.entries(ROSTER_MIN)
-    .filter(([pos, min]) => counts[pos] < min)
-    .map(([pos, min]) => `${pos} ${counts[pos]}/${min}`);
+  // Read through the resolver so a league with custom minimums shows its own
+  // requirements rather than the defaults.
+  const { min: rosterMin } = resolveRosterLimits(league);
+  const needs = Object.entries(rosterMin)
+    .filter(([pos, min]) => (counts[pos] || 0) < min)
+    .map(([pos, min]) => `${pos} ${counts[pos] || 0}/${min}`);
 
   return interaction.editReply({
     content: [
