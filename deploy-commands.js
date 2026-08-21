@@ -218,8 +218,16 @@ export const commands = [
         .addChoices(
           { name: "Current week", value: "current" },
           { name: "Surrounding weeks (prev / current / next)", value: "surrounding" },
+          { name: "Specific week", value: "week" },
           { name: "All weeks (slow)", value: "all" }
         )
+    )
+    .addIntegerOption((o) =>
+      o
+        .setName("week")
+        .setDescription('Week number to pull — only used when scope is "Specific week"')
+        .setMinValue(1)
+        .setMaxValue(23)
     )
     .addStringOption((o) =>
       o
