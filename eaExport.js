@@ -132,10 +132,24 @@ const stagePrefix = (stage) => (stage === Stage.SEASON ? "reg" : "pre");
  *  current     — just the week the league is sitting on
  *  surrounding — previous, current, next (what snallabot uses on advance)
  *  all         — every preseason + regular/playoff week
+ *  week        — one specific regular-season/playoff week, given as a
+ *                1-based number (what the app and Discord show). Preseason
+ *                isn't reachable this way since the app drops preseason
+ *                games on import anyway (see maddenWebhook) — "current" /
+ *                "surrounding" still work fine during preseason since they
+ *                read the league's actual live stage.
  */
-function resolveWeeks(mode, leagueInfo) {
+function resolveWeeks(mode, leagueInfo, weekNumber) {
   const { seasonWeek, seasonWeekType } = leagueInfo.careerHubInfo.seasonInfo;
   const stage = seasonWeekType === 0 ? Stage.PRESEASON : Stage.SEASON;
+
+  if (mode === "week") {
+    const weekIndex = Math.round(weekNumber) - 1;
+    if (!Number.isFinite(weekIndex) || weekIndex < 0 || weekIndex > 22 || weekIndex === 21) {
+      throw new Error(`Invalid week number: ${weekNumber}. Regular season is weeks 1-23, excluding 22 (Pro Bowl).`);
+    }
+    return [{ weekIndex, stage: Stage.SEASON }];
+  }
 
   if (mode === "all") {
     return [
@@ -195,7 +209,8 @@ async function exportRosters(client, leagueId, platform, teamList, onProgress) {
  * Run an export.
  *
  * @param {object}   opts
- * @param {"current"|"surrounding"|"all"} opts.mode   which weeks to pull
+ * @param {"current"|"surrounding"|"all"|"week"} opts.mode   which weeks to pull
+ * @param {number}   [opts.week]       1-based week number, required when mode is "week"
  * @param {boolean}  opts.rosters      also pull all 32 rosters + free agents
  * @param {boolean}  opts.leagueInfo   also pull teams + standings
  * @param {string[]} opts.datasets     which per-week datasets (default: all 8)
@@ -203,6 +218,7 @@ async function exportRosters(client, leagueId, platform, teamList, onProgress) {
  */
 async function runExport({
   mode = "current",
+  week,
   rosters = false,
   leagueInfo: wantLeagueInfo = true,
   datasets = ALL_DATASETS,
@@ -210,6 +226,10 @@ async function runExport({
 } = {}) {
   requireUrl();
   const progress = onProgress || (async () => {});
+
+  if (mode === "week" && (week == null || !Number.isFinite(Number(week)))) {
+    throw new Error('scope "week" requires a week number.');
+  }
 
   const unknown = datasets.filter((d) => !WEEK_DATASETS[d]);
   if (unknown.length) throw new Error(`Unknown dataset(s): ${unknown.join(", ")}`);
@@ -220,7 +240,7 @@ async function runExport({
   const platform = client.getSystemConsole();
 
   const info = await client.getLeagueInfo(leagueId);
-  const weeks = resolveWeeks(mode, info);
+  const weeks = resolveWeeks(mode, info, week);
   const summary = {
     weeks: weeks.length,
     datasets: datasets.length,
