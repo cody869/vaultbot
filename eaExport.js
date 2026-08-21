@@ -59,7 +59,7 @@ const WEEK_BATCH = 2;
  */
 const TEAM_BATCH = Math.max(1, Number(process.env.EA_TEAM_BATCH || 2));
 const ROSTER_DELAY_MS = Math.max(0, Number(process.env.EA_ROSTER_DELAY_MS || 750));
-const POST_TIMEOUT_MS = Math.max(5000, Number(process.env.EA_POST_TIMEOUT_MS || 60000));
+const POST_TIMEOUT_MS = Math.max(5000, Number(process.env.EA_POST_TIMEOUT_MS || 180000));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
