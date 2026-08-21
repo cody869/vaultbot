@@ -8,7 +8,6 @@ import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.
 import { handleTradeVote, startTradeWatcher } from "./tradeVoting.js";
 import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
-import { buildScorebugAttachments } from "./scorebugHelper.js";
 import bugReportCommands from "./bugReport.js";
 import { handleExport, handleEaStatus } from "./eaCommands.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams } from "./adminCommands.js";
@@ -534,9 +533,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const week = interaction.options.getInteger("week") ?? undefined;
         const season = interaction.options.getInteger("season") ?? undefined;
         const data = await getScores(week, season);
-        const { rows } = await getStandings(data.season);
-        const files = await buildScorebugAttachments(data, rows);
-        await interaction.editReply({ embeds: [scoresEmbed(data)], files });
+        await interaction.editReply({ embeds: [scoresEmbed(data)] });
         break;
       }
       case "power": {
