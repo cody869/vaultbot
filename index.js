@@ -8,6 +8,7 @@ import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.
 import { handleTradeVote, startTradeWatcher } from "./tradeVoting.js";
 import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
+import { startScheduleWatcher } from "./scheduleWatcher.js";
 import bugReportCommands from "./bugReport.js";
 import { handleExport, handleEaStatus } from "./eaCommands.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams } from "./adminCommands.js";
@@ -65,7 +66,14 @@ if (!process.env.DISCORD_TOKEN) {
   process.exit(1);
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions,
+  ],
+});
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`✅ XCFL Vault bot online as ${c.user.tag}`);
@@ -86,6 +94,7 @@ client.once(Events.ClientReady, async (c) => {
   startTradeWatcher(c);
   startNewsWatcher(c);
   startScorebugWatcher(c);
+  startScheduleWatcher(c);
   // Keeps the EA tokens alive (the refresh chain dies after ~10 days idle)
   // and, if EA_AUTO_EXPORT=true, exports when the league actually changes.
   startEAWatcher();
