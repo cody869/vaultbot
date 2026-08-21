@@ -1119,6 +1119,33 @@ export async function updateEntity(entity, id, data) {
   throw new Error(`Could not save to the Vault: ${lastErr?.message ?? "unknown error"}`);
 }
 
+// Create a new entity record. Same collection endpoint as list(), POST verb.
+export async function createEntity(entity, data) {
+  const url = `${SERVER}/api/apps/${APP_ID}/entities/${entity}`;
+  const doFetch = () =>
+    fetch(url, { method: "POST", headers: authHeaders(), body: JSON.stringify(data) });
+
+  let res;
+  try {
+    res = await doFetch();
+    if ((res.status === 401 || res.status === 403) &&
+        (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
+      await botLogin();
+      res = await doFetch();
+    }
+  } catch (err) {
+    console.error(`[WRITE] ${entity} create failed:`, err.message);
+    throw new Error(`Could not save to the Vault: ${err.message}`);
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    console.error(`[WRITE] ${entity} create failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+    throw new Error(`Could not save to the Vault: HTTP ${res.status}`);
+  }
+  return res.json().catch(() => ({}));
+}
+
 // Trades awaiting committee review.
 export async function getPendingTrades() {
   const rows = await list("TradeSubmission", {}, { sort: "-created_date", limit: 200 });
