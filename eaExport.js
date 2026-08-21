@@ -176,12 +176,21 @@ function resolveWeeks(mode, leagueInfo, weekNumber) {
 async function exportWeek(client, leagueId, platform, { weekIndex, stage }, datasets) {
   // Madden's weekIndex is 0-based; the export path is 1-based.
   const base = `/${platform}/${leagueId}/week/${stagePrefix(stage)}/${weekIndex + 1}`;
-  await Promise.all(
-    datasets.map(async (key) => {
-      const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
-      await post(`${base}/${key}`, data);
-    })
-  );
+  // SEQUENTIAL, not Promise.all: passing/rushing/receiving/defense for the
+  // same game all touch the same WeeklyStats rows (a RB shows up in both
+  // rushing and receiving; a DE who forces a fumble shows up in defense and
+  // maybe fumbles). maddenWebhook snapshots "what already exists" once per
+  // invocation before deciding create-vs-update -- if two category calls for
+  // this week land within milliseconds of each other (which Promise.all
+  // guarantees), neither sees the other's still-in-flight write, and both
+  // independently create a row for the same player+game. That's what caused
+  // the Week 1 AND Week 2 duplicate-row bugs. Posting one dataset at a time
+  // means each call's snapshot already includes everything the previous call
+  // committed, so there's nothing left to race.
+  for (const key of datasets) {
+    const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
+    await post(`${base}/${key}`, data);
+  }
 }
 
 async function exportRosters(client, leagueId, platform, teamList, onProgress) {
