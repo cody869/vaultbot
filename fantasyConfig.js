@@ -8,8 +8,8 @@
 export const LEAGUE_DEFAULTS = {
   name: 'XCFL Best Ball',
   season_number: 84,
-  team_slots: 12,
-  roster_size: 12,
+  team_slots: 14,
+  roster_size: 12, // 8 starters (QB/HB2/WR3/TE/DEF) + 4 bench
   scoring_start_week: 5,
   regular_season_end_week: 13,
   playoff_start_week: 14,
@@ -36,9 +36,18 @@ export const LINEUP_SLOTS = [
 export const STARTER_COUNT = LINEUP_SLOTS.reduce((n, s) => n + s.count, 0); // 8
 export const BENCH_COUNT = LEAGUE_DEFAULTS.roster_size - STARTER_COUNT;    // 4
 
-// Roster construction rules enforced during the draft.
-export const ROSTER_MIN = { QB: 1, HB: 2, WR: 3, TE: 1, DEF: 1 };
-export const ROSTER_MAX = { QB: 3, HB: 6, WR: 7, TE: 3, DEF: 2 };
+// Minimum DRAFTED counts. Deliberately independent of the starting lineup:
+// best ball starts 1 QB but requires 2 drafted, so the weekly optimal lineup
+// always has a real choice rather than an automatic start.
+//
+// These total 11 of the 12 roster spots, leaving 1 discretionary pick.
+export const ROSTER_MIN = { QB: 2, HB: 2, WR: 3, TE: 2, DEF: 2 };
+
+// Hard ceiling per position. DEF is fixed at 2 regardless of spare picks:
+// there is one defense per XCFL team (32) and 14 teams x 2 required = 28, so
+// there is no slack for anyone to hoard a third. Best ball has no waivers, so
+// a backup defense could never be used anyway.
+export const ROSTER_MAX_DEF = 2;
 
 // ---------------------------------------------------------------------------
 // Runtime configuration
@@ -92,17 +101,21 @@ export function benchCount(league) {
  * bench so a 3-WR league can stack receivers but a 1-QB league can't hoard QBs.
  */
 export function resolveRosterLimits(league) {
-  const lineup = resolveLineup(league);
-  const bench = benchCount(league);
-  const min = {}, max = {};
-  for (const { position, count } of lineup) {
-    min[position] = count;
-    // DEF is a special case: nobody needs three team defenses.
-    max[position] = position === 'DEF'
-      ? Math.min(count + 1, count + bench)
-      : count + bench;
+  // Minimums come from roster_min, NOT from the starting lineup — the two are
+  // intentionally different (start 1 QB, must draft 2).
+  const min = { ...ROSTER_MIN, ...(league?.roster_min || {}) };
+  const rosterSize = rosterSizeOf(league);
+
+  // Spare picks after every minimum is met. Each position may use them all,
+  // so a manager can go deep anywhere they like with what is left over.
+  const minTotal = Object.values(min).reduce((a, b) => a + b, 0);
+  const flex = Math.max(0, rosterSize - minTotal);
+
+  const max = {};
+  for (const pos of Object.keys(min)) {
+    max[pos] = pos === 'DEF' ? ROSTER_MAX_DEF : min[pos] + flex;
   }
-  return { min, max };
+  return { min, max, flex, minTotal };
 }
 
 /** Scoring rules for a league, merged over the defaults. */
