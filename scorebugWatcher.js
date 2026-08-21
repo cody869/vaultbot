@@ -3,25 +3,32 @@
 //
 // Mirrors news.js's poll/seed/dedupe pattern (poll on an interval, claim in
 // an in-memory Set before posting, seed the existing backlog on first boot
-// instead of dumping it into the channel). One deliberate difference:
-// dedup state lives in a local file, not a stamped field on the Game row.
-// Game rows are bulk re-imported by the Madden sync pipeline each cycle, so
-// a custom field written onto one risks being silently wiped on the next
-// import -- unlike NewsArticle, which nothing but this bot ever writes to.
-// The tradeoff: Railway's filesystem is ephemeral, so a redeploy loses the
-// dedup history and the next poll re-seeds (catches up silently, doesn't
-// repost) rather than resuming exactly where it left off. Same tradeoff
-// scheduler.js already accepts for its own autopost signature file.
+// instead of dumping it into the channel).
+//
+// Dedup state lives in the ScorebugPost Base44 entity, not a stamped field
+// on Game and not a local file. Two earlier approaches were tried and both
+// had real failure modes:
+//   - A field stamped onto Game itself: Game rows are bulk re-imported by
+//     the Madden sync pipeline each cycle, so a custom field written onto
+//     one risks being silently wiped on the next import.
+//   - A local JSON file (/tmp/xcfl-scorebug-posted.json): Railway's
+//     filesystem is ephemeral, so a redeploy wiped it. Combined with a
+//     bulk Game re-import (which bumps updated_date on every row it
+//     touches), the seed-pass backlog guard below saw those rows as
+//     "recently updated" and posted them as if newly final -- reposting a
+//     season's worth of already-sent cards. This is what happened Aug 21
+//     2026 after a full S84 stats wipe + reimport landed on top of a
+//     redeploy.
+// ScorebugPost is a separate entity nothing else writes to, so it isn't
+// touched by the Madden import pipeline and isn't lost on redeploy.
 //
 // Environment:
 //   SCOREBUG_CHANNEL_ID    channel to post cards to (default below)
 //   SCOREBUG_POLL_SECONDS  optional — default 60
 //   SCOREBUG_SEED_HOURS    optional — default 24 (first-boot backlog grace window)
-//   SCOREBUG_STATE_FILE    optional — default /tmp/xcfl-scorebug-posted.json
 
-import { readFileSync, writeFileSync } from "node:fs";
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
-import { list, getStandings, getCurrentCycle } from "./vault.js";
+import { list, getStandings, getCurrentCycle, createEntity, updateEntity } from "./vault.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
 import { isGameFinal, getGameContributors } from "./scorebugHelper.js";
@@ -31,10 +38,10 @@ const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
 const POLL_MS = Number(process.env.SCOREBUG_POLL_SECONDS || 60) * 1000;
 const SEED_HOURS = Number(process.env.SCOREBUG_SEED_HOURS || 24);
-const STATE_FILE = process.env.SCOREBUG_STATE_FILE || "/tmp/xcfl-scorebug-posted.json";
 
 // Games handled this process, so a slow render/post can't be picked up
-// twice by the next tick (same fast in-process guard news.js uses).
+// twice by the next tick (same fast in-process guard news.js uses). This
+// is only a same-tick guard now — ScorebugPost is the real dedup record.
 const handled = new Set();
 
 // Stable key that survives Base44 re-imports regenerating row ids --
@@ -43,19 +50,38 @@ function gameKey(g) {
   return `${g.season_number ?? "?"}-${g.week ?? "?"}-${g.awayTeam ?? "?"}-${g.homeTeam ?? "?"}`;
 }
 
-function loadPosted() {
+// Pull every already-posted key from ScorebugPost. One broad read per tick
+// (same shape as the old loadPosted()), just backed by Base44 instead of a
+// local file.
+async function loadPosted() {
   try {
-    return new Set(JSON.parse(readFileSync(STATE_FILE, "utf8")).posted || []);
-  } catch {
-    return new Set();
+    const rows = await list("ScorebugPost", {}, { limit: 5000 });
+    return new Set(rows.map((r) => r.game_key).filter(Boolean));
+  } catch (err) {
+    console.error(`[SCOREBUG] could not read ScorebugPost: ${err.message}`);
+    // Fail closed on the side of NOT reposting: if we can't confirm what's
+    // already posted, skip this tick entirely rather than risk a flood.
+    return null;
   }
 }
-function savePosted(posted) {
-  try {
-    writeFileSync(STATE_FILE, JSON.stringify({ posted: [...posted] }));
-  } catch (err) {
-    console.error(`[SCOREBUG] could not persist state: ${err.message}`);
-  }
+
+// Claim a key by creating its ScorebugPost row BEFORE sending to Discord.
+// If two ticks somehow race on the same key, the loser just gets a create
+// that succeeds harmlessly (no uniqueness constraint at the DB level) --
+// the in-process `handled` Set is what actually prevents that within one
+// process, and a second process racing this is not a scenario this league's
+// single-instance Railway deploy hits in practice.
+async function claim(key, g) {
+  await createEntity("ScorebugPost", {
+    game_key: key,
+    season_number: g.season_number,
+    week: g.week,
+    cycle: g.cycle,
+    away_team: g.awayTeam,
+    home_team: g.homeTeam,
+    discord_channel_id: CHANNEL_ID,
+    posted_at: new Date().toISOString(),
+  });
 }
 
 function isFinal(g) {
@@ -107,8 +133,9 @@ async function postCard(client, g, standingsRows) {
   if (!channel || !channel.isTextBased()) {
     throw new Error("channel not found or not text-based");
   }
-  await channel.send({ embeds: [embed], files: [file] });
+  const message = await channel.send({ embeds: [embed], files: [file] });
   console.log(`[SCOREBUG] posted: ${awayAbbr} ${g.user2_score} @ ${homeAbbr} ${g.user1_score} (wk ${g.week}) -> ${gameUrl}`);
+  return message;
 }
 
 async function tick(client, { seed = false } = {}) {
@@ -123,15 +150,12 @@ async function tick(client, { seed = false } = {}) {
   // Only the CURRENT cycle is "from here on out" -- a historical CSV
   // backfill (old seasons, old cycle) must never reach postCard, no matter
   // how recent its updated_date looks or whether this is a seed pass.
-  // This is the actual fix for the Aug 2026 import flood: the old seed/
-  // cutoff guard below only protected first boot, so a bulk import landing
-  // mid-process (bot already running) skipped it entirely and posted every
-  // historical game as if it were live.
   const currentCycle = await getCurrentCycle();
   const finals = games.filter((g) => g.cycle === currentCycle && isFinal(g));
   if (!finals.length) return;
 
-  const posted = loadPosted();
+  const posted = await loadPosted();
+  if (posted === null) return; // couldn't confirm dedup state — skip this tick, don't risk a repost flood
   const cutoff = Date.now() - SEED_HOURS * 3600 * 1000;
 
   // Standings are the same for every game in a given season within one
@@ -144,34 +168,55 @@ async function tick(client, { seed = false } = {}) {
     return standingsBySeason.get(season);
   };
 
-  let dirty = false;
   for (const g of finals) {
     const key = gameKey(g);
     if (handled.has(key) || posted.has(key)) continue;
 
     // First boot on a Vault that already has final games: mark the backlog
     // as handled rather than dumping a season's worth of cards at once.
+    // NOTE: this cutoff is now a genuine first-boot-only backlog guard --
+    // it no longer has to also compensate for lost dedup state, since
+    // ScorebugPost persists across restarts and reimports. A reimport that
+    // bumps updated_date on old games can no longer cause a repost: those
+    // keys are already sitting in ScorebugPost from when they first posted.
     if (seed && importedTime(g) < cutoff) {
-      posted.add(key);
-      dirty = true;
+      handled.add(key); // avoid re-claiming every tick until the create lands
+      try {
+        await claim(key, g);
+      } catch (err) {
+        console.error(`[SCOREBUG] backlog claim failed for ${key}: ${err.message}`);
+      }
       continue;
     }
 
     handled.add(key); // fast in-process guard against a double-fire mid-render
     try {
+      // Claim BEFORE sending: if the claim write fails, we skip posting
+      // rather than post without a record of having done so.
+      await claim(key, g);
       const rows = await rowsFor(g.season_number);
-      await postCard(client, g, rows);
-      posted.add(key);
-      dirty = true;
+      const message = await postCard(client, g, rows);
+      if (message) {
+        try {
+          // Best-effort follow-up write; the row already exists from claim(),
+          // so a failure here just means discord_message_id stays blank.
+          const existing = (await list("ScorebugPost", { game_key: key })).find((r) => r.game_key === key);
+          if (existing) {
+            await updateEntity("ScorebugPost", existing.id, { discord_message_id: message.id });
+          }
+        } catch (err) {
+          console.error(`[SCOREBUG] could not stamp message id for ${key}: ${err.message}`);
+        }
+      }
     } catch (err) {
       console.error(`[SCOREBUG] post failed for ${key}: ${err.message}`);
-      // leave it out of `posted` so a later tick retries
-    } finally {
-      handled.delete(key);
+      // Claim already landed even on a postCard failure, so this key won't
+      // be retried automatically. That's a deliberate tradeoff: better to
+      // occasionally miss a card than to flood-repost on a render error
+      // that recurs every tick. Check logs for "[SCOREBUG] post failed" and
+      // delete the ScorebugPost row manually to force a retry if needed.
     }
   }
-
-  if (dirty) savePosted(posted);
 }
 
 export function startScorebugWatcher(client) {
