@@ -841,7 +841,8 @@ async function cmdDoctor(interaction) {
   }
   const league = await getLeague();
 
-  const [stats, games] = await Promise.all([getWeeklyStats(), getGames()]);
+  const season = league?.season_number ?? LEAGUE_DEFAULTS.season_number;
+  const [stats, games] = await Promise.all([getWeeklyStats(season), getGames(season)]);
   const statRow = stats[0];
   const gameRow = games[0];
 
@@ -857,7 +858,6 @@ async function cmdDoctor(interaction) {
 
   const offensive = stats.find((r) => resolveKey(r, STAT_FIELDS.passYds) || resolveKey(r, STAT_FIELDS.recYds));
   const defensive = stats.find((r) => resolveKey(r, STAT_FIELDS.defSacks) || resolveKey(r, STAT_FIELDS.defInts));
-  const s84 = games.filter((g) => Number(g.season_number) === 84).length;
 
   let poolLine;
   try {
@@ -875,7 +875,7 @@ async function cmdDoctor(interaction) {
     '# Fantasy field doctor',
     poolLine,
     '',
-    `WeeklyStats rows: ${stats.length} · Game rows: ${games.length} (${s84} in S84)`,
+    `WeeklyStats rows: **${stats.length}** · Game rows: **${games.length}** (season ${season})`,
     stats.length ? '' : '**WeeklyStats is empty** — nothing to verify until the first week imports.',
     '',
     ...report('Identity fields', statRow, KEY_FIELDS),
