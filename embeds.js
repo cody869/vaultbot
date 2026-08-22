@@ -1,1285 +1,1010 @@
-// vault.js — reads XCFL Vault data from Base44.
-// If BOT_EMAIL/BOT_PASSWORD are set, the bot logs in as that user and sends a
-// bearer token (needed once the app requires login). Otherwise it falls back to
-// anonymous reads (works only while the app is public).
-import { abbrFromName } from "./emoji.js";
+// embeds.js — turns Vault data into pretty Discord embeds.
+import {
+  EmbedBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+} from "discord.js";
+import { teamEmoji, teamEmojiByName, abbrFromName, devEmoji } from "./emoji.js";
 
-const APP_ID = process.env.BASE44_APP_ID;
-const SERVER = process.env.BASE44_SERVER_URL || "https://base44.app";
+const VAULT_COLOR = 0x1d4ed8; // XCFL blue
+const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 
-if (!APP_ID) {
-  console.error("Missing BASE44_APP_ID in environment. See README.");
-  process.exit(1);
+function fmtMoney(m) {
+  if (m == null) return "—";
+  const n = Number(m);
+  // Values arrive in raw dollars (e.g. 1130000) — show as $1.13M.
+  // If a value is already small (< 1000) assume it's already in millions.
+  const millions = n >= 1000 ? n / 1_000_000 : n;
+  return `$${millions.toFixed(2)}M`;
 }
 
-// Current cycle comes from AppConfig (key/value rows), cached for a minute.
-let _cycleCache = { at: 0, cycle: process.env.XCFL_CYCLE || "M26" };
-const CYCLE_TTL_MS = 60_000;
-
-export async function getCurrentCycle() {
-  const now = Date.now();
-  if (_cycleCache.at && now - _cycleCache.at < CYCLE_TTL_MS) {
-    return _cycleCache.cycle;
-  }
-
-  try {
-    const config = await list("AppConfig");
-    // AppConfig stores key/value rows — find the current_cycle row.
-    const row = config.find((c) => c.key === "current_cycle");
-    if (row && row.value) {
-      _cycleCache = { at: now, cycle: row.value };
-      console.log(`[CYCLE] current_cycle = ${row.value}`);
-      return row.value;
-    }
-    console.warn("[CYCLE] No current_cycle row found in AppConfig.");
-  } catch (err) {
-    console.error("[CYCLE] Could not read AppConfig:", err.message);
-  }
-
-  const fallback = process.env.XCFL_CYCLE || "M26";
-  console.log(`[CYCLE] Falling back to ${fallback}`);
-  return fallback;
+// Usernames in some entities are email addresses. Never render one.
+function looksLikeEmail(v) {
+  return /\S+@\S+\.\S+/.test(String(v ?? ""));
 }
 
-// --- auth ----------------------------------------------------------------
-
-let _token = null;
-
-// Log in as the bot's dedicated user and cache the access token. Safe to call
-// repeatedly; returns the token or null if no credentials are configured.
-export async function botLogin() {
-  const email = process.env.BOT_EMAIL;
-  const password = process.env.BOT_PASSWORD;
-  // A pre-issued token can be supplied directly instead of email/password.
-  if (process.env.BASE44_TOKEN) {
-    _token = process.env.BASE44_TOKEN;
-    return _token;
-  }
-  if (!email || !password) return null;
-
-  try {
-    const res = await fetch(`${SERVER}/api/apps/${APP_ID}/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-App-Id": APP_ID },
-      body: JSON.stringify({ email, password }),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      console.error(`Bot login failed: HTTP ${res.status} ${body.slice(0, 200)}`);
-      _token = null;
-      return null;
-    }
-    const data = await res.json().catch(() => null);
-    _token = data?.access_token || null;
-    if (_token) console.log("🔑 Bot authenticated to the Vault.");
-    else console.error("Bot login returned no access_token.");
-    return _token;
-  } catch (err) {
-    console.error("Bot login error:", err.message);
-    _token = null;
-    return null;
-  }
-}
-
-// Build auth headers for a request, including the bearer token if we have one.
-function authHeaders() {
-  const h = { "Content-Type": "application/json", "X-App-Id": APP_ID };
-  if (_token) h.Authorization = `Bearer ${_token}`;
-  return h;
-}
-
-// --- helpers -------------------------------------------------------------
-
-// Read an entity via the REST endpoint. `filter` is a plain object; it's sent
-// as Base44's query params. Returns an array (possibly empty). Throws only on
-// an actual network/HTTP failure — an empty entity returns []. If a request is
-// rejected for auth (401/403) and we have credentials, it re-logs in once and
-// retries.
-export async function list(entity, filter = {}, opts = {}) {
-  const doFetch = async () => {
-    const url = new URL(`${SERVER}/api/apps/${APP_ID}/entities/${entity}`);
-    for (const [k, v] of Object.entries(filter)) {
-      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    }
-    if (opts.sort) url.searchParams.set("sort", opts.sort);
-    if (opts.limit) url.searchParams.set("limit", String(opts.limit));
-    return fetch(url, { headers: authHeaders() });
-  };
-
-  let res;
-  try {
-    res = await doFetch();
-    // Token expired or app now requires auth — re-login once and retry.
-    if ((res.status === 401 || res.status === 403) && (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
-      await botLogin();
-      res = await doFetch();
-    }
-  } catch (err) {
-    console.error(`Network error reading ${entity}:`, err.message);
-    throw new Error(`Could not reach the Vault for ${entity}.`);
-  }
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    console.error(`HTTP ${res.status} reading ${entity}: ${body.slice(0, 200)}`);
-    throw new Error(`Could not reach the Vault for ${entity} (HTTP ${res.status}).`);
-  }
-
-  const data = await res.json().catch(() => null);
-  // Endpoint may return an array directly or {entities:[...]} — handle both.
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.entities)) return data.entities;
-  return [];
-}
-
-// Server-side filters aren't always honored, so every read that matters is
-// verified in memory. Tries the narrow (filtered) request first and falls back
-// to a broad fetch when that comes back with nothing usable.
-async function listMatching(entity, filter, matchFn, opts = {}) {
-  try {
-    const narrow = await list(entity, filter, { limit: opts.limit ?? 500 });
-    const hits = narrow.filter(matchFn);
-    if (hits.length) return hits;
-  } catch (err) {
-    console.error(`[${entity}] narrow read failed:`, err.message);
-  }
-  try {
-    const broad = await list(entity, {}, { limit: opts.broadLimit ?? 5000 });
-    return broad.filter(matchFn);
-  } catch (err) {
-    console.error(`[${entity}] broad read failed:`, err.message);
-    return [];
-  }
-}
-
-// Loose name comparison — handles case and the "F.LastName" short form that
-// some imports use.
-function nameMatches(candidate, fullName) {
-  if (!candidate || !fullName) return false;
-  const a = String(candidate).trim().toLowerCase();
-  const b = String(fullName).trim().toLowerCase();
-  if (a === b) return true;
-  const parts = b.split(/\s+/);
-  if (parts.length >= 2) {
-    const short = `${parts[0][0]}.${parts[parts.length - 1]}`;
-    if (a === short) return true;
-  }
-  return false;
-}
-
-// --- data accessors used by commands -------------------------------------
-
-// Standings, derived from TeamStat (cumulative win/loss per team per week).
-// TeamStat is keyed by Madden team_id and has one row per week, so we take the
-// latest week's row per team in the target season, then join TeamMap for names.
-export async function getStandings(seasonNumber) {
-  const stats = await list("TeamStat");
-  if (!stats.length) return { season: null, rows: [] };
-
-  // Target season = explicit arg, else the highest season_index present.
-  const season =
-    seasonNumber ?? Math.max(...stats.map((s) => s.season_index ?? 0));
-
-  // Keep only the latest-week row for each team in that season.
-  const latestByTeam = new Map();
-  for (const s of stats) {
-    if (s.season_index !== season) continue;
-    const prev = latestByTeam.get(s.team_id);
-    if (!prev || (s.week_index ?? 0) > (prev.week_index ?? 0)) {
-      latestByTeam.set(s.team_id, s);
-    }
-  }
-
-  // Build team_id -> name lookup from TeamMap (non-fatal if it fails).
-  let nameById = {};
-  try {
-    const teams = await list("TeamMap");
-    for (const t of teams) {
-      nameById[t.team_id] = {
-        team_name: t.team_name ?? "",
-        team_abbrName: t.team_abbrName ?? "",
-      };
-    }
-  } catch {
-    /* names just won't show */
-  }
-
-  const rows = [...latestByTeam.values()]
-    .map((s) => {
-      const info = nameById[s.team_id] ?? {};
-      return {
-        team_name: info.team_name ?? "",
-        team_abbrName: info.team_abbrName ?? "",
-        wins: s.total_wins ?? 0,
-        losses: s.total_losses ?? 0,
-        ties: s.total_ties ?? 0,
-        seed: s.seed ?? null,
-        points_for: s.off_pts_per_game ?? 0,
-      };
-    })
-    .sort(
-      (a, b) =>
-        b.wins - a.wins ||
-        a.losses - b.losses ||
-        (a.seed ?? 99) - (b.seed ?? 99)
-    );
-
-  return { season, rows };
-}
-
-// A Game row counts as played once it has a completed status (2=regular,
-// 3=playoff per the export convention) — status 1 means the matchup exists
-// (Game holds the whole season's schedule up front) but hasn't been played.
-function isPlayedGame(g) {
-  return g.status === 2 || g.status === 3;
-}
-
-// Unplayed Game rows for a season+week, enriched with whatever the schedule
-// watcher (scheduleWatcher.js, reading the #schedule channel) has parsed for
-// them. Takes the unplayed rows directly (already split out of the same
-// Game fetch getScores did) rather than re-querying — Game is the single
-// source for both played and upcoming matchups here, there's no separate
-// "Schedule" data source to cross-reference.
-async function getUpcomingForWeek(unplayedGames, season, wk) {
-  if (!unplayedGames.length) return [];
-  try {
-    // ScheduledGame rows are keyed by season/week/team_a/team_b (see
-    // scheduleWatcher.js) — one row per matchup, latest parse wins if a
-    // message was edited and re-parsed more than once.
-    //
-    // Match keys are built from team ABBREVIATION, not raw name string:
-    // Game stores full names ("Houston Texans") while ScheduledGame stores
-    // nickname-only names ("Texans", from the team-emoji lookup) — comparing
-    // those two strings directly never matches even when it's the same
-    // team, so both sides go through abbrFromName() to normalize first.
-    const scheduledRows = await list("ScheduledGame", {}, { limit: 5000 });
-    const byMatchup = new Map();
-    for (const r of scheduledRows) {
-      if (r.season_number !== season || r.week !== wk) continue;
-      const pair = [abbrFromName(r.team_a), abbrFromName(r.team_b)].filter(Boolean).sort().join("|");
-      if (!pair) continue;
-      const prev = byMatchup.get(pair);
-      if (!prev || (r.parsed_at || "") > (prev.parsed_at || "")) byMatchup.set(pair, r);
-    }
-
-    return unplayedGames.map((g) => {
-      const pair = [abbrFromName(g.homeTeam), abbrFromName(g.awayTeam)].filter(Boolean).sort().join("|");
-      const sched = byMatchup.get(pair) || null;
-      return {
-        home: g.homeTeam ?? "",
-        away: g.awayTeam ?? "",
-        status: sched?.scheduled_status ?? "unscheduled",
-        timeText:
-          sched?.scheduled_status === "forfeit"
-            ? `FW${sched.forfeit_winner_team ? ` (${sched.forfeit_winner_team})` : ""}`
-            : sched?.scheduled_time_text ?? null,
-        // Raw parsed fields, for sorting the Upcoming section chronologically
-        // (see scoresEmbed in embeds.js) — not just for display text.
-        day: sched?.scheduled_day ?? null,
-        hour24: sched?.scheduled_hour_24 ?? null,
-        minute: sched?.scheduled_minute ?? null,
-      };
-    });
-  } catch (err) {
-    console.error("[SCORES] upcoming lookup failed:", err.message);
-    return []; // non-fatal — completed games still show without this section
-  }
-}
-
-// Scores for a given week (defaults to the latest week that has at least
-// one COMPLETED game) in the latest season. Home team is user1, away is
-// user2 by the export convention. Also returns `upcoming`: unplayed
-// matchups in that same week, with whatever day/time the #schedule channel
-// watcher has parsed for them.
-//
-// NOTE on the week default: Game holds the whole season's matchups up
-// front (future weeks exist with status 1 and 0-0 scores before they're
-// played), so defaulting to the single highest `week` number in the season
-// — as this used to do — could land on a not-yet-played future week
-// instead of the most recent actual results. Defaulting to the earliest
-// not-yet-fully-played week fixes that (verified against real data: weeks
-// 1-3 were entirely status 2/3, week 4 entirely status 1 — clean weekly
-// boundaries, not a mix within one week — so "the current week" is the
-// front line of play, not the last fully-resolved week or the season's
-// max week number).
-export async function getScores(week, seasonNumber) {
-  const games = await list("Game");
-  if (!games.length) return { season: null, week: null, games: [], upcoming: [] };
-
-  const season =
-    seasonNumber ?? Math.max(...games.map((g) => g.season_number ?? 0));
-
-  const inSeason = games.filter((g) => g.season_number === season);
-  if (!inSeason.length) return { season, week: null, games: [], upcoming: [] };
-
-  const unplayedWeeks = inSeason.filter((g) => !isPlayedGame(g)).map((g) => g.week ?? 0);
-  const wk =
-    week ?? (unplayedWeeks.length ? Math.min(...unplayedWeeks) : Math.max(...inSeason.map((g) => g.week ?? 0)));
-
-  const wkAll = inSeason.filter((g) => g.week === wk);
-  const wkPlayed = wkAll.filter(isPlayedGame);
-  const wkUnplayed = wkAll.filter((g) => !isPlayedGame(g));
-
-  const wkGames = wkPlayed
-    .map((g) => ({
-      home: g.homeTeam ?? "",
-      away: g.awayTeam ?? "",
-      homeScore: g.user1_score ?? 0,
-      awayScore: g.user2_score ?? 0,
-      status: g.status, // 2=regular, 3=playoff (per export)
-      scheduleId: g.scheduleId ?? null,
-      cycle: g.cycle ?? null,
-    }))
-    // Final scores first by margin, just for stable ordering.
-    .sort((a, b) => b.homeScore + b.awayScore - (a.homeScore + a.awayScore));
-
-  const upcoming = await getUpcomingForWeek(wkUnplayed, season, wk);
-
-  return { season, week: wk, games: wkGames, upcoming };
-}
-
-// Weeks available in the latest season (for the /scores week autocomplete).
-// Game holds the full season's matchups up front, so this already includes
-// upcoming not-yet-played weeks — no separate lookup needed.
-export async function getScoreWeeks(seasonNumber) {
-  const games = await list("Game");
-  if (!games.length) return { season: null, weeks: [] };
-  const season =
-    seasonNumber ?? Math.max(...games.map((g) => g.season_number ?? 0));
-  const weeks = [
-    ...new Set(
-      games
-        .filter((g) => g.season_number === season)
-        .map((g) => g.week)
-        .filter((w) => w != null)
-    ),
-  ].sort((a, b) => a - b);
-  return { season, weeks };
-}
-
-// A signature that changes whenever game data changes — the most recent
-// `updated_date` across all games. Used by the scheduler to detect new scores.
-export async function getScoresSignature() {
-  const games = await list("Game");
-  if (!games.length) return null;
-  let latest = "";
-  for (const g of games) {
-    const u = g.updated_date || g.created_date || "";
-    if (u > latest) latest = u;
-  }
-  return latest || null;
-}
-
-// Stat leaders for a category. Returns top N sorted by the chosen field.
-const STAT_CONFIG = {
-  passing_yds: { entity: "PassingStat", field: "passTotalYds", label: "Passing Yds" },
-  passing_tds: { entity: "PassingStat", field: "passTotalTDs", label: "Passing TDs" },
-  passing_ints: { entity: "PassingStat", field: "passTotalInts", label: "Passing INTs" },
-  rushing_yds: { entity: "RushingStat", field: "rushTotalYds", label: "Rushing Yds" },
-  rushing_tds: { entity: "RushingStat", field: "rushTotalTDs", label: "Rushing TDs" },
-  fumbles: { entity: "RushingStat", field: "rushTotalFum", label: "Fumbles" },
-  receptions: { entity: "ReceivingStat", field: "recTotalCatches", label: "Receptions" },
-  receiving_yds: { entity: "ReceivingStat", field: "recTotalYds", label: "Receiving Yds" },
-  receiving_tds: { entity: "ReceivingStat", field: "recTotalTDs", label: "Receiving TDs" },
-  sacks: { entity: "DefenseStat", field: "defTotalSacks", label: "Sacks" },
-  def_ints: { entity: "DefenseStat", field: "defTotalInts", label: "Defensive INTs" },
-  forced_fumbles: { entity: "DefenseStat", field: "defTotalForcedFum", label: "Forced Fumbles" },
-};
-
-export async function getStatLeaders(category, limit = 10, seasonNumber) {
-  const cfg = STAT_CONFIG[category];
-  if (!cfg) throw new Error(`Unknown stat category: ${category}`);
-
-  const cycle = await getCurrentCycle();
-  const all = await list(cfg.entity, { cycle }, { limit: 5000 });
-  const rows = all.filter((r) => !r.cycle || r.cycle === cycle);
-  if (!rows.length) return { ...cfg, season: null, leaders: [] };
-
-  const season =
-    seasonNumber ?? Math.max(...rows.map((r) => r.season_number ?? 0));
-
-  const leaders = rows
-    .filter((r) => r.season_number === season)
-    .sort((a, b) => (b[cfg.field] ?? 0) - (a[cfg.field] ?? 0))
-    .slice(0, limit);
-
-  return { ...cfg, season, leaders };
-}
-
-// Power rankings for the most recent week present. Enriches each row with the
-// member's current team (from the latest SeasonRecord) so the embed can show a
-// helmet, since PowerRanking itself only stores a username.
-export async function getPowerRankings() {
-  const all = await list("PowerRanking");
-  if (!all.length) return { week: null, rows: [] };
-
-  // Build username -> team_name from the latest season's records.
-  let teamByUser = {};
-  try {
-    const cycle = await getCurrentCycle();
-    const allRecs = await list("SeasonRecord", { cycle }, { limit: 5000 });
-    const recs = allRecs.filter((r) => !r.cycle || r.cycle === cycle);
-    if (recs.length) {
-      const latest = Math.max(...recs.map((r) => r.season_number ?? 0));
-      for (const r of recs) {
-        if (r.season_number === latest && r.username && r.team_name) {
-          teamByUser[r.username] = r.team_name;
-        }
-      }
-    }
-  } catch {
-    // Non-fatal — rankings just won't have helmets.
-  }
-
-  const weeks = [...new Set(all.map((r) => r.week))];
-  const week = weeks[weeks.length - 1];
-
-  const rows = all
-    .filter((r) => r.week === week)
-    .sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999))
-    .map((r) => ({ ...r, team_name: teamByUser[r.username] ?? null }));
-
-  return { week, rows };
-}
-
-// Trade block entries (players + picks on offer). Optional `team` filters to a
-// single franchise — matches on full name, nickname, or abbreviation, case-
-// insensitively (e.g. "Browns", "cleveland browns", or "CLE" all work).
-export async function getTradeBlock(team) {
-  const entries = await list("TradeBlock");
-  let filtered = entries;
-
-  if (team && team.trim()) {
-    const q = team.toLowerCase().trim();
-    filtered = entries.filter((e) => {
-      const name = (e.team_name ?? "").toLowerCase();
-      const abbr = (e.team_abbrName ?? "").toLowerCase();
-      const nick = name.split(/\s+/).pop();
-      return (
-        name === q ||
-        abbr === q ||
-        nick === q ||
-        name.includes(q) ||
-        q.includes(nick)
-      );
-    });
-  }
-
-  return {
-    team: team?.trim() || null,
-    entries: filtered.sort((a, b) => (b.player_ovr ?? 0) - (a.player_ovr ?? 0)),
-  };
-}
-
-// Distinct team names that currently have trade-block entries (for error help).
-export async function getTradeBlockTeams() {
-  const entries = await list("TradeBlock");
-  return [...new Set(entries.map((e) => e.team_name).filter(Boolean))].sort();
-}
-
-// Cache the full player list briefly so autocomplete (which fires on every
-// keystroke) doesn't hit the API repeatedly.
-let _playerCache = { at: 0, rows: [] };
-let _playerRefresh = null; // in-flight load, shared by concurrent callers
-const PLAYER_TTL_MS = 300_000; // 5 minutes — refreshes happen in background
-
-async function loadPlayers() {
-  const cycle = await getCurrentCycle();
-  const allRows = await list("Player", {}, { limit: 10000 });
-  // Filter to the current cycle in memory — the server-side filter can't be
-  // relied on, and stale-cycle players are the exact bug we're avoiding.
-  const rows = allRows.filter((p) => p.cycle === cycle);
-  console.log(`[PLAYER] ${allRows.length} total -> ${rows.length} in cycle ${cycle}`);
-  _playerCache = { at: Date.now(), rows };
-  return rows;
-}
-
-// Kick off a refresh without blocking the caller. Multiple callers share the
-// same in-flight promise so we never stack duplicate 10k-row fetches.
-function refreshPlayersInBackground() {
-  if (_playerRefresh) return _playerRefresh;
-  _playerRefresh = loadPlayers()
-    .catch((err) => {
-      console.error("[PLAYER] background refresh failed:", err.message);
-      return _playerCache.rows;
-    })
-    .finally(() => {
-      _playerRefresh = null;
-    });
-  return _playerRefresh;
-}
-
-// Warm the cache at startup so the very first autocomplete is instant.
-export async function warmPlayerCache() {
-  try {
-    await loadPlayers();
-    console.log("🔥 Player cache warmed.");
-  } catch (err) {
-    console.error("[PLAYER] warm failed:", err.message);
-  }
-}
-
-// Cached player list. Never blocks on a refresh if we already have rows —
-// Discord gives autocomplete only 3 seconds, and a cold fetch blows past it.
-async function getAllPlayers() {
-  const fresh = Date.now() - _playerCache.at < PLAYER_TTL_MS;
-  if (_playerCache.rows.length) {
-    // Stale but usable: hand back what we have and refresh behind the scenes.
-    if (!fresh) refreshPlayersInBackground();
-    return _playerCache.rows;
-  }
-  // Nothing cached at all — we have to wait for the first load.
-  return refreshPlayersInBackground();
-}
-
-// Suggestions for autocomplete. Returns up to `limit` players ranked by how
-// well they match the partial query, each as { name, value } where value is a
-// stable, unambiguous identifier (the Base44 record id when available).
-export async function suggestPlayers(partial, limit = 25) {
-  const all = await getAllPlayers();
-  const q = (partial ?? "").trim().toLowerCase();
-
-  const scored = all
-    .map((p) => {
-      const n = (p.player_fullName ?? "").toLowerCase();
-      const words = n.split(/\s+/);
-      let tier = 0;
-      if (!q) tier = 1; // empty query -> show top players
-      else if (n === q) tier = 4;
-      else if (n.startsWith(q)) tier = 3;
-      else if (words.some((w) => w.startsWith(q))) tier = 2;
-      else if (n.includes(q)) tier = 1;
-      return { p, tier };
-    })
-    .filter((x) => x.tier > 0)
-    .sort(
-      (a, b) => b.tier - a.tier || (b.p.player_ovr ?? 0) - (a.p.player_ovr ?? 0)
-    )
-    .slice(0, limit);
-
-  return scored
-    .map(({ p }) => {
-      const team = p.team_abbrName ? ` · ${p.team_abbrName}` : "";
-      const label =
-        `${p.player_fullName} (${p.player_position ?? "?"} · ${p.player_ovr ?? "?"} OVR${team})`.slice(
-          0,
-          100 // Discord caps choice names at 100 chars
-        );
-      // Discord rejects the ENTIRE response if any single choice is malformed:
-      // name and value must both be non-empty strings under 100 characters.
-      const value = String(p.id || p.player_fullName || "").slice(0, 100);
-      const name = String(label || "").trim();
-      if (!name || !value) return null;
-      return { name, value };
-    })
-    .filter(Boolean);
-}
-
-// Fetch a single player by Base44 record id (what autocomplete sends).
-export async function getPlayerById(id) {
-  const all = await getAllPlayers();
-  return all.find((p) => p.id === id) ?? null;
-}
-
-// Look up players by (partial) name. Returns a ranked list of matches plus a
-// flag for whether the result is unambiguous (a single clear player) so the
-// caller can either show the card directly or present a chooser.
-export async function getPlayer(name) {
-  const all = await getAllPlayers();
-  if (!all.length) return { matches: [], unambiguous: false };
-
-  const q = name.trim().toLowerCase();
-
-  // Rank each player: exact full-name match > starts-with > word match >
-  // substring. Within a tier, prefer higher OVR.
-  const scored = all
-    .map((p) => {
-      const n = (p.player_fullName ?? "").toLowerCase();
-      const words = n.split(/\s+/);
-      let tier = 0;
-      if (n === q) tier = 4;
-      else if (n.startsWith(q)) tier = 3;
-      else if (words.includes(q)) tier = 2; // exact word (e.g. last name)
-      else if (n.includes(q)) tier = 1;
-      return { p, tier };
-    })
-    .filter((x) => x.tier > 0)
-    .sort(
-      (a, b) => b.tier - a.tier || (b.p.player_ovr ?? 0) - (a.p.player_ovr ?? 0)
-    );
-
-  const matches = scored.map((x) => x.p);
-
-  // Unambiguous only when there's exactly one match, or the top match is an
-  // exact full-name hit that nothing else ties.
-  const exact = scored.filter((x) => x.tier === 4);
-  const unambiguous =
-    matches.length === 1 || exact.length === 1;
-
-  return { matches, unambiguous };
-}
-
-// Look up a Roster row for a player (gives team name + abbreviation for the
-// helmet/header) — falls back gracefully if the player isn't rostered.
-export async function getRosterFor(playerFullName) {
-  try {
-    const cycle = await getCurrentCycle();
-    const rows = await listMatching(
-      "Roster",
-      { cycle, player_fullName: playerFullName },
-      (r) =>
-        (!r.cycle || r.cycle === cycle) &&
-        nameMatches(r.player_fullName, playerFullName)
-    );
-    return rows[0] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-// --- player stat views (used by the /player dropdown) --------------------
-
-// Short-lived cache so flipping between dropdown views doesn't refetch.
-const _statCache = new Map(); // key -> { at, data }
-const STAT_TTL_MS = 120_000;
-
-function cachedStats(key) {
-  const hit = _statCache.get(key);
-  if (hit && Date.now() - hit.at < STAT_TTL_MS) return hit.data;
-  return null;
-}
-function putStats(key, data) {
-  _statCache.set(key, { at: Date.now(), data });
-  return data;
-}
-
-// Per-week stat lines for a player in the current cycle, newest week first.
-// Returns { season, weeks: [...] } for the latest season that has data.
-export async function getPlayerWeeklyStats(playerFullName) {
-  const cycle = await getCurrentCycle();
-  const key = `weekly:${cycle}:${playerFullName}`;
-  const hit = cachedStats(key);
-  if (hit) return hit;
-
-  const rows = await listMatching(
-    "WeeklyStats",
-    { cycle, player_full_name: playerFullName },
-    (r) =>
-      (!r.cycle || r.cycle === cycle) &&
-      nameMatches(r.player_full_name, playerFullName),
-    { limit: 500, broadLimit: 10000 }
-  );
-
-  if (!rows.length) return putStats(key, { season: null, weeks: [] });
-
-  const season = Math.max(...rows.map((r) => r.season_index ?? 0));
-  const weeks = rows
-    .filter((r) => (r.season_index ?? 0) === season)
-    .sort((a, b) => (b.week_index ?? 0) - (a.week_index ?? 0));
-
-  return putStats(key, { season, weeks });
-}
-
-// Season totals for a player, merged across the four stat entities.
-// Returns [{ season, gamesPlayed, passing, rushing, receiving, defense }, ...]
-// sorted newest season first.
-export async function getPlayerSeasonStats(playerFullName) {
-  const cycle = await getCurrentCycle();
-  const key = `season:${cycle}:${playerFullName}`;
-  const hit = cachedStats(key);
-  if (hit) return hit;
-
-  const entities = [
-    ["passing", "PassingStat"],
-    ["rushing", "RushingStat"],
-    ["receiving", "ReceivingStat"],
-    ["defense", "DefenseStat"],
-  ];
-
-  const bySeason = new Map();
-
-  for (const [bucket, entity] of entities) {
-    let rows = [];
-    try {
-      rows = await listMatching(
-        entity,
-        { cycle, player_fullName: playerFullName },
-        (r) =>
-          (!r.cycle || r.cycle === cycle) &&
-          nameMatches(r.player_fullName, playerFullName),
-        { limit: 200, broadLimit: 8000 }
-      );
-    } catch (err) {
-      console.error(`[STATS] ${entity} read failed:`, err.message);
-    }
-    for (const r of rows) {
-      const s = r.season_number ?? 0;
-      if (!bySeason.has(s)) bySeason.set(s, { season: s, gamesPlayed: 0 });
-      const slot = bySeason.get(s);
-      slot[bucket] = r;
-      slot.gamesPlayed = Math.max(slot.gamesPlayed, r.gamesPlayed ?? 0);
-    }
-  }
-
-  const out = [...bySeason.values()].sort((a, b) => b.season - a.season);
-  return putStats(key, out);
-}
-
-// Recent trade submissions, newest first.
-export async function getTrades(status, limit = 10) {
-  const filter = status ? { status } : {};
-  const trades = await list("TradeSubmission", filter, {
-    sort: "-created_date",
-    limit,
-  });
-  return trades;
-}
-
-// --- league members, teams, rivalries (for /team /myteam /rivalry) -------
-
-// Optional: if src/lib/tradeValueEngine.js from the app repo is copied into
-// the bot folder, /compare shows real trade values. Absent, it degrades.
-let _calcPlayerValue = null;
-try {
-  const mod = await import("./tradeValueEngine.js");
-  _calcPlayerValue = mod.calcPlayerValue ?? null;
-  if (_calcPlayerValue) console.log("💰 Trade value engine loaded.");
-} catch {
-  console.log("ℹ️  tradeValueEngine.js not found — /compare will omit trade value.");
-}
-
-export function playerTradeValue(player) {
-  if (!_calcPlayerValue || !player) return null;
-  try {
-    return _calcPlayerValue(player);
-  } catch {
-    return null;
-  }
-}
-
-// League members, cached — small table, read often.
-let _memberCache = { at: 0, rows: [] };
-const MEMBER_TTL_MS = 300_000;
-
-export async function getLeagueMembers() {
-  if (Date.now() - _memberCache.at < MEMBER_TTL_MS && _memberCache.rows.length) {
-    return _memberCache.rows;
-  }
-  const rows = await list("LeagueMember", {}, { limit: 500 });
-  _memberCache = { at: Date.now(), rows };
-  return rows;
-}
-
-// Map a Discord user to their LeagueMember via LeagueMember.discord_user_id.
-export async function getMemberByDiscordId(discordUserId) {
-  if (!discordUserId) return null;
-  const members = await getLeagueMembers();
-  return members.find((m) => String(m.discord_user_id ?? "") === String(discordUserId)) ?? null;
-}
-
-// Some LeagueMember.username values are email addresses (from account
-// linking). Emails are private — they must never be shown in Discord or
-// used as searchable text.
-function looksLikeEmail(s) {
-  return /\S+@\S+\.\S+/.test(String(s ?? ""));
-}
-
-// The safe, human-readable name for a member. Falls back through the
-// non-email options and finally to their team, never exposing an email.
-export function memberDisplayName(m) {
-  if (!m) return "Unknown member";
-  const candidates = [
-    m.discord_username,
-    m.avatar_name,
-    m.username,
-    ...(Array.isArray(m.aliases) ? m.aliases : []),
-  ];
+// Pick the first safe, non-email name from the candidates given.
+function safeName(...candidates) {
   for (const c of candidates) {
     if (c && !looksLikeEmail(c)) return String(c);
   }
-  return m.team_name ? `${m.team_name} owner` : "Unnamed member";
+  return "Unknown member";
 }
 
-// Look up a member by record id, falling back to a username match so older
-// interactions (which sent usernames) keep working.
-export async function getMemberByIdOrUsername(input) {
-  if (!input) return null;
-  const members = await getLeagueMembers();
-  const key = String(input).toLowerCase();
-  return (
-    members.find((m) => String(m.id ?? "").toLowerCase() === key) ??
-    members.find((m) => String(m.username ?? "").toLowerCase() === key) ??
-    null
-  );
+// Real routes in the app (src/App.jsx). Keep these in sync — a wrong path
+// silently sends people to the 404 page.
+export const ROUTES = {
+  home: "",
+  standings: "/standings",
+  power: "/power-rankings",
+  leaders: "/stat-leaders",
+  schedule: "/schedule",
+  players: "/players",
+  compare: "/compare",
+  tradeBlock: "/trade-block",
+  tradeCommittee: "/trade-committee",
+  tradeTool: "/trade",
+  rivalries: "/rivalries",
+  reportBug: "/report-bug",
+};
+
+export const teamUrl = (teamName) =>
+  `${VAULT_URL}/teams/${encodeURIComponent(teamName ?? "")}`;
+export const playerUrl = (name) =>
+  `${VAULT_URL}/players/${encodeURIComponent(name ?? "")}`;
+export const routeUrl = (route) => `${VAULT_URL}${route}`;
+
+// Embed helper: title links to the given route rather than always the home page.
+function base(title, route = ROUTES.home) {
+  return new EmbedBuilder()
+    .setColor(VAULT_COLOR)
+    .setTitle(title)
+    .setURL(routeUrl(route))
+    .setFooter({ text: "XCFL Vault" })
+    .setTimestamp();
 }
 
-// Autocomplete over league members. Matches and displays only non-email
-// names; the option value is the record id, so no email is ever sent to
-// Discord in either the label or the payload.
-export async function suggestMembers(partial, limit = 25) {
-  const members = await getLeagueMembers();
-  const q = (partial ?? "").trim().toLowerCase();
+export function standingsEmbed({ season, rows }) {
+  const e = base(`Standings — Season ${season ?? "?"}`, ROUTES.standings);
+  if (!rows.length) return e.setDescription("No standings data found.");
 
-  const scored = members
-    .map((m) => {
-      const display = memberDisplayName(m);
-      const n = display.toLowerCase();
-      // Search the display name and any non-email aliases only.
-      const searchable = [n, ...(Array.isArray(m.aliases) ? m.aliases : [])
-        .filter((a) => a && !looksLikeEmail(a))
-        .map((a) => String(a).toLowerCase())];
-      let tier = 0;
-      if (!q) tier = 1;
-      else if (searchable.some((t) => t === q)) tier = 3;
-      else if (searchable.some((t) => t.startsWith(q))) tier = 2;
-      else if (searchable.some((t) => t.includes(q))) tier = 1;
-      return { m, display, tier };
-    })
-    .filter((x) => x.tier > 0 && x.display)
-    .sort((a, b) => b.tier - a.tier || a.display.localeCompare(b.display))
-    .slice(0, limit);
-
-  return scored.map(({ m, display }) => {
-    const team = m.team_name ? ` · ${m.team_name}` : "";
-    return {
-      name: String(`${display}${team}`).slice(0, 100),
-      value: String(m.id ?? m.username ?? display).slice(0, 100),
-    };
+  const lines = rows.slice(0, 32).map((r, i) => {
+    const rec = `${r.wins ?? 0}-${r.losses ?? 0}${r.ties ? "-" + r.ties : ""}`;
+    const team = r.team_name ?? "";
+    const logo = teamEmojiByName(team);
+    return `\`${String(i + 1).padStart(2)}\` ${logo} **${rec}**  ${team}`;
   });
+  return e.setDescription(lines.join("\n"));
 }
 
-// Loose team matching: full name, nickname, or abbreviation.
-function teamMatches(candidate, query) {
-  if (!candidate || !query) return false;
-  const c = String(candidate).toLowerCase().trim();
-  const q = String(query).toLowerCase().trim();
-  if (c === q) return true;
-  const nick = c.split(/\s+/).pop();
-  return nick === q || c.includes(q) || q.includes(nick);
-}
+// Category groups for the leaders dropdown. Values must match STAT_CONFIG
+// keys in vault.js.
+export const LEADER_CATEGORIES = {
+  passing_yds: "Passing Yds",
+  passing_tds: "Passing TDs",
+  passing_ints: "Passing INTs",
+  rushing_yds: "Rushing Yds",
+  rushing_tds: "Rushing TDs",
+  fumbles: "Fumbles",
+  receptions: "Receptions",
+  receiving_yds: "Receiving Yds",
+  receiving_tds: "Receiving TDs",
+  sacks: "Sacks",
+  def_ints: "Defensive INTs",
+  forced_fumbles: "Forced Fumbles",
+};
 
-// Everything the /team card needs, assembled in one pass.
-export async function getTeamOverview(teamQuery) {
-  const cycle = await getCurrentCycle();
-
-  // Resolve the query to a canonical team name via TeamMap.
-  let teams = [];
-  try {
-    teams = await list("TeamMap", {}, { limit: 200 });
-  } catch {
-    /* fall through to roster-derived names */
-  }
-  let mapped = teams.find(
-    (t) => teamMatches(t.team_name, teamQuery) || teamMatches(t.team_abbrName, teamQuery)
-  );
-
-  const allRoster = await list("Roster", {}, { limit: 10000 });
-  const inCycle = allRoster.filter((r) => !r.cycle || r.cycle === cycle);
-
-  const teamName = mapped?.team_name ?? null;
-  const roster = inCycle.filter((r) =>
-    teamMatches(r.team_name, teamName ?? teamQuery)
-  );
-
-  if (!roster.length && !mapped) {
-    // Give the caller the list of valid names for a helpful error.
-    const names = [...new Set(inCycle.map((r) => r.team_name).filter(Boolean))].sort();
-    return { found: false, query: teamQuery, teams: names };
-  }
-
-  const resolvedName = teamName ?? roster[0]?.team_name ?? teamQuery;
-  const abbr = mapped?.team_abbrName ?? roster[0]?.team_abbrName ?? "";
-
-  // Join roster -> Player for ratings.
-  const players = await getAllPlayers();
-  const byName = new Map();
-  for (const p of players) {
-    if (p.player_fullName) byName.set(p.player_fullName.toLowerCase(), p);
-  }
-  const enriched = roster
-    .map((r) => {
-      const p = byName.get(String(r.player_fullName ?? "").toLowerCase());
-      return {
-        player_fullName: r.player_fullName,
-        player_position: p?.player_position ?? r.player_position,
-        player_ovr: p?.player_ovr ?? null,
-        player: p ?? null,
-      };
-    })
-    .sort((a, b) => (b.player_ovr ?? 0) - (a.player_ovr ?? 0));
-
-  // Owner: prefer the roster's owner_username, else LeagueMember by team.
-  // owner_username can be an email, so always resolve a safe display name
-  // and never return the raw value.
-  let ownerMember = null;
-  let owner = null;
-  try {
-    const members = await getLeagueMembers();
-    const rawOwner = roster.find((r) => r.owner_username)?.owner_username ?? null;
-    if (rawOwner) {
-      ownerMember =
-        members.find(
-          (m) => String(m.username ?? "").toLowerCase() === String(rawOwner).toLowerCase()
-        ) ?? null;
-    }
-    if (!ownerMember) {
-      ownerMember = members.find((m) => teamMatches(m.team_name, resolvedName)) ?? null;
-    }
-    if (ownerMember) {
-      owner = memberDisplayName(ownerMember);
-    } else if (rawOwner && !looksLikeEmail(rawOwner)) {
-      // No member record, but the raw value is safe to show.
-      owner = rawOwner;
-    }
-  } catch {
-    /* owner is optional */
-  }
-
-  // Record from standings (already derived from TeamStat + TeamMap).
-  let record = null;
-  try {
-    const { season, rows } = await getStandings();
-    const row = rows.find((r) => teamMatches(r.team_name, resolvedName));
-    if (row) record = { ...row, season };
-  } catch {
-    /* record is optional */
-  }
-
-  // Trade block entries for this team.
-  let block = [];
-  try {
-    const entries = await list("TradeBlock", {}, { limit: 5000 });
-    block = entries.filter((e) => teamMatches(e.team_name, resolvedName));
-  } catch {
-    /* optional */
-  }
-
-  // Cap picture from CycleData, keyed by team abbreviation.
-  let cap = null;
-  try {
-    const cd = await list("CycleData", {}, { limit: 200 });
-    cap =
-      cd.find(
-        (c) => (!c.cycle || c.cycle === cycle) && teamMatches(c.team_abbr, abbr)
-      ) ?? null;
-  } catch {
-    /* optional */
-  }
-
-  return {
-    found: true,
-    teamName: resolvedName,
-    abbr,
-    owner,
-    record,
-    roster: enriched,
-    block,
-    cap,
-    cycle,
-  };
-}
-
-// Every name a member is known by, lowercased. Rivalry and Game rows store
-// gamertags ("quacks", "chaosrevolver") while LeagueMember.username is often
-// an email, so identity matching has to consider all of these.
-export function memberIdentities(m) {
-  if (!m) return [];
-  const raw = [
-    m.username,
-    m.discord_username,
-    m.avatar_name,
-    ...(Array.isArray(m.aliases) ? m.aliases : []),
-  ];
-  return [
-    ...new Set(
-      raw
-        .filter(Boolean)
-        .map((x) => String(x).trim().toLowerCase())
-        .filter(Boolean)
-    ),
-  ];
-}
-
-// Resolve a member object from an id, a username, or any known alias.
-async function resolveMember(input) {
-  if (!input) return null;
-  if (typeof input === "object") return input;
-  const key = String(input).trim().toLowerCase();
-  const members = await getLeagueMembers();
-  return (
-    members.find((m) => String(m.id ?? "").toLowerCase() === key) ??
-    members.find((m) => memberIdentities(m).includes(key)) ??
-    null
-  );
-}
-
-// Head-to-head between two league members. Accepts member objects, record
-// ids, usernames, or aliases. Uses the pre-computed Rivalry record when
-// present, otherwise tallies the Game entity directly.
-export async function getRivalry(input1, input2) {
-  const m1 = await resolveMember(input1);
-  const m2 = await resolveMember(input2);
-
-  // Fall back to the raw strings if a member record is missing.
-  const ids1 = m1 ? memberIdentities(m1) : [String(input1 ?? "").trim().toLowerCase()];
-  const ids2 = m2 ? memberIdentities(m2) : [String(input2 ?? "").trim().toLowerCase()];
-  if (!ids1.length || !ids2.length) return null;
-
-  const display1 = m1 ? memberDisplayName(m1) : String(input1);
-  const display2 = m2 ? memberDisplayName(m2) : String(input2);
-
-  const isA = (v) => ids1.includes(String(v ?? "").trim().toLowerCase());
-  const isB = (v) => ids2.includes(String(v ?? "").trim().toLowerCase());
-
-  console.log(
-    `[RIVALRY] matching ${display1} [${ids1.join("|")}] vs ${display2} [${ids2.join("|")}]`
-  );
-
-  // 1) Pre-computed record.
-  try {
-    const rows = await list("Rivalry", {}, { limit: 5000 });
-    const hit = rows.find(
-      (r) =>
-        (isA(r.user1_username) && isB(r.user2_username)) ||
-        (isB(r.user1_username) && isA(r.user2_username))
+// Discord allows max 25 options per select; we have 12, so one menu is fine.
+function leadersViewRow(category) {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`leaders_view:${category}`)
+    .setPlaceholder(LEADER_CATEGORIES[category] ?? "Pick a category")
+    .addOptions(
+      Object.entries(LEADER_CATEGORIES).map(([value, label]) => ({
+        label,
+        value,
+        default: value === category,
+      }))
     );
-    if (hit && ((hit.user1_wins ?? 0) || (hit.user2_wins ?? 0) || (hit.ties ?? 0))) {
-      // Rivalry rows store the pair alphabetically — orient to our arguments.
-      const flipped = isB(hit.user1_username);
-      console.log(`[RIVALRY] matched Rivalry row ${hit.id}`);
-      return {
-        source: "rivalry",
-        user1: display1,
-        user2: display2,
-        display1,
-        display2,
-        user1_wins: flipped ? hit.user2_wins ?? 0 : hit.user1_wins ?? 0,
-        user2_wins: flipped ? hit.user1_wins ?? 0 : hit.user2_wins ?? 0,
-        ties: hit.ties ?? 0,
-        games: [],
-      };
-    }
-  } catch (err) {
-    console.error("[RIVALRY] Rivalry read failed:", err.message);
-  }
+  return new ActionRowBuilder().addComponents(menu);
+}
 
-  // 2) Live tally from Game rows.
-  const games = await list("Game", {}, { limit: 20000 });
-  const meetings = games.filter(
-    (g) =>
-      (isA(g.user1_username) && isB(g.user2_username)) ||
-      (isB(g.user1_username) && isA(g.user2_username))
+/**
+ * Resolve a team abbreviation for a leaderboard row.
+ *
+ * team_abbrName is the normal source, but it can be null on rows written
+ * before the abbreviation was populated (or patched in by hand). Falling back
+ * to the display name keeps the helmet and the tag from rendering blank --
+ * which is what produced entries like "Jayden Daniels ()".
+ */
+function rowTeamAbbr(p) {
+  return (
+    p.team_abbrName ||
+    abbrFromName(p.team_displayName) ||
+    abbrFromName(p.team_name) ||
+    ""
   );
-  console.log(`[RIVALRY] live tally found ${meetings.length} meetings`);
+}
 
-  let w1 = 0;
-  let w2 = 0;
-  let ties = 0;
-  for (const g of meetings) {
-    const aIsUser1 = isA(g.user1_username);
-    const aScore = aIsUser1 ? g.user1_score ?? 0 : g.user2_score ?? 0;
-    const bScore = aIsUser1 ? g.user2_score ?? 0 : g.user1_score ?? 0;
-    if (aScore > bScore) w1++;
-    else if (bScore > aScore) w2++;
-    else ties++;
+/**
+ * Stat leaders as a live card: plain content plus a category dropdown, matching
+ * the /player card. Returns a full message payload rather than an embed.
+ */
+export function statLeadersView({ category, label, field, season, leaders }) {
+  const out = [];
+  out.push(`# ${label} Leaders`);
+  out.push(`### Season ${season ?? "?"}`);
+
+  if (!leaders.length) {
+    out.push("");
+    out.push("> No stats on file for this category yet.");
+    out.push("");
+    out.push(`-# [View on XCFL Vault](<${VAULT_URL}${ROUTES.leaders}>)`);
+    return { content: out.join("\n"), embeds: [], components: [leadersViewRow(category)] };
   }
 
-  const recent = [...meetings]
-    .sort(
-      (x, y) =>
-        (y.season_number ?? 0) - (x.season_number ?? 0) || (y.week ?? 0) - (x.week ?? 0)
-    )
-    .slice(0, 5)
-    .map((g) => {
-      const aIsUser1 = isA(g.user1_username);
-      return {
-        season: g.season_number,
-        week: g.week,
-        aScore: aIsUser1 ? g.user1_score ?? 0 : g.user2_score ?? 0,
-        bScore: aIsUser1 ? g.user2_score ?? 0 : g.user1_score ?? 0,
-      };
+  const top = leaders[0]?.[field] ?? 0;
+  const medals = ["\u{1F947}", "\u{1F948}", "\u{1F949}"];
+
+  out.push("");
+  for (let i = 0; i < leaders.length; i++) {
+    const p = leaders[i];
+    const raw = p[field] ?? 0;
+    // Sacks arrive as decimals (0.5); show a decimal only when there is one.
+    const val = Number.isInteger(raw) ? raw.toLocaleString() : raw.toFixed(1);
+    const abbr = rowTeamAbbr(p);
+    const helmet = abbr ? teamEmoji(abbr) : teamEmojiByName(p.team_displayName);
+    const rank = medals[i] ?? `\`${String(i + 1).padStart(2)}\``;
+    const teamTag = abbr ? ` *(${abbr})*` : "";
+    const gp = p.gamesPlayed ? ` \u00b7 ${p.gamesPlayed} GP` : "";
+
+    // Simple proportional bar so the gap between leaders is visible at a glance.
+    const pct = top > 0 ? Math.max(0, Math.min(1, raw / top)) : 0;
+    const filled = Math.round(pct * 10);
+    const bar = "\u2588".repeat(filled) + "\u2591".repeat(10 - filled);
+
+    out.push(`${rank} ${helmet} **${val}** ${p.player_fullName}${teamTag}`);
+    out.push(`-# \`${bar}\`${gp}`);
+  }
+
+  out.push("");
+  out.push(`-# [View on XCFL Vault](<${VAULT_URL}${ROUTES.leaders}>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "\u2026";
+
+  return { content, embeds: [], components: [leadersViewRow(category)] };
+}
+
+export function powerRankingsEmbed({ week, rows }) {
+  const e = base(`Power Rankings — ${week ?? "Latest"}`, ROUTES.power);
+  if (!rows.length) return e.setDescription("No power rankings posted yet.");
+
+  const lines = rows.slice(0, 32).map((r) => {
+    let move = "";
+    if (r.previous_rank && r.previous_rank !== r.rank) {
+      const diff = r.previous_rank - r.rank;
+      move = diff > 0 ? ` +${diff}` : ` -${Math.abs(diff)}`;
+    }
+    const logo = r.team_name ? `${teamEmojiByName(r.team_name)} ` : "";
+    // PowerRanking carries a denormalized display_name; username may be an email.
+    const who = safeName(r.display_name, r.username, r.team_name && `${r.team_name} owner`);
+    return `\`${String(r.rank).padStart(2)}\` ${logo}**${who}**${move}`;
+  });
+  return e.setDescription(lines.join("\n"));
+}
+
+// Trade block — plain markdown message matching the /player card style.
+// Returns a message payload; pass it straight to editReply.
+export function tradeBlockEmbed({ team, entries }) {
+  const out = [];
+
+  if (team) {
+    out.push(`# ${teamEmojiByName(team)} ${team}`);
+    out.push(`### Trade Block`);
+  } else {
+    out.push(`# Trade Block`);
+  }
+
+  if (!entries.length) {
+    out.push("");
+    out.push(
+      team
+        ? `**${team}** has nothing on the block right now.`
+        : "Nothing on the block right now."
+    );
+    out.push("");
+    out.push(`-# [View on XCFL Vault](<${routeUrl(ROUTES.tradeBlock)}>)`);
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  // Group by team so each franchise gets its own headed section.
+  const byTeam = new Map();
+  for (const t of entries) {
+    const key = t.team_name ?? "—";
+    if (!byTeam.has(key)) byTeam.set(key, []);
+    byTeam.get(key).push(t);
+  }
+
+  const totalPlayers = entries.filter((t) => t.entry_type !== "pick").length;
+  const totalPicks = entries.filter((t) => t.entry_type === "pick").length;
+  const summary = [
+    totalPlayers ? `${totalPlayers} player${totalPlayers === 1 ? "" : "s"}` : null,
+    totalPicks ? `${totalPicks} pick${totalPicks === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (summary) out.push(`**${summary}** across ${byTeam.size} team${byTeam.size === 1 ? "" : "s"}`);
+
+  let shown = 0;
+  let truncated = false;
+
+  for (const [teamName, items] of [...byTeam.entries()].sort((a, b) =>
+    a[0].localeCompare(b[0])
+  )) {
+    // Players first (highest OVR first), then picks.
+    const players = items
+      .filter((t) => t.entry_type !== "pick")
+      .sort((a, b) => (b.player_ovr ?? 0) - (a.player_ovr ?? 0));
+    const picks = items.filter((t) => t.entry_type === "pick");
+
+    const lines = [];
+
+    for (const t of players) {
+      const url = playerUrl(t.player_fullName);
+      const meta = [
+        t.player_position ?? "?",
+        t.player_ovr != null ? `${t.player_ovr} OVR` : null,
+        t.trade_value != null ? `TV ${t.trade_value}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      // Angle brackets stop Discord unfurling a preview for each link.
+      lines.push(`> [**${t.player_fullName}**](<${url}>) — ${meta}`);
+      shown++;
+    }
+
+    for (const t of picks) {
+      const notes = t.pick_notes ? ` *(${t.pick_notes})*` : "";
+      lines.push(`> **${t.pick_label ?? "Pick"}**${notes}`);
+      shown++;
+    }
+
+    if (!lines.length) continue;
+
+    const block = [``, `**${teamEmojiByName(teamName)} ${teamName}**`, ...lines];
+    // Keep room for the footer line before Discord's 2000-char ceiling.
+    if (out.join("\n").length + block.join("\n").length > 1850) {
+      truncated = true;
+      break;
+    }
+    out.push(...block);
+  }
+
+  if (truncated) {
+    out.push("");
+    out.push(`-# …and more — ${entries.length - shown} entries not shown.`);
+  }
+
+  out.push("");
+  out.push(`-# [View the full trade block](<${routeUrl(ROUTES.tradeBlock)}>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+
+  return { content, embeds: [], components: [] };
+}
+
+// Shown when a team filter matches nothing — lists teams that do have entries.
+export function tradeBlockNoTeamEmbed(query, teams) {
+  const e = base(`No trade block for "${query}"`, ROUTES.tradeBlock);
+  return e.setDescription(
+    teams.length
+      ? "Teams with entries on the block:\n" +
+          teams.map((t) => `${teamEmojiByName(t)} ${t}`).join("\n")
+      : "No teams have anything on the block right now."
+  );
+}
+
+export function tradesEmbed(trades) {
+  const e = base("Recent Trades", ROUTES.tradeCommittee);
+  if (!trades.length) return e.setDescription("No trades found.");
+
+  for (const t of trades.slice(0, 8)) {
+    const t1 = [...(t.team1_players ?? []), ...(t.team1_picks ?? [])].join(", ") || "—";
+    const t2 = [...(t.team2_players ?? []), ...(t.team2_picks ?? [])].join(", ") || "—";
+    const badge =
+      { approved: "✅", rejected: "❌", vetoed: "[vetoed]", pending: "[pending]" }[t.status] ?? "";
+    e.addFields({
+      name: `${badge} ${teamEmojiByName(t.team1)} ${t.team1} ↔ ${teamEmojiByName(t.team2)} ${t.team2}`,
+      value: `**${t.team1} send:** ${t1}\n**${t.team2} send:** ${t2}`,
     });
-
-  return {
-    source: "games",
-    user1: display1,
-    user2: display2,
-    display1,
-    display2,
-    user1_wins: w1,
-    user2_wins: w2,
-    ties,
-    games: recent,
-  };
-}
-
-// Distinct team names in the current cycle (for the trade builder + /team).
-export async function getCycleTeams() {
-  const cycle = await getCurrentCycle();
-  const roster = await list("Roster", {}, { limit: 10000 });
-  const names = roster
-    .filter((r) => !r.cycle || r.cycle === cycle)
-    .map((r) => r.team_name)
-    .filter(Boolean);
-  return [...new Set(names)].sort();
-}
-
-// A team's players in the current cycle, joined to Player for position/OVR
-// and sorted by OVR. Shared by /submit_trade so it can't drift from /team.
-// Returns [{ name, position, ovr }].
-export async function getTeamRosterPlayers(teamName) {
-  const cycle = await getCurrentCycle();
-  const roster = await list("Roster", {}, { limit: 10000 });
-
-  const mine = roster.filter(
-    (r) => (!r.cycle || r.cycle === cycle) && teamMatches(r.team_name, teamName)
-  );
-  if (!mine.length) return [];
-
-  // getAllPlayers is already cycle-filtered and cached.
-  const players = await getAllPlayers();
-  const byName = new Map();
-  for (const p of players) {
-    if (p.player_fullName) byName.set(p.player_fullName.toLowerCase(), p);
   }
-
-  return mine
-    .map((r) => {
-      const p = byName.get(String(r.player_fullName ?? "").toLowerCase());
-      return {
-        name: r.player_fullName,
-        position: p?.player_position || r.player_position || "?",
-        ovr: p?.player_ovr ?? 0,
-      };
-    })
-    .filter((x) => x.name)
-    .sort((a, b) => b.ovr - a.ovr);
+  return e;
 }
 
-// --- writes (trade voting) ----------------------------------------------
+// ===== /player card =====================================================
+// Rendered as a plain markdown message (not an embed) so it can use a large
+// `#` heading and block-quoted sections, matching the snallabot look.
 
-// Update one entity record. Base44's REST shape for writes isn't documented
-// here, so try the likely verbs in order and remember which one worked.
-let _writeVerb = null;
+// Every rating we know how to show: [label, data key].
+const ALL_RATINGS = [
+  ["Speed", "spd"], ["Accel", "acc"], ["Agility", "agi"], ["Awareness", "awa"],
+  ["Injury", "inj"], ["Break Tackle", "breakTackle"], ["Carrying", "carry"],
+  ["BC Vision", "ballCarryVision"], ["Truck", "trucking"], ["Stiff Arm", "stiffArm"],
+  ["Juke Move", "jukeMove"], ["Spin Move", "spinMove"], ["COD", "changeOfDir"],
+  ["Strength", "str"], ["Throw Power", "throwPower"], ["Short Acc", "shortAcc"],
+  ["Mid Acc", "midAcc"], ["Deep Acc", "deepAcc"], ["Catch", "catch"],
+  ["Spec Catch", "specCatch"], ["Release", "release"], ["Short Route", "shortRouteRun"],
+  ["Tackle", "tackle"], ["Hit Power", "hitPower"], ["Pursuit", "pursuit"],
+  ["Man Cov", "manCoverage"], ["Zone Cov", "zoneCoverage"], ["Press", "press"],
+  ["Block Shed", "blockShed"], ["Power Moves", "powerMoves"], ["Finesse Moves", "finesseMoves"],
+  ["Pass Block", "passBlock"], ["Run Block", "runBlock"], ["Kick Power", "kickPower"],
+  ["Kick Acc", "kickAcc"], ["Play Recog", "playRecog"], ["Jump", "jmp"],
+];
 
-export async function updateEntity(entity, id, data) {
-  const url = `${SERVER}/api/apps/${APP_ID}/entities/${entity}/${id}`;
-  const verbs = _writeVerb ? [_writeVerb] : ["PUT", "PATCH", "POST"];
+// Which rating keys matter for each position group, in display order.
+const POSITION_RATINGS = {
+  QB: ["throwPower", "shortAcc", "midAcc", "deepAcc", "awa", "playRecog", "spd", "acc", "agi", "breakTackle", "str", "inj"],
+  RB: ["spd", "acc", "agi", "changeOfDir", "carry", "ballCarryVision", "breakTackle", "trucking", "stiffArm", "jukeMove", "spinMove", "catch", "str", "awa", "inj"],
+  WR: ["spd", "acc", "agi", "changeOfDir", "catch", "specCatch", "release", "shortRouteRun", "jukeMove", "carry", "jmp", "breakTackle", "awa", "inj"],
+  TE: ["spd", "acc", "agi", "catch", "specCatch", "release", "shortRouteRun", "runBlock", "passBlock", "str", "breakTackle", "jmp", "awa", "inj"],
+  OL: ["passBlock", "runBlock", "str", "awa", "playRecog", "acc", "agi", "spd", "inj"],
+  DL: ["blockShed", "powerMoves", "finesseMoves", "tackle", "pursuit", "hitPower", "str", "spd", "acc", "agi", "playRecog", "awa", "inj"],
+  LB: ["tackle", "hitPower", "pursuit", "blockShed", "powerMoves", "finesseMoves", "manCoverage", "zoneCoverage", "playRecog", "spd", "acc", "agi", "str", "awa", "inj"],
+  CB: ["manCoverage", "zoneCoverage", "press", "spd", "acc", "agi", "changeOfDir", "catch", "jmp", "tackle", "playRecog", "awa", "inj"],
+  S:  ["zoneCoverage", "manCoverage", "tackle", "hitPower", "pursuit", "spd", "acc", "agi", "catch", "jmp", "playRecog", "awa", "inj"],
+  K:  ["kickPower", "kickAcc", "awa", "inj"],
+};
 
-  let lastErr = null;
-  for (const method of verbs) {
-    try {
-      let res = await fetch(url, {
-        method,
-        headers: authHeaders(),
-        body: JSON.stringify(data),
-      });
-      if ((res.status === 401 || res.status === 403) &&
-          (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
-        await botLogin();
-        res = await fetch(url, {
-          method,
-          headers: authHeaders(),
-          body: JSON.stringify(data),
-        });
-      }
-      if (res.ok) {
-        if (!_writeVerb) {
-          _writeVerb = method;
-          console.log(`[WRITE] ${entity} updates use ${method}.`);
-        }
-        return await res.json().catch(() => ({}));
-      }
-      const body = await res.text().catch(() => "");
-      lastErr = new Error(`HTTP ${res.status} ${body.slice(0, 200)}`);
-      // 405/404 means wrong verb — try the next one.
-      if (![404, 405].includes(res.status)) break;
-    } catch (err) {
-      lastErr = err;
-    }
+// Map a Madden position string to one of the groups above.
+function positionGroup(posRaw) {
+  const pos = String(posRaw ?? "").toUpperCase();
+  if (pos === "QB") return "QB";
+  if (["HB", "RB", "FB"].includes(pos)) return "RB";
+  if (pos === "WR") return "WR";
+  if (pos === "TE") return "TE";
+  if (["LT", "LG", "C", "RG", "RT", "OL", "OT", "OG"].includes(pos)) return "OL";
+  if (["LE", "RE", "DT", "DE", "EDGE", "LEDGE", "REDGE", "DL"].includes(pos)) return "DL";
+  if (["MLB", "LOLB", "ROLB", "OLB", "ILB", "LB"].includes(pos)) return "LB";
+  if (pos === "CB") return "CB";
+  if (["FS", "SS", "S"].includes(pos)) return "S";
+  if (["K", "P"].includes(pos)) return "K";
+  return null;
+}
+
+// Ratings to show on the Overview tab: position-relevant only, and only the
+// ones this player actually has. Falls back to the first 14 present.
+function relevantRatings(p) {
+  const group = positionGroup(p.player_position);
+  const keys = group ? POSITION_RATINGS[group] : null;
+  if (keys) {
+    const labelOf = Object.fromEntries(ALL_RATINGS.map(([l, k]) => [k, l]));
+    const picked = keys
+      .filter((k) => p[k] != null)
+      .map((k) => [labelOf[k] ?? k, k]);
+    if (picked.length) return picked;
   }
-  console.error(`[WRITE] ${entity}/${id} update failed:`, lastErr?.message);
-  throw new Error(`Could not save to the Vault: ${lastErr?.message ?? "unknown error"}`);
+  return ALL_RATINGS.filter(([, k]) => p[k] != null).slice(0, 14);
 }
 
-// Create a new entity record. Same collection endpoint as list(), POST verb.
-export async function createEntity(entity, data) {
-  const url = `${SERVER}/api/apps/${APP_ID}/entities/${entity}`;
-  const doFetch = () =>
-    fetch(url, { method: "POST", headers: authHeaders(), body: JSON.stringify(data) });
-
-  let res;
-  try {
-    res = await doFetch();
-    if ((res.status === 401 || res.status === 403) &&
-        (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
-      await botLogin();
-      res = await doFetch();
-    }
-  } catch (err) {
-    console.error(`[WRITE] ${entity} create failed:`, err.message);
-    throw new Error(`Could not save to the Vault: ${err.message}`);
-  }
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    console.error(`[WRITE] ${entity} create failed: HTTP ${res.status} ${body.slice(0, 200)}`);
-    throw new Error(`Could not save to the Vault: HTTP ${res.status}`);
-  }
-  return res.json().catch(() => ({}));
-}
-
-// Trades awaiting committee review.
-export async function getPendingTrades() {
-  const rows = await list("TradeSubmission", {}, { sort: "-created_date", limit: 200 });
-  return rows.filter((t) => (t.status ?? "pending") === "pending");
-}
-
-export async function getTradeById(id) {
-  const rows = await list("TradeSubmission", {}, { limit: 500 });
-  return rows.find((t) => t.id === id) ?? null;
-}
-
-// Committee members who can vote, keyed for Discord lookups.
-export async function getCommitteeMembers() {
-  const members = await getLeagueMembers();
-  return members.filter((m) => m.is_committee);
-}
-
-// Look up players by name for enriching a trade message (current cycle).
-export async function getPlayersByNames(names = []) {
-  if (!names.length) return new Map();
-  const players = await getAllPlayers();
-  const wanted = new Set(names.map((n) => String(n).trim().toLowerCase()));
-  const out = new Map();
-  for (const p of players) {
-    const key = String(p.player_fullName ?? "").toLowerCase();
-    if (wanted.has(key)) out.set(key, p);
+// Render [label, key] pairs two per line, block-quoted.
+function ratingLines(p, pairs) {
+  const out = [];
+  for (let i = 0; i < pairs.length; i += 2) {
+    const a = pairs[i];
+    const b = pairs[i + 1];
+    let line = `> **${a[0]}:** ${p[a[1]]}`;
+    if (b) line += ` | **${b[0]}:** ${p[b[1]]}`;
+    out.push(line);
   }
   return out;
 }
 
-// All trade submissions, newest first (used by the approval announcer).
-export async function getAllTrades(limit = 300) {
-  return list("TradeSubmission", {}, { sort: "-created_date", limit });
+const VIEW_LABELS = {
+  overview: "Overview",
+  ratings: "Full Ratings",
+  weekly: "Weekly Stats",
+  season: "Season Stats",
+};
+
+// The Overview / Full Ratings / Weekly / Season picker under the card.
+function playerViewRow(playerId, view) {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`player_view:${playerId}`)
+    .setPlaceholder(VIEW_LABELS[view] ?? "Overview")
+    .addOptions(
+      Object.entries(VIEW_LABELS).map(([value, label]) => ({
+        label,
+        value,
+        default: value === view,
+      }))
+    );
+  return new ActionRowBuilder().addComponents(menu);
 }
 
-// Find a member by any identity they're known by (username, discord name,
-// avatar name, alias). Returns null when nothing matches — callers should
-// then omit the name rather than fall back to the raw value, which may be a
-// real name or an email.
-export async function findMemberByIdentity(name) {
-  if (!name) return null;
-  const key = String(name).trim().toLowerCase();
-  if (!key) return null;
-  const members = await getLeagueMembers();
-  return members.find((m) => memberIdentities(m).includes(key)) ?? null;
+// Header shared by every view: big title, OVR, bio line.
+function playerHeader(p, teamName) {
+  const pos = p.player_position ?? "?";
+  const gem = devEmoji(p.player_devTrait);
+  const out = [];
+  out.push(`# ${teamEmojiByName(teamName)} ${pos} ${p.player_fullName}`);
+  out.push(`### ${gem} ${p.player_ovr ?? "?"} OVR`);
+
+  const bits = [];
+  if (p.player_age != null) bits.push(`${p.player_age} yrs`);
+  if (p.player_yrsPro != null) {
+    const s = p.player_yrsPro + 1;
+    const suffix = s === 1 ? "st" : s === 2 ? "nd" : s === 3 ? "rd" : "th";
+    bits.push(`${s}${suffix} Season`);
+  }
+  let heightStr = p.player_height;
+  if (heightStr != null && /^\d+$/.test(String(heightStr).trim())) {
+    const inches = parseInt(heightStr, 10);
+    heightStr = `${Math.floor(inches / 12)}'${inches % 12}"`;
+  }
+  const hw = [heightStr, p.player_weight ? `${p.player_weight} lbs` : null]
+    .filter(Boolean)
+    .join(", ");
+  if (hw) bits.push(hw);
+  if (bits.length) out.push(`**${bits.join(" | ")}**`);
+  return out;
 }
 
-// The member who owns a team, matched loosely on full name, nickname, or
-// abbreviation ("49ers", "San Francisco 49ers", and "SF" all resolve).
-export async function findMemberByTeam(teamName) {
-  if (!teamName) return null;
-  const members = await getLeagueMembers();
-  return members.find((m) => m.team_name && teamMatches(m.team_name, teamName)) ?? null;
+// One stat line from a WeeklyStats row — only the categories with activity.
+function weeklyStatLine(w) {
+  const parts = [];
+  if (w.pass_att || w.pass_yds || w.pass_tds) {
+    parts.push(
+      `${w.pass_comp ?? 0}/${w.pass_att ?? 0}, ${w.pass_yds ?? 0} yds, ${w.pass_tds ?? 0} TD, ${w.pass_ints ?? 0} INT`
+    );
+  }
+  if (w.rush_att || w.rush_yds || w.rush_tds) {
+    parts.push(`${w.rush_att ?? 0} car, ${w.rush_yds ?? 0} yds, ${w.rush_tds ?? 0} TD`);
+  }
+  if (w.rec_catches || w.rec_yds || w.rec_tds) {
+    parts.push(`${w.rec_catches ?? 0} rec, ${w.rec_yds ?? 0} yds, ${w.rec_tds ?? 0} TD`);
+  }
+  if (w.def_total_tackles || w.def_sacks || w.def_ints) {
+    parts.push(
+      `${w.def_total_tackles ?? 0} tkl, ${w.def_sacks ?? 0} sk, ${w.def_ints ?? 0} INT`
+    );
+  }
+  return parts.join(" • ");
+}
+
+// Season-total lines for one merged season row:
+// { season, gamesPlayed, passing?, rushing?, receiving?, defense? }
+function seasonStatLines(row) {
+  const parts = [];
+  const pass = row.passing;
+  const rush = row.rushing;
+  const rec = row.receiving;
+  const def = row.defense;
+  if (pass) {
+    parts.push(
+      `Pass: ${pass.passTotalComp ?? 0}/${pass.passTotalAtt ?? 0}, ${pass.passTotalYds ?? 0} yds, ${pass.passTotalTDs ?? 0} TD, ${pass.passTotalInts ?? 0} INT`
+    );
+  }
+  if (rush) {
+    parts.push(
+      `Rush: ${rush.rushTotalAtt ?? 0} car, ${rush.rushTotalYds ?? 0} yds, ${rush.rushTotalTDs ?? 0} TD`
+    );
+  }
+  if (rec) {
+    parts.push(
+      `Rec: ${rec.recTotalCatches ?? 0} rec, ${rec.recTotalYds ?? 0} yds, ${rec.recTotalTDs ?? 0} TD`
+    );
+  }
+  if (def) {
+    parts.push(
+      `Def: ${def.defTotalTackles ?? 0} tkl, ${def.defTotalSacks ?? 0} sk, ${def.defTotalInts ?? 0} INT`
+    );
+  }
+  return parts;
+}
+
+// Build the /player message for a given view.
+//   view  — "overview" | "ratings" | "weekly" | "season"
+//   data  — { weekly, season } as needed by the weekly/season views
+// Returns a message payload; pass it straight to editReply/update.
+export function playerEmbed(p, team = null, view = "overview", data = {}) {
+  const teamName = team?.team_name ?? p.team_name ?? "";
+  const profileUrl = playerUrl(p.player_fullName);
+  const out = playerHeader(p, teamName);
+
+  if (view === "overview") {
+    const cl = p.player_contractLength;
+    const yl = p.player_contractYrsLeft;
+    const lengthStr =
+      cl != null && yl != null ? `${yl}/${cl} yrs` : cl != null ? `${cl} yrs` : "—";
+    out.push("");
+    out.push("**Contract**");
+    out.push(`> **Length**: ${lengthStr} | **Salary**: ${fmtMoney(p.player_contractSalary)}`);
+    out.push(`> **Cap Hit**: ${fmtMoney(p.player_capHit)} | **Bonus**: ${fmtMoney(p.player_contractBonus)}`);
+    out.push(`> **Savings**: ${fmtMoney(p.player_capSavings)} | **Penalty**: ${fmtMoney(p.player_capPenalty)}`);
+
+    const pairs = relevantRatings(p);
+    if (pairs.length) {
+      out.push("");
+      out.push("**Key Ratings**");
+      out.push(...ratingLines(p, pairs));
+    }
+
+    if (Array.isArray(p.abilities) && p.abilities.length) {
+      const names = p.abilities.map((a) => a.title).filter(Boolean).join(", ");
+      if (names) {
+        out.push("");
+        out.push(`**Abilities:** ${names}`);
+      }
+    }
+  }
+
+  if (view === "ratings") {
+    const pairs = ALL_RATINGS.filter(([, k]) => p[k] != null);
+    out.push("");
+    out.push("**Full Ratings**");
+    if (pairs.length) out.push(...ratingLines(p, pairs));
+    else out.push("> No ratings on file.");
+  }
+
+  if (view === "weekly") {
+    const { season = null, weeks: allWeeks = [] } = data.weekly ?? {};
+    // Newest weeks first; cap so we stay under Discord's 2000-char limit.
+    const weeks = allWeeks.slice(0, 12);
+    out.push("");
+    out.push(`**Weekly Stats${season != null ? ` — Season ${season}` : ""}**`);
+    if (!weeks.length) {
+      out.push("> No weekly stats on file for this player.");
+    } else {
+      let any = false;
+      for (const w of weeks) {
+        const line = weeklyStatLine(w);
+        if (!line) continue;
+        any = true;
+        out.push(`> **Wk ${w.week_index ?? "?"}** — ${line}`);
+      }
+      if (!any) out.push("> No recorded stats in these weeks.");
+    }
+  }
+
+  if (view === "season") {
+    // getPlayerSeasonStats returns rows sorted newest season first.
+    const rows = Array.isArray(data.season) ? data.season : [];
+    out.push("");
+    out.push("**Season Stats**");
+    if (!rows.length) {
+      out.push("> No season stats on file for this player.");
+    } else {
+      let any = false;
+      for (const row of rows.slice(0, 8)) {
+        const parts = seasonStatLines(row);
+        if (!parts.length) continue;
+        any = true;
+        const gp = row.gamesPlayed ? ` (${row.gamesPlayed} GP)` : "";
+        out.push(`> **Season ${row.season}**${gp} — ${parts.join(" • ")}`);
+      }
+      if (!any) out.push("> No recorded stats in these seasons.");
+    }
+  }
+
+  // Angle brackets around the URL stop Discord from unfurling a link preview.
+  out.push("");
+  out.push(`-# [View on XCFL Vault](<${profileUrl}>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+
+  return {
+    content,
+    embeds: [],
+    components: [playerViewRow(p.id, view)],
+  };
+}
+
+// When a name is ambiguous, list the alternatives.
+export function playerChoicesEmbed(name, matches) {
+  if (!matches.length) {
+    return base(`No player found for "${name}"`).setDescription(
+      "No players matched. Check the spelling or try a first name."
+    );
+  }
+  const e = base(`Multiple players match "${name}"`);
+  const lines = matches.slice(0, 15).map((p) => {
+    const gem = devEmoji(p.player_devTrait);
+    const team = p.team_abbrName ? ` — ${p.team_abbrName}` : "";
+    return `${gem} **${p.player_fullName}** (${p.player_position ?? "?"}, ${p.player_ovr ?? "?"} OVR${team})`;
+  });
+  const more = matches.length > 15 ? `\n…and ${matches.length - 15} more.` : "";
+  return e.setDescription(
+    "Did you mean one of these? Search the full name:\n" + lines.join("\n") + more
+  );
+}
+
+// Human-readable status line for an unplayed matchup, from whatever the
+// #schedule channel watcher (scheduleWatcher.js) parsed for it.
+function upcomingStatusText(g) {
+  if (g.status === "forfeit") return g.timeText || "FW";
+  if (g.status === "scheduled") return g.timeText || "Scheduled";
+  if (g.status === "needs_review") return g.timeText ? `⚠️ ${g.timeText}` : "⚠️ Needs review";
+  return "Not yet scheduled";
+}
+
+// League's posting cadence runs Thu -> the following Wed, based on every
+// day name seen in real #schedule posts so far (Fri/Sat/Sun). Games with no
+// parsed day sort to the end within the Scheduled section.
+const WEEKDAY_ORDER = ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"];
+
+// Sort key for the Scheduled section: day of week, then hour, then minute.
+// Forfeits (no day/hour/minute) have nothing to sort by and fall to the end
+// of the section, after every timed game.
+function chronoKey(g) {
+  const dayIdx = g.day ? WEEKDAY_ORDER.indexOf(g.day) : -1;
+  const d = dayIdx === -1 ? 99 : dayIdx;
+  const h = g.hour24 ?? 99;
+  const m = g.minute ?? 99;
+  return d * 10000 + h * 100 + m;
+}
+
+// Scores for a week — each game as logo SCORE vs SCORE logo, winning score
+// bolded, no team name text. Below that, unplayed matchups split into
+// **Scheduled** (a confident day/time or a forfeit, chronological) and
+// **Not Yet Scheduled** (nothing posted yet, or a post that needs a human
+// to double check).
+export function scoresEmbed({ season, week, games, upcoming = [] }) {
+  const e = base(`Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`, ROUTES.schedule);
+  if (!games.length && !upcoming.length) return e.setDescription("No games found for that week.");
+
+  const finalLines = games.map((g) => {
+    const e1 = teamEmojiByName(g.home);
+    const e2 = teamEmojiByName(g.away);
+    const oneWon = g.homeScore > g.awayScore;
+    const twoWon = g.awayScore > g.homeScore;
+    const s1 = oneWon ? `**${g.homeScore}**` : `${g.homeScore}`;
+    const s2 = twoWon ? `**${g.awayScore}**` : `${g.awayScore}`;
+    return `${e1} ${s1}  vs  ${s2} ${e2}`;
+  });
+
+  let description = finalLines.length ? finalLines.join("\n") : "_No completed games yet this week._";
+
+  const scheduled = upcoming
+    .filter((g) => g.status === "scheduled" || g.status === "forfeit")
+    .sort((a, b) => chronoKey(a) - chronoKey(b));
+  const notScheduled = upcoming.filter((g) => g.status === "unscheduled" || g.status === "needs_review");
+
+  const matchupLine = (g) => {
+    const e1 = teamEmojiByName(g.home);
+    const e2 = teamEmojiByName(g.away);
+    return `${e1} vs ${e2} — *${upcomingStatusText(g)}*`;
+  };
+
+  if (scheduled.length) {
+    description += `\n\n**Scheduled**\n${scheduled.map(matchupLine).join("\n")}`;
+  }
+  if (notScheduled.length) {
+    description += `\n\n**Not Yet Scheduled**\n${notScheduled.map(matchupLine).join("\n")}`;
+  }
+
+  return e.setDescription(description);
+}
+
+// ===== /compare, /team, /rivalry, /myteam ================================
+
+// Ratings worth comparing, by position group — reuses the /player mapping.
+function comparableRatings(a, b) {
+  const groupA = positionGroup(a.player_position);
+  const groupB = positionGroup(b.player_position);
+  // Same position group -> that group's keys. Mixed -> shared athletic core.
+  const keys =
+    groupA && groupA === groupB
+      ? POSITION_RATINGS[groupA]
+      : ["spd", "acc", "agi", "str", "awa", "inj", "playRecog"];
+  const labelOf = Object.fromEntries(ALL_RATINGS.map(([l, k]) => [k, l]));
+  return keys
+    .filter((k) => a[k] != null || b[k] != null)
+    .slice(0, 12)
+    .map((k) => [labelOf[k] ?? k, k]);
+}
+
+// Side-by-side player comparison. Rendered inside a fenced code block so
+// Discord uses a monospace font — the only way to get true column alignment,
+// since Discord markdown has no table support.
+const CMP_LABEL_W = 13; // stat label column
+const CMP_VAL_W = 9;    // each player's value column
+const CMP_MARK_W = 3;   // the center column holding < or >
+
+// Generational suffixes are not surnames — "Patrick Surtain II" should
+// shorten to "Surtain", not "II".
+const NAME_SUFFIXES = new Set([
+  "jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v", "vi",
+]);
+
+// Short, column-friendly name: surname, clipped to the column width.
+function shortName(fullName) {
+  const parts = String(fullName ?? "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  let i = parts.length - 1;
+  while (i > 0 && NAME_SUFFIXES.has(parts[i].toLowerCase())) i--;
+  return parts[i].slice(0, CMP_VAL_W);
+}
+
+// One aligned row. The left value is right-aligned and the right value is
+// left-aligned, so both hug the centre marker and each value clearly belongs
+// to the player named above its column.
+function cmpRow(label, a, b, { compare = true } = {}) {
+  const left = a == null || a === "" ? "—" : String(a);
+  const right = b == null || b === "" ? "—" : String(b);
+
+  let mark = "   ";
+  if (compare && typeof a === "number" && typeof b === "number") {
+    if (a > b) mark = " < ";
+    else if (b > a) mark = " > ";
+  }
+
+  return (
+    String(label).slice(0, CMP_LABEL_W).padEnd(CMP_LABEL_W) +
+    left.slice(0, CMP_VAL_W).padStart(CMP_VAL_W) +
+    mark +
+    right.slice(0, CMP_VAL_W).padEnd(CMP_VAL_W)
+  ).trimEnd();
+}
+
+// Placeholder — real width is computed once every row is built, so the rule
+// matches the widest line instead of overrunning it.
+const CMP_DIV = "\u0000DIV\u0000";
+function cmpDivider() {
+  return CMP_DIV;
+}
+
+export function compareEmbed(a, b, teamA = null, teamB = null, values = {}) {
+  const nameA = a.player_fullName;
+  const nameB = b.player_fullName;
+  const logoA = teamEmojiByName(teamA?.team_name ?? a.team_name ?? "");
+  const logoB = teamEmojiByName(teamB?.team_name ?? b.team_name ?? "");
+  const samePos = a.player_position === b.player_position;
+
+  const out = [];
+  out.push(`# ${nameA} vs ${nameB}`);
+  out.push(
+    `### ${logoA} ${devEmoji(a.player_devTrait)} ${a.player_ovr ?? "?"} OVR ` +
+      `**vs** ${logoB} ${devEmoji(b.player_devTrait)} ${b.player_ovr ?? "?"} OVR`
+  );
+  if (!samePos) {
+    out.push(
+      `*${a.player_position ?? "?"} vs ${b.player_position ?? "?"} — different positions, comparing athletic traits*`
+    );
+  }
+
+  // Everything below lives in one monospace block so the columns line up.
+  const rows = [];
+
+  // Header: player names over their own columns.
+  rows.push(
+    (
+      "".padEnd(CMP_LABEL_W) +
+      shortName(nameA).padStart(CMP_VAL_W) +
+      "".padEnd(CMP_MARK_W) +
+      shortName(nameB).padEnd(CMP_VAL_W)
+    ).trimEnd()
+  );
+  rows.push(cmpDivider());
+
+  // Core profile
+  rows.push(cmpRow("Overall", a.player_ovr, b.player_ovr));
+  rows.push(cmpRow("Position", a.player_position, b.player_position, { compare: false }));
+  rows.push(cmpRow("Age", a.player_age, b.player_age, { compare: false }));
+  if (a.player_yrsPro != null || b.player_yrsPro != null) {
+    rows.push(
+      cmpRow(
+        "Season",
+        a.player_yrsPro != null ? a.player_yrsPro + 1 : null,
+        b.player_yrsPro != null ? b.player_yrsPro + 1 : null,
+        { compare: false }
+      )
+    );
+  }
+  rows.push(
+    cmpRow("Dev Trait", a.player_devTrait, b.player_devTrait, { compare: false })
+  );
+
+  // Contract
+  rows.push(cmpDivider());
+  rows.push(
+    cmpRow(
+      "Yrs Left",
+      a.player_contractYrsLeft,
+      b.player_contractYrsLeft,
+      { compare: false }
+    )
+  );
+  rows.push(
+    cmpRow("Cap Hit", fmtMoney(a.player_capHit), fmtMoney(b.player_capHit), {
+      compare: false,
+    })
+  );
+  rows.push(
+    cmpRow("Salary", fmtMoney(a.player_contractSalary), fmtMoney(b.player_contractSalary), {
+      compare: false,
+    })
+  );
+
+  // Trade value, when the engine is available.
+  if (values.a != null || values.b != null) {
+    rows.push(cmpDivider());
+    rows.push(cmpRow("Trade Value", values.a, values.b));
+  }
+
+  // Ratings
+  const pairs = comparableRatings(a, b);
+  if (pairs.length) {
+    rows.push(cmpDivider());
+    for (const [label, key] of pairs) {
+      rows.push(cmpRow(label, a[key], b[key]));
+    }
+  }
+
+  // Size the dividers to the widest actual row.
+  const width = Math.max(
+    ...rows.filter((r) => r !== CMP_DIV).map((r) => r.length)
+  );
+  const ruled = rows.map((r) => (r === CMP_DIV ? "-".repeat(width) : r));
+
+  out.push("```");
+  out.push(ruled.join("\n"));
+  out.push("```");
+  out.push(`-# \`<\` favors ${shortName(nameA)} · \`>\` favors ${shortName(nameB)}`);
+
+  out.push(
+    `-# [${nameA}](<${playerUrl(nameA)}>) · [${nameB}](<${playerUrl(nameB)}>)`
+  );
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1994) + "…\n```";
+  return { content, embeds: [], components: [] };
+}
+
+// Team card — record, owner, cap, top roster, trade block.
+export function teamEmbed(data) {
+  if (!data.found) {
+    const out = [`# No team matching "${data.query}"`, ""];
+    if (data.teams?.length) {
+      out.push("**Try one of these:**");
+      out.push(data.teams.map((t) => `${teamEmojiByName(t)} ${t}`).join("\n").slice(0, 1500));
+    }
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  const { teamName, owner, record, roster, block, cap } = data;
+  const out = [];
+  out.push(`# ${teamEmojiByName(teamName)} ${teamName}`);
+
+  if (record) {
+    const rec = `${record.wins ?? 0}-${record.losses ?? 0}${record.ties ? `-${record.ties}` : ""}`;
+    const seed = record.seed ? ` · #${record.seed} seed` : "";
+    out.push(`### ${rec}${seed}${record.season != null ? ` · Season ${record.season}` : ""}`);
+  }
+  if (owner) out.push(`**Owner:** ${owner}`);
+
+  if (cap) {
+    const bits = [];
+    if (cap.grade != null) bits.push(`Grade **${cap.grade}**`);
+    if (cap.cap_ecs2026 != null) bits.push(`Cap space **$${cap.cap_ecs2026}M**`);
+    if (cap.draft_score != null) bits.push(`Draft **${cap.draft_score}**`);
+    if (bits.length) {
+      out.push("");
+      out.push("**Outlook**");
+      out.push(`> ${bits.join(" · ")}`);
+    }
+  }
+
+  const top = roster.filter((r) => r.player_ovr != null).slice(0, 8);
+  if (top.length) {
+    out.push("");
+    out.push(`**Top Players** *(${roster.length} on roster)*`);
+    for (const r of top) {
+      const url = playerUrl(r.player_fullName);
+      out.push(
+        `> [**${r.player_fullName}**](<${url}>) — ${r.player_position ?? "?"} · ${r.player_ovr} OVR`
+      );
+    }
+  }
+
+  if (block?.length) {
+    const players = block.filter((e) => e.entry_type !== "pick");
+    const picks = block.filter((e) => e.entry_type === "pick");
+    out.push("");
+    out.push("**On the Trade Block**");
+    for (const e of players.slice(0, 5)) {
+      out.push(`> ${e.player_fullName} — ${e.player_position ?? "?"} · ${e.player_ovr ?? "?"} OVR`);
+    }
+    for (const e of picks.slice(0, 3)) out.push(`> ${e.pick_label ?? "Pick"}`);
+    const extra = block.length - Math.min(players.length, 5) - Math.min(picks.length, 3);
+    if (extra > 0) out.push(`-# …and ${extra} more`);
+  }
+
+  out.push("");
+  out.push(`-# [View ${teamName} on XCFL Vault](<${teamUrl(teamName)}>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  return { content, embeds: [], components: [] };
+}
+
+// Head-to-head record between two league members.
+export function rivalryEmbed(r) {
+  if (!r) {
+    return {
+      content: "Could not build that rivalry — check both usernames.",
+      embeds: [],
+      components: [],
+    };
+  }
+
+  // Usernames can be email addresses — always render the safe display name.
+  const n1 = r.display1 ?? r.user1;
+  const n2 = r.display2 ?? r.user2;
+
+  const total = (r.user1_wins ?? 0) + (r.user2_wins ?? 0) + (r.ties ?? 0);
+  const out = [];
+  out.push(`# ${n1} vs ${n2}`);
+
+  if (!total) {
+    out.push("");
+    out.push("These two have never played each other.");
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  out.push(`### ${r.user1_wins}–${r.user2_wins}${r.ties ? `–${r.ties}` : ""}`);
+
+  const leader =
+    r.user1_wins > r.user2_wins
+      ? `**${n1}** leads the all-time series`
+      : r.user2_wins > r.user1_wins
+        ? `**${n2}** leads the all-time series`
+        : "All square";
+  out.push(`${leader} · ${total} meeting${total === 1 ? "" : "s"}`);
+
+  if (r.games?.length) {
+    out.push("");
+    out.push("**Recent Meetings**");
+    for (const g of r.games) {
+      const label = [
+        g.season != null ? `S${g.season}` : null,
+        g.week != null ? `W${g.week}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const aWon = g.aScore > g.bScore;
+      const bWon = g.bScore > g.aScore;
+      const left = aWon ? `**${g.aScore}**` : `${g.aScore}`;
+      const right = bWon ? `**${g.bScore}**` : `${g.bScore}`;
+      out.push(`> ${label} — ${n1} ${left} – ${right} ${n2}`);
+    }
+  }
+
+  if (r.source === "games") {
+    out.push("");
+    out.push("-# Tallied live from game history.");
+  }
+
+  out.push("");
+  out.push(`-# [All rivalries on XCFL Vault](<${routeUrl(ROUTES.rivalries)}>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "…";
+  return { content, embeds: [], components: [] };
+}
+
+// Shown when a Discord account isn't linked to a league member.
+export function notLinkedEmbed(discordTag) {
+  const out = [
+    "# Account not linked",
+    "",
+    `Your Discord account (**${discordTag}**) isn't linked to a league member yet.`,
+    "",
+    "An admin can link it by setting **discord_user_id** on your LeagueMember record in the Vault.",
+    "",
+    `-# [Open XCFL Vault](<${routeUrl(ROUTES.home)}>)`,
+  ];
+  return { content: out.join("\n"), embeds: [], components: [] };
 }
