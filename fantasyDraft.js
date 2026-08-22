@@ -55,6 +55,18 @@ let poolCachedAt = 0;
  * is far more useful than Madden OVR, which says nothing about usage. Falls
  * back to OVR for anyone with no stats yet (rookies, backups, injured).
  */
+/**
+ * Look up key into the season-points map.
+ *
+ * Asset keys carry a position (`p:name|WR`) but the stats side cannot — the
+ * WeeklyStats rows have no position field — so player points are keyed by name
+ * alone. Defenses key identically on both sides and pass through unchanged.
+ */
+export function pointsKeyFor(asset) {
+  if (String(asset.position).toUpperCase() === 'DEF') return asset.key;
+  return `p:${normalizeName(asset.name)}`;
+}
+
 export async function seasonPointsByKey(league) {
   const season = league?.season_number ?? LEAGUE_DEFAULTS.season_number;
   const [statRows, games] = await Promise.all([getWeeklyStats(season), getGames(season)]);
@@ -91,6 +103,9 @@ export async function seasonPointsByKey(league) {
   }
 
   const out = new Map();
+  // Keyed by normalized NAME only, with no position suffix: WeeklyStats has
+  // no position field, so the stat side cannot construct a name|POS key. The
+  // pool looks these up via pointsKeyFor() below, which strips the position.
   for (const [k, pts] of byName) out.set(`p:${k}`, Math.round(pts * 100) / 100);
 
   // Defenses score per week, so sum each team's weekly totals.
@@ -194,7 +209,7 @@ export async function buildDraftPool({ cycle = null, ttlMs = 10 * 60 * 1000, lea
   }
 
   const pool = [...seen.values(), ...defenses].map((a) => {
-    const pts = points.get(a.key);
+    const pts = points.get(pointsKeyFor(a));
     return {
       ...a,
       season_points: pts ?? null,
