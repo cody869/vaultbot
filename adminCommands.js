@@ -12,6 +12,8 @@
 
 import { SlashCommandBuilder } from "discord.js";
 import { getConnectedClient } from "./eaTokenStore.js";
+import { handleExport, handleEaStatus } from "./eaCommands.js";
+import bugReportCommands from "./bugReport.js";
 
 // Reuses the same allowlist /export and /ea-status already gate on — these
 // are all "can touch the live EA league" actions, so one list covers all of
@@ -106,6 +108,70 @@ export const adminCommandBuilder = new SlashCommandBuilder()
       .setDescription("Clear a forced result back to normal")
       .addIntegerOption((o) =>
         o.setName("game").setDescription("Start typing a matchup, then pick from the list").setRequired(true).setAutocomplete(true)
+      )
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName("export")
+      .setDescription("Pull a fresh Madden export from EA into the Vault")
+      .addStringOption((o) =>
+        o
+          .setName("scope")
+          .setDescription("Which weeks to pull (defaults to the current week)")
+          .addChoices(
+            { name: "Current week", value: "current" },
+            { name: "Surrounding weeks (prev / current / next)", value: "surrounding" },
+            { name: "Specific week", value: "week" },
+            { name: "All weeks (slow)", value: "all" }
+          )
+      )
+      .addIntegerOption((o) =>
+        o
+          .setName("week")
+          .setDescription('Week number to pull — only used when scope is "Specific week"')
+          .setMinValue(1)
+          .setMaxValue(23)
+      )
+      .addStringOption((o) =>
+        o
+          .setName("data")
+          .setDescription("Which data to pull (defaults to everything)")
+          .addChoices(
+            { name: "Everything", value: "all" },
+            { name: "Schedules only", value: "schedules" }
+          )
+      )
+      .addBooleanOption((o) =>
+        o
+          .setName("rosters")
+          .setDescription("Also pull all 32 rosters and free agents (slow)")
+      )
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName("ea-status")
+      .setDescription("Show the EA connection status")
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName("bug-status")
+      .setDescription("View all bug reports and their status")
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName("resolve-bug")
+      .setDescription("Resolve a bug report")
+      .addStringOption((o) =>
+        o
+          .setName("bug_id")
+          .setDescription("Bug report ID (from /admin bug-status)")
+          .setRequired(true)
+      )
+      .addStringOption((o) =>
+        o
+          .setName("resolution")
+          .setDescription("How was this bug fixed?")
+          .setRequired(true)
       )
   );
 
@@ -238,6 +304,22 @@ export async function handleAdminCommand(interaction) {
         if (sub === "force-away-win") await client.forceAwayWin(leagueId, seasonGameKey);
         if (sub === "force-no-win") await client.forceNoWin(leagueId, seasonGameKey);
         await interaction.editReply(`Updated result for **${label}**.`);
+        break;
+      }
+      case "export": {
+        await handleExport(interaction);
+        break;
+      }
+      case "ea-status": {
+        await handleEaStatus(interaction);
+        break;
+      }
+      case "bug-status": {
+        await bugReportCommands.bugStatus.execute(interaction);
+        break;
+      }
+      case "resolve-bug": {
+        await bugReportCommands.resolveBug.execute(interaction);
         break;
       }
     }

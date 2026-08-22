@@ -10,8 +10,6 @@ import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { startScheduleWatcher } from "./scheduleWatcher.js";
 import { startSuspensionWatcher } from "./suspensionWatcher.js";
-import bugReportCommands from "./bugReport.js";
-import { handleExport, handleEaStatus } from "./eaCommands.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
 import {
@@ -381,13 +379,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // A team's autopick queue is only useful to that team's manager — keep it
-  // private rather than posting draft-strategy info in the shared channel.
-  const isFantasyQueue = interaction.commandName === "fantasy"
-    && interaction.options.getSubcommand() === "queue";
+  // Subcommands whose output is only useful to the person running them
+  // (a team's own draft queue, commissioner config/diagnostics, bug triage)
+  // reply ephemerally instead of posting into the shared channel.
+  const EPHEMERAL_SUBCOMMANDS = {
+    fantasy: new Set(["queue", "setup", "config", "pause", "resume", "start", "score-week", "doctor"]),
+    admin: new Set(["bug-status", "resolve-bug"]),
+  };
+  const ephemeralSubs = EPHEMERAL_SUBCOMMANDS[interaction.commandName];
+  const isEphemeral = ephemeralSubs?.has(interaction.options.getSubcommand(false));
 
   // Vault calls can take a moment — defer so we don't time out (3s limit).
-  await interaction.deferReply(isFantasyQueue ? { ephemeral: true } : undefined);
+  await interaction.deferReply(isEphemeral ? { ephemeral: true } : undefined);
 
   try {
     switch (interaction.commandName) {
@@ -493,27 +496,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
         break;
       }
       case "team": {
-        const query = interaction.options.getString("team");
-        console.log(`[TEAM] lookup: ${query}`);
+        let query = interaction.options.getString("team");
+        if (!query) {
+          // No team named — fall back to the caller's own linked team.
+          const member = await getMemberByDiscordId(interaction.user.id);
+          if (!member) {
+            console.log(`[TEAM] no LeagueMember linked to ${interaction.user.tag}`);
+            await interaction.editReply(notLinkedEmbed(interaction.user.tag));
+            break;
+          }
+          if (!member.team_name) {
+            await interaction.editReply(
+              `**${memberDisplayName(member)}** isn't assigned to a team right now.`
+            );
+            break;
+          }
+          query = member.team_name;
+          console.log(`[TEAM] ${interaction.user.tag} -> ${query}`);
+        } else {
+          console.log(`[TEAM] lookup: ${query}`);
+        }
         const data = await getTeamOverview(query);
-        await interaction.editReply(teamEmbed(data));
-        break;
-      }
-      case "myteam": {
-        const member = await getMemberByDiscordId(interaction.user.id);
-        if (!member) {
-          console.log(`[MYTEAM] no LeagueMember linked to ${interaction.user.tag}`);
-          await interaction.editReply(notLinkedEmbed(interaction.user.tag));
-          break;
-        }
-        if (!member.team_name) {
-          await interaction.editReply(
-            `**${memberDisplayName(member)}** isn't assigned to a team right now.`
-          );
-          break;
-        }
-        console.log(`[MYTEAM] ${interaction.user.tag} -> ${member.team_name}`);
-        const data = await getTeamOverview(member.team_name);
         await interaction.editReply(teamEmbed(data));
         break;
       }
@@ -597,24 +600,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.editReply({ embeds: [tradesEmbed(data)] });
         break;
       }
-      case "bug-status": {
-        await bugReportCommands.bugStatus.execute(interaction);
-        break;
-      }
-      case "resolve-bug": {
-        await bugReportCommands.resolveBug.execute(interaction);
-        break;
-      }
       case "news": {
         await handleNews(interaction);
-        break;
-      }
-      case "export": {
-        await handleExport(interaction);
-        break;
-      }
-      case "ea-status": {
-        await handleEaStatus(interaction);
         break;
       }
       case "admin": {

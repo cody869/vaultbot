@@ -75,14 +75,10 @@ export const commands = [
     .addStringOption((o) =>
       o
         .setName("team")
-        .setDescription("Team name or abbreviation")
-        .setRequired(true)
+        .setDescription("Team name or abbreviation (defaults to your own linked team)")
+        .setRequired(false)
         .setAutocomplete(true)
     ),
-
-  new SlashCommandBuilder()
-    .setName("myteam")
-    .setDescription("Show your own team (requires your Discord to be linked)"),
 
   new SlashCommandBuilder()
     .setName("rivalry")
@@ -187,66 +183,6 @@ export const commands = [
         .setMinValue(1)
         .setMaxValue(10)
     ),
-
-  new SlashCommandBuilder()
-    .setName('bug-status')
-    .setDescription('View all bug reports and their status'),
-
-  new SlashCommandBuilder()
-    .setName('resolve-bug')
-    .setDescription('Resolve a bug report')
-    .addStringOption(option =>
-      option
-        .setName('bug_id')
-        .setDescription('Bug report ID (from /bug-status)')
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option
-        .setName('resolution')
-        .setDescription('How was this bug fixed?')
-        .setRequired(true)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("export")
-    .setDescription("Pull a fresh Madden export from EA into the Vault")
-    .addStringOption((o) =>
-      o
-        .setName("scope")
-        .setDescription("Which weeks to pull (defaults to the current week)")
-        .addChoices(
-          { name: "Current week", value: "current" },
-          { name: "Surrounding weeks (prev / current / next)", value: "surrounding" },
-          { name: "Specific week", value: "week" },
-          { name: "All weeks (slow)", value: "all" }
-        )
-    )
-    .addIntegerOption((o) =>
-      o
-        .setName("week")
-        .setDescription('Week number to pull — only used when scope is "Specific week"')
-        .setMinValue(1)
-        .setMaxValue(23)
-    )
-    .addStringOption((o) =>
-      o
-        .setName("data")
-        .setDescription("Which data to pull (defaults to everything)")
-        .addChoices(
-          { name: "Everything", value: "all" },
-          { name: "Schedules only", value: "schedules" }
-        )
-    )
-    .addBooleanOption((o) =>
-      o
-        .setName("rosters")
-        .setDescription("Also pull all 32 rosters and free agents (slow)")
-    ),
-
-  new SlashCommandBuilder()
-    .setName("ea-status")
-    .setDescription("Show the EA connection status"),
 
   adminCommandBuilder,
 
