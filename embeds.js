@@ -630,9 +630,9 @@ function upcomingStatusText(g) {
   return "Not yet scheduled";
 }
 
-// Scores for a week — each game as "Team SCORE vs SCORE Team" with helmets and
-// the winner bolded. No home/away or status distinction. Unplayed matchups
-// for the same week render below as "Upcoming" with their parsed day/time.
+// Scores for a week — each game as logo SCORE vs SCORE logo, winning score
+// bolded, no team name text. Unplayed matchups for the same week render
+// below as "Upcoming" the same way (no score, just the parsed day/time).
 export function scoresEmbed({ season, week, games, upcoming = [] }) {
   const e = base(`Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`, ROUTES.schedule);
   if (!games.length && !upcoming.length) return e.setDescription("No games found for that week.");
@@ -642,9 +642,9 @@ export function scoresEmbed({ season, week, games, upcoming = [] }) {
     const e2 = teamEmojiByName(g.away);
     const oneWon = g.homeScore > g.awayScore;
     const twoWon = g.awayScore > g.homeScore;
-    const t1 = oneWon ? `**${g.home} ${g.homeScore}**` : `${g.home} ${g.homeScore}`;
-    const t2 = twoWon ? `**${g.awayScore} ${g.away}**` : `${g.awayScore} ${g.away}`;
-    return `${e1} ${t1}  vs  ${t2} ${e2}`;
+    const s1 = oneWon ? `**${g.homeScore}**` : `${g.homeScore}`;
+    const s2 = twoWon ? `**${g.awayScore}**` : `${g.awayScore}`;
+    return `${e1} ${s1}  vs  ${s2} ${e2}`;
   });
 
   let description = lines.length ? lines.join("\n") : "_No completed games yet this week._";
@@ -653,7 +653,7 @@ export function scoresEmbed({ season, week, games, upcoming = [] }) {
     const upLines = upcoming.map((g) => {
       const e1 = teamEmojiByName(g.home);
       const e2 = teamEmojiByName(g.away);
-      return `${e1} ${g.home}  vs  ${g.away} ${e2} — *${upcomingStatusText(g)}*`;
+      return `${e1} vs ${e2} — *${upcomingStatusText(g)}*`;
     });
     description += `\n\n**Upcoming**\n${upLines.join("\n")}`;
   }
