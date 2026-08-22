@@ -21,6 +21,7 @@ import {
   announceWeek,
 } from "./fantasyCommands.js";
 import { startFantasyWatcher } from "./fantasyLeague.js";
+import { warmDraftPool } from "./fantasyDraft.js";
 import {
   getStandings,
   getStatLeaders,
@@ -90,6 +91,12 @@ client.once(Events.ClientReady, async (c) => {
   // Keep it warm so a refresh never lands in the middle of a keystroke.
   setInterval(() => {
     warmPlayerCache().catch(() => {});
+  }, 240_000);
+  // Same 3-second autocomplete deadline applies to /fantasy pick and
+  // /fantasy queue — warm the draft pool too (no-ops when no draft is live).
+  await warmDraftPool().catch((err) => console.error('[fantasy] pool warm-up failed:', err.message));
+  setInterval(() => {
+    warmDraftPool().catch(() => {});
   }, 240_000);
   startScheduler(c);
   startTradeWatcher(c);
