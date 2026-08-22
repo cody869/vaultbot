@@ -120,22 +120,26 @@ const PAGE_SIZE = 500;
 /**
  * List an entity, paging until exhausted.
  *
- * A single limit=10000 request is not reliable: Base44 caps page size, so the
- * old call silently returned a truncated slice of Player/Roster and the draft
- * pool came up short (or empty) with no error anywhere. Page instead, and stop
- * on any page that returns nothing new — that guard means an API which ignores
- * `offset` terminates after one extra page rather than looping forever.
+ * The pagination parameter is `skip`, not `offset` — confirmed against the
+ * Base44 SDK's own entities module. Using the wrong name meant every page
+ * re-fetched rows 1-500, so the draft pool was built from a 500-row slice of
+ * Player/Roster (54 assets instead of ~4,400) and S84 stats looked empty.
+ *
+ * `q` filters server-side and `fields` narrows the payload; both cut the
+ * number of pages dramatically versus pulling whole collections.
  */
-export async function listEntity(entity, { limit = 20000, sort = '' } = {}) {
+export async function listEntity(entity, { limit = 20000, sort = '', query = null, fields = null } = {}) {
   const out = [];
   const seen = new Set();
-  let offset = 0;
+  let skip = 0;
 
   for (let page = 0; page < 60; page += 1) {
     const params = new URLSearchParams();
     params.set('limit', String(PAGE_SIZE));
-    if (offset) params.set('offset', String(offset));
+    if (skip) params.set('skip', String(skip));
     if (sort) params.set('sort', sort);
+    if (query) params.set('q', JSON.stringify(query));
+    if (fields) params.set('fields', Array.isArray(fields) ? fields.join(',') : fields);
 
     const rows = rowsFrom(await request('GET', `${entityUrl(entity)}?${params.toString()}`));
     if (!rows.length) break;
@@ -148,12 +152,14 @@ export async function listEntity(entity, { limit = 20000, sort = '' } = {}) {
       out.push(r);
       added += 1;
     }
-    // No new records means we are re-reading page 1 (offset unsupported) or
-    // we have reached the end either way.
-    if (added === 0) break;
+    // Nothing new means the API ignored `skip` — stop rather than spin.
+    if (added === 0) {
+      console.warn(`[fantasy] ${entity}: pagination stalled at ${out.length} rows (skip may be unsupported)`);
+      break;
+    }
     if (out.length >= limit) break;
     if (rows.length < PAGE_SIZE) break;
-    offset += PAGE_SIZE;
+    skip += PAGE_SIZE;
   }
 
   return out;
@@ -211,11 +217,11 @@ export async function deleteEntity(entity, id) {
 
 const caches = new Map(); // entity -> { rows, at }
 
-export async function cachedList(entity, ttlMs = 5 * 60 * 1000) {
-  const hit = caches.get(entity);
+export async function cachedList(cacheKey, ttlMs = 5 * 60 * 1000, opts = {}) {
+  const hit = caches.get(cacheKey);
   if (hit && Date.now() - hit.at < ttlMs) return hit.rows;
-  const rows = await listEntity(entity);
-  caches.set(entity, { rows, at: Date.now() });
+  const rows = await listEntity(opts.entity || cacheKey, { query: opts.query || null });
+  caches.set(cacheKey, { rows, at: Date.now() });
   return rows;
 }
 
@@ -267,20 +273,32 @@ export async function getWeekScores(leagueId, week = null) {
   return rows.filter((s) => s.league_id === leagueId && (week == null || s.week === week));
 }
 
-export async function getPlayers() {
-  return cachedList('Player', 10 * 60 * 1000);
+export async function getPlayers(cycle = null) {
+  return cachedList(`Player${cycle ? `:${cycle}` : ''}`, 10 * 60 * 1000, {
+    entity: 'Player',
+    query: cycle ? { cycle } : null,
+  });
 }
 
-export async function getRosters() {
-  return cachedList('Roster', 10 * 60 * 1000);
+export async function getRosters(cycle = null) {
+  return cachedList(`Roster${cycle ? `:${cycle}` : ''}`, 10 * 60 * 1000, {
+    entity: 'Roster',
+    query: cycle ? { cycle } : null,
+  });
 }
 
-export async function getGames() {
-  return cachedList('Game', 2 * 60 * 1000);
+export async function getGames(season = null) {
+  return cachedList(`Game${season != null ? `:${season}` : ''}`, 2 * 60 * 1000, {
+    entity: 'Game',
+    query: season != null ? { season_number: season } : null,
+  });
 }
 
-export async function getWeeklyStats() {
-  return cachedList('WeeklyStats', 2 * 60 * 1000);
+export async function getWeeklyStats(season = null) {
+  return cachedList(`WeeklyStats${season != null ? `:${season}` : ''}`, 2 * 60 * 1000, {
+    entity: 'WeeklyStats',
+    query: season != null ? { season_index: season } : null,
+  });
 }
 
 export async function getLeagueMembers() {
