@@ -113,14 +113,30 @@ export async function handleFantasyAutocomplete(interaction) {
       }
     }
 
-    const options = matches.slice(0, 25).map((a) => ({
-      name: `${a.name} — ${a.position}${a.ovr ? ` ${a.ovr}` : ''} (${a.nfl_team})`.slice(0, 100),
-      value: a.key.slice(0, 100),
-    }));
+    // Pool is already sorted by season production, so an empty query shows the
+    // best available rather than an arbitrary slice.
+    const options = matches.slice(0, 25).map((a) => {
+      const pts = a.season_points != null ? `${a.season_points} pts` : (a.ovr ? `${a.ovr} OVR` : 'no stats');
+      return {
+        name: `${a.name} — ${a.position} · ${pts} (${a.nfl_team})`.slice(0, 100),
+        value: a.key.slice(0, 100),
+      };
+    });
+
+    // An empty pool is a fetch failure, not a legitimately empty list. Say so
+    // in the dropdown instead of returning [] — a silent empty autocomplete is
+    // indistinguishable from "no matches" and hides the real problem.
+    if (!options.length && !query) {
+      return interaction.respond([
+        { name: 'No players available — check the bot logs (/fantasy doctor)', value: 'none' },
+      ]);
+    }
     return interaction.respond(options);
   } catch (err) {
-    console.error('[fantasy] autocomplete failed:', err.message);
-    return interaction.respond([]);
+    console.error('[fantasy] autocomplete failed:', err.stack || err.message);
+    return interaction.respond([
+      { name: `Lookup failed: ${String(err.message).slice(0, 80)}`, value: 'none' },
+    ]);
   }
 }
 
@@ -580,6 +596,13 @@ async function cmdPick(interaction) {
 
   const key = interaction.options.getString('player');
   const available = await availableAssets(league);
+  if (key === 'none') {
+    return interaction.editReply({
+      content: 'The player list failed to load — that entry was an error message, not a player. Run `/fantasy doctor`.',
+      ...PLAIN,
+    });
+  }
+
   const asset = available.find((a) => a.key === key)
     || available.find((a) => a.name.toLowerCase() === String(key).toLowerCase());
 
@@ -816,6 +839,7 @@ async function cmdDoctor(interaction) {
   if (!isCommissioner(interaction)) {
     return interaction.editReply({ content: 'Commissioner only.', ...PLAIN });
   }
+  const league = await getLeague();
 
   const [stats, games] = await Promise.all([getWeeklyStats(), getGames()]);
   const statRow = stats[0];
@@ -835,8 +859,22 @@ async function cmdDoctor(interaction) {
   const defensive = stats.find((r) => resolveKey(r, STAT_FIELDS.defSacks) || resolveKey(r, STAT_FIELDS.defInts));
   const s84 = games.filter((g) => Number(g.season_number) === 84).length;
 
+  let poolLine;
+  try {
+    const pool = await buildDraftPool({ cycle: league?.cycle || null, league });
+    const scored = pool.filter((a) => a.season_points != null).length;
+    const byPos = {};
+    pool.forEach((a) => { byPos[a.position] = (byPos[a.position] || 0) + 1; });
+    poolLine = `Draft pool: **${pool.length}** assets (${Object.entries(byPos).map(([p, n]) => `${n} ${p}`).join(', ')}) · ${scored} with season stats`;
+    if (!pool.length) poolLine += '\n**Pool is EMPTY — Player/Roster fetch is failing.**';
+  } catch (err) {
+    poolLine = `Draft pool: **FAILED** — ${err.message}`;
+  }
+
   const out = [
     '# Fantasy field doctor',
+    poolLine,
+    '',
     `WeeklyStats rows: ${stats.length} · Game rows: ${games.length} (${s84} in S84)`,
     stats.length ? '' : '**WeeklyStats is empty** — nothing to verify until the first week imports.',
     '',
