@@ -25,7 +25,7 @@
 //                            first deploy doesn't flood the channel
 
 import { MessageFlags } from 'discord.js';
-import { listEntity, updateEntity } from './vault.js';
+import { list, getLeagueMembers, memberDisplayName, updateEntity } from './vault.js';
 
 const CHANNEL_ID = process.env.SUSPENSIONS_CHANNEL_ID;
 const POLL_MS = (Number(process.env.SUSPENSION_POLL_SECONDS) || 60) * 1000;
@@ -56,9 +56,9 @@ function resolveOwnerMention(suspension, members) {
   });
 
   if (member?.discord_user_id) return `<@${member.discord_user_id}>`;
-  if (member?.discord_username) return member.discord_username;
-  if (member?.avatar_name) return member.avatar_name;
-  if (member?.username && !member.username.includes('@')) return member.username;
+  // memberDisplayName() already walks the safe fallback chain and never
+  // returns an email, which is the privacy rule for anything shown in Discord.
+  if (member) return memberDisplayName(member);
   return suspension.team_name ? `${suspension.team_name} owner` : 'Team owner';
 }
 
@@ -110,7 +110,7 @@ async function claim(suspension) {
   // Re-read to confirm ownership — last-write-wins means our write may have
   // been clobbered by another instance between the write and this read.
   try {
-    const fresh = await listEntity('Suspension', '-created_date', 5000);
+    const fresh = await list('Suspension', {}, { sort: '-created_date', limit: 5000 });
     const row = fresh.find((r) => r.id === suspension.id);
     if (!row || row.discord_message_id !== token) {
       console.log(`[SUSPENSION] lost claim race on ${suspension.id}, skipping`);
@@ -179,7 +179,7 @@ async function seedBacklog() {
   const cutoff = Date.now() - SEED_HOURS * 3600 * 1000;
   let seeded = 0;
 
-  const all = await listEntity('Suspension', '-created_date', 5000);
+  const all = await list('Suspension', {}, { sort: '-created_date', limit: 5000 });
   for (const s of all.filter(isDue)) {
     const created = new Date(s.created_date).getTime();
     if (Number.isFinite(created) && created >= cutoff) continue;
@@ -200,8 +200,8 @@ async function seedBacklog() {
 async function tick(client) {
   try {
     const [all, members] = await Promise.all([
-      listEntity('Suspension', '-created_date', 5000),
-      listEntity('LeagueMember', null, 5000),
+      list('Suspension', {}, { sort: '-created_date', limit: 5000 }),
+      getLeagueMembers(),
     ]);
 
     const due = all.filter(isDue);
