@@ -22,8 +22,10 @@ import {
  * Fantasy points for one offensive player's stat row.
  * Returns { points, breakdown } — breakdown is used by /fantasy scores so a
  * disputed total can be audited without re-reading the export.
+ * `scoring` defaults to the league-wide default table; pass resolveScoring(league)
+ * to score under a league's custom rules.
  */
-export function scorePlayerRow(row) {
+export function scorePlayerRow(row, scoring = SCORING) {
   const passYds = readNumber(row, STAT_FIELDS.passYds);
   const passTDs = readNumber(row, STAT_FIELDS.passTDs);
   const passInts = readNumber(row, STAT_FIELDS.passInts);
@@ -36,15 +38,15 @@ export function scorePlayerRow(row) {
   const recFum = readNumber(row, STAT_FIELDS.recFum);
 
   const breakdown = {
-    passYds: passYds / SCORING.passYdsPerPoint,
-    passTD: passTDs * SCORING.passTD,
-    passInt: passInts * SCORING.passInt,
-    rushYds: rushYds / SCORING.rushYdsPerPoint,
-    rushTD: rushTDs * SCORING.rushTD,
-    rec: recCatches * SCORING.reception,
-    recYds: recYds / SCORING.recYdsPerPoint,
-    recTD: recTDs * SCORING.recTD,
-    fumbles: (rushFum + recFum) * SCORING.fumbleLost,
+    passYds: passYds / scoring.passYdsPerPoint,
+    passTD: passTDs * scoring.passTD,
+    passInt: passInts * scoring.passInt,
+    rushYds: rushYds / scoring.rushYdsPerPoint,
+    rushTD: rushTDs * scoring.rushTD,
+    rec: recCatches * scoring.reception,
+    recYds: recYds / scoring.recYdsPerPoint,
+    recTD: recTDs * scoring.recTD,
+    fumbles: (rushFum + recFum) * scoring.fumbleLost,
   };
 
   const points = Object.values(breakdown).reduce((a, b) => a + b, 0);
@@ -57,7 +59,7 @@ export function scorePlayerRow(row) {
  * player rows (more reliable than the team-level export, which doesn't always
  * carry sacks/INTs). Points allowed comes from the Game row.
  */
-export function scoreTeamDefense(defRows, pointsAllowed) {
+export function scoreTeamDefense(defRows, pointsAllowed, scoring = SCORING) {
   let sacks = 0, ints = 0, fumRec = 0, tds = 0, safeties = 0;
 
   for (const row of defRows) {
@@ -69,11 +71,11 @@ export function scoreTeamDefense(defRows, pointsAllowed) {
   }
 
   const breakdown = {
-    sacks: sacks * SCORING.defSack,
-    ints: ints * SCORING.defInt,
-    fumbleRec: fumRec * SCORING.defFumbleRec,
-    safeties: safeties * SCORING.defSafety,
-    defTD: tds * SCORING.defTD,
+    sacks: sacks * scoring.defSack,
+    ints: ints * scoring.defInt,
+    fumbleRec: fumRec * scoring.defFumbleRec,
+    safeties: safeties * scoring.defSafety,
+    defTD: tds * scoring.defTD,
     pointsAllowed: pointsAllowedScore(pointsAllowed),
   };
 
@@ -243,14 +245,14 @@ export function weekIsComplete(gameRows, { season, week }) {
  * Score one fantasy team for one week.
  * roster: [{ key, name, position, nfl_team }]
  */
-export function scoreRosterWeek(roster, { byName, byNameTeam, defenseByTeam, paByTeam }) {
+export function scoreRosterWeek(roster, { byName, byNameTeam, defenseByTeam, paByTeam }, scoring = SCORING) {
   const entries = roster.map((slot) => {
     if (isDefenseKey(slot.key)) {
       const teamKey = normalizeName(slot.nfl_team || slot.name);
       const defRows = defenseByTeam.get(teamKey) || [];
       const pa = paByTeam.get(teamKey);
       const played = defRows.length > 0 || pa !== undefined;
-      const { points, breakdown, raw } = scoreTeamDefense(defRows, pa);
+      const { points, breakdown, raw } = scoreTeamDefense(defRows, pa, scoring);
       return {
         key: slot.key,
         name: slot.name,
@@ -273,7 +275,7 @@ export function scoreRosterWeek(roster, { byName, byNameTeam, defenseByTeam, paB
     if (!row) {
       return { key: slot.key, name: slot.name, position: slot.position, nfl_team: slot.nfl_team, points: 0, played: false, breakdown: {}, raw: {} };
     }
-    const { points, breakdown, raw } = scorePlayerRow(row);
+    const { points, breakdown, raw } = scorePlayerRow(row, scoring);
     return { key: slot.key, name: slot.name, position: slot.position, nfl_team: slot.nfl_team, points, played: true, breakdown, raw };
   });
 

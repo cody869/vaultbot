@@ -21,7 +21,7 @@ import {
   scoreRosterWeek,
 } from './fantasyScoring.js';
 
-import { LEAGUE_DEFAULTS, round2 } from './fantasyConfig.js';
+import { LEAGUE_DEFAULTS, round2, resolveScoring } from './fantasyConfig.js';
 
 // ---------------------------------------------------------------------------
 // Regular-season schedule
@@ -128,6 +128,7 @@ export async function scoreWeek(league, week, { force = false } = {}) {
   const statRows = await getWeeklyStats(season);
   const { byName, byNameTeam, defenseByTeam } = indexWeeklyStats(statRows, { season, week });
   const paByTeam = pointsAllowedByTeam(games, { season, week });
+  const scoring = resolveScoring(league);
 
   const existingScores = await getWeekScores(league.id, week);
   const scoreByTeam = new Map(existingScores.map((s) => [s.fantasy_team_id, s]));
@@ -135,7 +136,7 @@ export async function scoreWeek(league, week, { force = false } = {}) {
   const results = [];
   for (const team of teams) {
     const roster = Array.isArray(team.roster) ? team.roster : [];
-    const { starters, bench, total } = scoreRosterWeek(roster, { byName, byNameTeam, defenseByTeam, paByTeam });
+    const { starters, bench, total } = scoreRosterWeek(roster, { byName, byNameTeam, defenseByTeam, paByTeam }, scoring);
 
     const payload = {
       league_id: league.id,
