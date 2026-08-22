@@ -140,7 +140,10 @@ async function handleScheduleMessage(message) {
   const content = message.content || "";
   if (!content.trim()) return; // e.g. attachment-only post, nothing to parse
 
-  const parsed = parseScheduleMessage(content);
+  // createdAt is the original post time even on a re-parsed edit (editing a
+  // message doesn't change when it was originally sent) — that's the right
+  // anchor for "today" here, not whenever the edit/re-parse happens to run.
+  const parsed = parseScheduleMessage(content, message.createdAt);
   const abbrs = extractTeamAbbrs(content);
 
   // scheduled_status reflects TEXT-parse confidence only, decided here.
