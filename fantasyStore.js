@@ -107,17 +107,56 @@ async function request(method, url, body, { retryAuth = true } = {}) {
 // Generic entity operations
 // ---------------------------------------------------------------------------
 
-export async function listEntity(entity, { limit = 10000, sort = '' } = {}) {
-  const params = new URLSearchParams();
-  if (limit) params.set('limit', String(limit));
-  if (sort) params.set('sort', sort);
-  const url = `${entityUrl(entity)}?${params.toString()}`;
-  const data = await request('GET', url);
+function rowsFrom(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.items)) return data.items;
   if (Array.isArray(data?.records)) return data.records;
   if (Array.isArray(data?.data)) return data.data;
   return [];
+}
+
+const PAGE_SIZE = 500;
+
+/**
+ * List an entity, paging until exhausted.
+ *
+ * A single limit=10000 request is not reliable: Base44 caps page size, so the
+ * old call silently returned a truncated slice of Player/Roster and the draft
+ * pool came up short (or empty) with no error anywhere. Page instead, and stop
+ * on any page that returns nothing new — that guard means an API which ignores
+ * `offset` terminates after one extra page rather than looping forever.
+ */
+export async function listEntity(entity, { limit = 20000, sort = '' } = {}) {
+  const out = [];
+  const seen = new Set();
+  let offset = 0;
+
+  for (let page = 0; page < 60; page += 1) {
+    const params = new URLSearchParams();
+    params.set('limit', String(PAGE_SIZE));
+    if (offset) params.set('offset', String(offset));
+    if (sort) params.set('sort', sort);
+
+    const rows = rowsFrom(await request('GET', `${entityUrl(entity)}?${params.toString()}`));
+    if (!rows.length) break;
+
+    let added = 0;
+    for (const r of rows) {
+      const key = r?.id ?? JSON.stringify(r);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(r);
+      added += 1;
+    }
+    // No new records means we are re-reading page 1 (offset unsupported) or
+    // we have reached the end either way.
+    if (added === 0) break;
+    if (out.length >= limit) break;
+    if (rows.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+
+  return out;
 }
 
 export async function createEntity(entity, payload) {
