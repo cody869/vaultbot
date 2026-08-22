@@ -381,8 +381,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // A team's autopick queue is only useful to that team's manager — keep it
+  // private rather than posting draft-strategy info in the shared channel.
+  const isFantasyQueue = interaction.commandName === "fantasy"
+    && interaction.options.getSubcommand() === "queue";
+
   // Vault calls can take a moment — defer so we don't time out (3s limit).
-  await interaction.deferReply();
+  await interaction.deferReply(isFantasyQueue ? { ephemeral: true } : undefined);
 
   try {
     switch (interaction.commandName) {
