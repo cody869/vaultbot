@@ -1,14 +1,27 @@
 // scheduleWatcher.js — watches the #schedule channel, parses each post with
-// scheduleParser.js, matches it to a Schedule row (the pre-game matchup —
-// NOT the Game entity, which only holds already-played results), and saves
-// the result to the ScheduledGame entity. Reacts ✅ on a confident parse or
-// ❓ when a human should double check.
+// scheduleParser.js, matches it to a Game row, and saves the result to the
+// ScheduledGame entity. Reacts ✅ on a confident parse or ❓ when a human
+// should double check.
+//
+// Matches against Game, not a separate "Schedule" entity — Game holds the
+// whole season's matchups up front (future weeks exist with status 1 and
+// 0-0 scores before they're played; status 2/3 = completed regular/
+// playoff), so it's the single source for both played and upcoming games
+// here. (An earlier version of this file assumed pre-game matchups lived
+// in a separate Schedule entity — that entity turned out to have no data
+// loaded at all, and was the wrong place to look regardless.)
+//
+// IMPORTANT: scheduled_status (and which emoji gets reacted) reflects
+// confidence in the TEXT parse ONLY — day/time/forfeit-winner and which
+// team(s) could be identified from message emoji. Whether a matching Game
+// row was actually found (game_id) is tracked separately in
+// schedule_match_note and never downgrades scheduled_status.
 //
 // Written to a separate ScheduledGame entity rather than stamping fields
-// onto Schedule/Game directly, for the same reason ScorebugPost is separate
-// from Game: Schedule/Game rows are bulk re-imported by the Madden sync
-// pipeline, so a custom field written onto one risks being silently wiped
-// on the next import.
+// onto Game directly, for the same reason ScorebugPost is separate from
+// Game: Game rows are bulk re-imported by the Madden sync pipeline, so a
+// custom field written onto one risks being silently wiped on the next
+// import.
 //
 // Environment:
 //   SCHEDULE_CHANNEL_ID   channel to watch (default: XCFL's #schedule)
@@ -16,8 +29,7 @@
 // Requires the Message Content privileged intent to be enabled for this bot
 // in the Discord Developer Portal (Bot -> Privileged Gateway Intents ->
 // MESSAGE CONTENT INTENT), plus GuildMessages/MessageContent/
-// GuildMessageReactions added to the Client's intents in index.js — see
-// the integration notes delivered alongside this file.
+// GuildMessageReactions added to the Client's intents in index.js.
 
 import { Events } from "discord.js";
 import { list, getCurrentCycle, createEntity, updateEntity } from "./vault.js";
@@ -48,67 +60,63 @@ function extractTeamAbbrs(content, fromIndex = 0) {
   return found;
 }
 
-function scheduleWeekNumber(s) {
-  if (s.week != null) return s.week;
-  if (s.week_index != null) return s.week_index + 1;
-  return null;
+function isPlayedGame(g) {
+  return g.status === 2 || g.status === 3; // 2=regular, 3=playoff (per export)
 }
 
-function buildGameKey(scheduleRow, season, week) {
-  const teams = [scheduleRow?.home_team, scheduleRow?.away_team].filter(Boolean).sort();
+function buildGameKey(season, week, teamAName, teamBName) {
+  const teams = [teamAName, teamBName].filter(Boolean).sort();
   return `${season ?? "?"}-${week ?? "?"}-${teams[0] ?? "?"}-${teams[1] ?? "?"}`;
 }
 
-// Find the Schedule row this post is about. Schedule holds the pre-game
-// matchup (home_team/away_team/week_index/status) — Game only exists once a
-// result has been imported, so upcoming games live in Schedule, not Game.
-async function matchSchedule({ abbrA, abbrB, weekNumber }) {
+// Finds the Game row this post is about. abbrB is optional: a forfeit post
+// may only show the winning team's emoji, in which case we match on abbrA +
+// week alone and can pick up the opponent from whichever Game row we land
+// on.
+async function matchGame({ abbrA, abbrB, weekNumber }) {
   const cycle = await getCurrentCycle();
-  const rows = await list("Schedule", { cycle }, { limit: 5000 });
-  const inCycle = rows.filter((s) => !s.cycle || s.cycle === cycle);
-  if (!inCycle.length) return { cycle, season: null, scheduleRow: null, weekNumber, note: "No schedule data loaded for this cycle yet." };
+  const games = await list("Game");
+  const inCycle = games.filter((g) => g.cycle === cycle);
+  if (!inCycle.length) {
+    return { cycle, season: null, gameRow: null, weekNumber, note: "No Game data loaded for this cycle yet." };
+  }
 
-  const season = Math.max(...inCycle.map((s) => s.season_index ?? 0), 0);
+  const season = Math.max(...inCycle.map((g) => g.season_number ?? 0), 0);
 
-  const candidates = inCycle.filter((s) => {
-    if (s.season_index !== season) return false;
-    const h = abbrFromName(s.home_team);
-    const a = abbrFromName(s.away_team);
-    return (h === abbrA && a === abbrB) || (h === abbrB && a === abbrA);
+  const candidates = inCycle.filter((g) => {
+    if (g.season_number !== season) return false;
+    const h = abbrFromName(g.homeTeam);
+    const a = abbrFromName(g.awayTeam);
+    if (abbrB) return (h === abbrA && a === abbrB) || (h === abbrB && a === abbrA);
+    return h === abbrA || a === abbrA;
   });
 
   if (weekNumber != null) {
-    const row = candidates.find((s) => scheduleWeekNumber(s) === weekNumber) || null;
+    const row = candidates.find((g) => g.week === weekNumber) || null;
     return {
       cycle,
       season,
-      scheduleRow: row,
+      gameRow: row,
       weekNumber,
-      note: row ? null : `Could not find a Week ${weekNumber} matchup between these teams.`,
+      note: row ? null : `Could not find a Week ${weekNumber} matchup for these team(s).`,
     };
   }
 
-  // No explicit week — take the earliest not-yet-completed matchup between
-  // these two teams this season (status 2 = completed per the Schedule
-  // schema; also guard on scores being unset in case status wasn't synced).
   const unplayed = candidates
-    .filter((s) => s.status !== 2 && s.home_score == null && s.away_score == null)
-    .sort((a, b) => (scheduleWeekNumber(a) ?? 999) - (scheduleWeekNumber(b) ?? 999));
+    .filter((g) => !isPlayedGame(g))
+    .sort((a, b) => (a.week ?? 999) - (b.week ?? 999));
 
   const row = unplayed[0] || null;
   return {
     cycle,
     season,
-    scheduleRow: row,
-    weekNumber: row ? scheduleWeekNumber(row) : null,
-    note: row ? null : "Could not find an unplayed matchup between these teams this season — try including \"Week #\".",
+    gameRow: row,
+    weekNumber: row ? row.week : null,
+    note: row ? null : "Could not find an unplayed matchup for these team(s) this season — try including \"Week #\".",
   };
 }
 
 async function findExistingRow(messageId) {
-  // ScheduledGame is small (one row per matchup per week); a broad read and
-  // in-memory match mirrors the pattern vault.js's list() helpers use
-  // elsewhere in this codebase, since server-side filters aren't reliable.
   const rows = await list("ScheduledGame", {}, { limit: 5000 });
   return rows.find((r) => r.discord_message_id === messageId) || null;
 }
@@ -135,56 +143,83 @@ async function handleScheduleMessage(message) {
   const parsed = parseScheduleMessage(content);
   const abbrs = extractTeamAbbrs(content);
 
+  // scheduled_status reflects TEXT-parse confidence only, decided here.
+  // Team-count requirements differ by shape: a real matchup needs both
+  // teams named; a forfeit post typically shows only the winner's logo.
   let status = parsed.status;
-  const notes = [];
+  let timeText = parsed.timeText;
+  let abbrA = null, abbrB = null;
 
-  if (abbrs.length !== 2) {
-    status = "needs_review";
-    notes.push("Could not identify exactly two teams from the message's team emoji.");
+  if (status === "forfeit") {
+    if (abbrs.length >= 1) {
+      abbrA = abbrs[0];
+      if (abbrs.length >= 2) abbrB = abbrs[1];
+    } else {
+      status = "needs_review";
+      timeText = [timeText, "Could not identify the forfeit-winning team from message emoji."]
+        .filter(Boolean).join(" — ");
+    }
+  } else if (status === "scheduled") {
+    if (abbrs.length === 2) {
+      abbrA = abbrs[0];
+      abbrB = abbrs[1];
+    } else {
+      status = "needs_review";
+      timeText = [timeText, "Could not identify exactly two teams from message emoji."]
+        .filter(Boolean).join(" — ");
+    }
+  } else {
+    // Already needs_review from ambiguous text — grab whatever teams we
+    // can for context, but don't gate on a specific count.
+    if (abbrs.length >= 1) abbrA = abbrs[0];
+    if (abbrs.length >= 2) abbrB = abbrs[1];
   }
 
-  let cycle = null, season = null, scheduleRow = null, weekNumber = parsed.weekNumber;
+  let teamAName = abbrA ? TEAMS[abbrA]?.name ?? null : null;
+  let teamBName = abbrB ? TEAMS[abbrB]?.name ?? null : null;
 
-  if (abbrs.length === 2) {
+  // Game cross-reference — purely informational, never touches `status`.
+  let cycle = null, season = null, gameRow = null, weekNumber = parsed.weekNumber;
+  let scheduleMatchNote = null;
+
+  if (abbrA) {
     try {
-      const result = await matchSchedule({ abbrA: abbrs[0], abbrB: abbrs[1], weekNumber });
+      const result = await matchGame({ abbrA, abbrB, weekNumber });
       cycle = result.cycle;
       season = result.season;
-      scheduleRow = result.scheduleRow;
+      gameRow = result.gameRow;
       weekNumber = result.weekNumber;
-      if (result.note) {
-        status = "needs_review";
-        notes.push(result.note);
+      scheduleMatchNote = result.note;
+
+      // Forfeit post only had the winner's emoji — a matched Game row
+      // tells us the opponent for free.
+      if (gameRow && !teamBName) {
+        const homeAbbr = abbrFromName(gameRow.homeTeam);
+        const awayAbbr = abbrFromName(gameRow.awayTeam);
+        const otherAbbr = homeAbbr === abbrA ? awayAbbr : homeAbbr;
+        teamBName = TEAMS[otherAbbr]?.name ?? (homeAbbr === abbrA ? gameRow.awayTeam : gameRow.homeTeam);
       }
     } catch (err) {
-      console.error(`[SCHEDULE] Schedule lookup failed: ${err.message}`);
-      status = "needs_review";
-      notes.push("Vault lookup failed — try again or check manually.");
+      console.error(`[SCHEDULE] Game lookup failed: ${err.message}`);
+      scheduleMatchNote = "Vault lookup failed — try again or check manually.";
     }
   }
 
-  // If FW was mentioned, look for a team emoji right after it as the
-  // forfeit winner (e.g. "FW 🏈raiders" -> Raiders won by forfeit).
-  let forfeitWinner = null;
-  if (parsed.status === "forfeit" && typeof parsed.fwIndex === "number") {
-    const hits = extractTeamAbbrs(content, parsed.fwIndex);
-    if (hits.length) forfeitWinner = TEAMS[hits[0]]?.name ?? null;
-  }
+  const forfeitWinner = status === "forfeit" ? teamAName : null;
 
-  const gameKey = scheduleRow
-    ? buildGameKey(scheduleRow, season, weekNumber)
+  const gameKey = gameRow
+    ? buildGameKey(season, weekNumber, teamAName, teamBName)
     : `unmatched-${message.id}`;
-
-  const timeText = [parsed.timeText, notes.join(" ")].filter(Boolean).join(" — ") || null;
 
   const payload = {
     game_key: gameKey,
     cycle,
     season_number: season,
     week: weekNumber ?? null,
-    team_a: abbrs[0] ? TEAMS[abbrs[0]]?.name ?? null : null,
-    team_b: abbrs[1] ? TEAMS[abbrs[1]]?.name ?? null : null,
-    game_id: scheduleRow?.id ?? null,
+    team_a: teamAName,
+    team_b: teamBName,
+    game_id: gameRow?.id ?? null,
+    schedule_match_note: scheduleMatchNote,
     scheduled_status: status,
     scheduled_time_text: timeText,
     scheduled_day: parsed.day,
