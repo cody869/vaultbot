@@ -313,7 +313,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     } else if (interaction.commandName === "fantasy") {
       // Serves /fantasy pick and /fantasy queue from the cached draft pool.
-      await handleFantasyAutocomplete(interaction);
+      // A cold pool build can take longer than Discord's 3s autocomplete
+      // window; respond() on an expired interaction then throws
+      // "Unknown interaction" (10062). Every other branch here already
+      // guards against that — this one didn't, so that throw went unhandled
+      // and took the whole process down (a crash loop, not just a failed
+      // autocomplete) until warmDraftPool kept the pool from going cold.
+      try {
+        await handleFantasyAutocomplete(interaction);
+      } catch (err) {
+        console.error("[fantasy] autocomplete crashed:", err.message);
+      }
     } else if (interaction.commandName === "admin") {
       // Two different autocompletes live on this command: "team" (live EA
       // roster search) on most subcommands, "game" (matchup search) on the

@@ -233,17 +233,21 @@ export function invalidatePool() {
 }
 
 /**
- * Prime the draft pool at startup and on an interval while a draft is live.
+ * Prime the draft pool at startup and on an interval.
  *
  * buildDraftPool now pages through Player/Roster/WeeklyStats/Game rather than
  * one request each, so a cold rebuild easily exceeds the 3s Discord allows
  * for autocomplete. A process restart wipes poolCache, so without this the
  * very next /fantasy pick or /fantasy queue autocomplete after a deploy fails
  * with "Loading options failed" until something else happens to warm it.
+ *
+ * Not gated on draft_status: /fantasy queue is meant to be usable before the
+ * draft starts (status 'pending'), so restricting this to 'in_progress' left
+ * queue's autocomplete cold the whole time a draft is being set up.
  */
 export async function warmDraftPool() {
   const league = await getLeague();
-  if (!league || league.draft_status !== 'in_progress') return null;
+  if (!league) return null;
   return buildDraftPool({ cycle: league.cycle || null, league });
 }
 
