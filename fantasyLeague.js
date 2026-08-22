@@ -115,7 +115,7 @@ export async function generateSchedule(league, teams) {
  */
 export async function scoreWeek(league, week, { force = false } = {}) {
   const season = league.season_number ?? LEAGUE_DEFAULTS.season_number;
-  const games = await getGames();
+  const games = await getGames(season);
   const completion = weekIsComplete(games, { season, week });
 
   if (!completion.complete && !force) {
@@ -125,7 +125,7 @@ export async function scoreWeek(league, week, { force = false } = {}) {
   const teams = await getTeams(league.id);
   if (!teams.length) return { ok: false, reason: 'no_teams' };
 
-  const statRows = await getWeeklyStats();
+  const statRows = await getWeeklyStats(season);
   const { byName, byNameTeam, defenseByTeam } = indexWeeklyStats(statRows, { season, week });
   const paByTeam = pointsAllowedByTeam(games, { season, week });
 
