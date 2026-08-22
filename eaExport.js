@@ -36,6 +36,18 @@ const EXPORT_MODE = (process.env.MADDEN_EXPORT_MODE || "path").toLowerCase();
 const DIRECT = EXPORT_MODE === "direct";
 
 /*
+ * Extra destination(s) that get a raw copy of every payload this bot sends,
+ * always, regardless of EXPORT_MODE above. Each one is treated as
+ * direct-mode: no snallabot path suffix appended, matching how
+ * maddenWebhook-style endpoints identify payloads by body shape instead of
+ * URL. Failures here are logged and swallowed — they never block or fail
+ * the primary export to MADDEN_EXPORT_URL.
+ */
+const EXTRA_EXPORT_URLS = [
+  "https://xcfl.vercel.app/api/export",
+];
+
+/*
  * Teams/standings are only sent when the destination can parse them. A
  * snallabot-compatible relay routes on the URL path, so it can; maddenWebhook
  * sniffs the body and has no branch for those two shapes. Override with
@@ -86,11 +98,52 @@ function requireUrl() {
   }
 }
 
+// Best-effort POST to one of the extra destinations. Never throws — a
+// broken/slow extra destination must never fail or stall the real export.
+async function postToUrl(url, data, retries = 3) {
+  const body = JSON.stringify(data);
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        body,
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+      });
+      if (res.ok) return;
+
+      const retryable = res.status === 429 || res.status >= 500;
+      const detail = `${res.status} ${(await res.text()).slice(0, 200)}`;
+      if (!retryable || attempt === retries - 1) {
+        console.warn(`[EA] extra export -> ${url} failed: ${detail}`);
+        return;
+      }
+      console.warn(`[EA] extra export -> ${url} -> ${detail}, retrying`);
+    } catch (e) {
+      if (attempt === retries - 1) {
+        console.warn(`[EA] extra export -> ${url} failed: ${e.message}`);
+        return;
+      }
+      console.warn(`[EA] extra export -> ${url} -> ${e.message}, retrying`);
+    }
+    await sleep(500 * 2 ** attempt);
+  }
+}
+
+function postExtras(data) {
+  if (!EXTRA_EXPORT_URLS.length) return Promise.resolve();
+  return Promise.all(EXTRA_EXPORT_URLS.map((url) => postToUrl(url, data)));
+}
+
 async function post(pathname, data, retries = 3) {
   const body = JSON.stringify(data);
   // In direct mode the path is dropped from the request but kept for logs and
   // error messages, so failures still say WHICH payload broke.
   const url = DIRECT ? EXPORT_URL : `${EXPORT_URL}${pathname}`;
+
+  // Kick off the extra destination(s) in parallel with the primary send —
+  // it never throws, so it can't affect the primary export either way.
+  const extras = postExtras(data);
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
@@ -103,19 +156,24 @@ async function post(pathname, data, retries = 3) {
         signal: AbortSignal.timeout(POST_TIMEOUT_MS),
       });
 
-      if (res.ok) return;
+      if (res.ok) {
+        await extras;
+        return;
+      }
 
       // 4xx (except 429) won't fix themselves — fail immediately rather than
       // hammering the endpoint three times with the same bad request.
       const retryable = res.status === 429 || res.status >= 500;
       const detail = `${res.status} ${(await res.text()).slice(0, 200)}`;
       if (!retryable || attempt === retries - 1) {
+        await extras;
         throw new Error(`Export POST ${pathname} failed: ${detail}`);
       }
       console.warn(`[EA] ${pathname} -> ${detail}, retrying`);
     } catch (e) {
       if (e.message?.startsWith("Export POST")) throw e;
       if (attempt === retries - 1) {
+        await extras;
         throw new Error(`Export POST ${pathname} failed: ${e.message}`);
       }
       console.warn(`[EA] ${pathname} -> ${e.message}, retrying`);
