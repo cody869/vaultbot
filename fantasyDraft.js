@@ -4,6 +4,8 @@ import {
   ENTITIES,
   getPlayers,
   getRosters,
+  getWeeklyStats,
+  getGames,
   getTeams,
   getPicks,
   createEntity,
@@ -11,7 +13,13 @@ import {
   invalidate,
 } from './fantasyStore.js';
 
+import { scorePlayerRow, scoreTeamDefense } from './fantasyScoring.js';
+
 import {
+  GAME_FIELDS,
+  KEY_FIELDS,
+  readNumber,
+  readString,
   LEAGUE_DEFAULTS,
   resolveRosterLimits,
   rosterSizeOf,
@@ -19,6 +27,7 @@ import {
   playerKey,
   defenseKey,
   normalizeName,
+  resolveScoring,
 } from './fantasyConfig.js';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +48,68 @@ let poolCache = null;
 let poolCachedAt = 0;
 
 /**
+ * Season-to-date fantasy points for every player and defense, using the same
+ * scoring rules the league is played under.
+ *
+ * The draft opens in week 5, so real production already exists — ranking on it
+ * is far more useful than Madden OVR, which says nothing about usage. Falls
+ * back to OVR for anyone with no stats yet (rookies, backups, injured).
+ */
+export async function seasonPointsByKey(league) {
+  const season = league?.season_number ?? LEAGUE_DEFAULTS.season_number;
+  const [statRows, games] = await Promise.all([getWeeklyStats(), getGames()]);
+  const scoring = resolveScoring(league);
+
+  const paByTeamWeek = new Map();
+  for (const g of games) {
+    if (readNumber(g, GAME_FIELDS.season) !== season) continue;
+    const wk = readNumber(g, GAME_FIELDS.week);
+    const home = normalizeName(readString(g, GAME_FIELDS.homeTeam));
+    const away = normalizeName(readString(g, GAME_FIELDS.awayTeam));
+    if (home) paByTeamWeek.set(`${home}|${wk}`, readNumber(g, GAME_FIELDS.awayScore));
+    if (away) paByTeamWeek.set(`${away}|${wk}`, readNumber(g, GAME_FIELDS.homeScore));
+  }
+
+  const byName = new Map();      // normalized player name -> points
+  const defByTeamWeek = new Map(); // "team|week" -> rows
+
+  for (const row of statRows) {
+    if (readNumber(row, KEY_FIELDS.season) !== season) continue;
+    const name = readString(row, KEY_FIELDS.playerName);
+    const team = normalizeName(readString(row, KEY_FIELDS.teamName));
+    const wk = readNumber(row, KEY_FIELDS.week);
+
+    if (name) {
+      const k = normalizeName(name);
+      byName.set(k, (byName.get(k) || 0) + scorePlayerRow(row, scoring).points);
+    }
+    if (team) {
+      const k = `${team}|${wk}`;
+      if (!defByTeamWeek.has(k)) defByTeamWeek.set(k, []);
+      defByTeamWeek.get(k).push(row);
+    }
+  }
+
+  const out = new Map();
+  for (const [k, pts] of byName) out.set(`p:${k}`, Math.round(pts * 100) / 100);
+
+  // Defenses score per week, so sum each team's weekly totals.
+  const defTotals = new Map();
+  for (const [k, rows] of defByTeamWeek) {
+    const [team, wk] = k.split('|');
+    const pa = paByTeamWeek.get(`${team}|${wk}`);
+    if (pa === undefined) continue; // that team did not play that week
+    const pts = scoreTeamDefense(rows, pa, scoring).points;
+    defTotals.set(team, (defTotals.get(team) || 0) + pts);
+  }
+  for (const [team, pts] of defTotals) {
+    out.set(`d:${team}`, Math.round(pts * 100) / 100);
+  }
+
+  return out;
+}
+
+/**
  * Draftable assets: currently rostered QB/HB/WR/TE plus one D/ST per team.
  *
  * VERIFIED against live data (Aug 2026): M27 Player rows have an EMPTY
@@ -47,7 +118,8 @@ let poolCachedAt = 0;
  * (Base44 record ids are re-minted on every import, so they can't be used).
  * Roster supplies the team; Player supplies position, OVR and dev trait.
  */
-export async function buildDraftPool({ cycle = null, ttlMs = 10 * 60 * 1000 } = {}) {
+export async function buildDraftPool({ cycle = null, ttlMs = 10 * 60 * 1000, league = null } = {}) {
+  const leagueForPoints = league || { season_number: LEAGUE_DEFAULTS.season_number };
   if (poolCache && Date.now() - poolCachedAt < ttlMs) return poolCache;
 
   const [players, rosters] = await Promise.all([getPlayers(), getRosters()]);
@@ -112,10 +184,31 @@ export async function buildDraftPool({ cycle = null, ttlMs = 10 * 60 * 1000 } = 
     player_id: null,
   }));
 
-  const pool = [...seen.values(), ...defenses].sort((a, b) => b.ovr - a.ovr);
+  // Rank by production this season, falling back to OVR for players with no
+  // stats yet. `rank` is what the autocomplete and autopick sort on.
+  let points = new Map();
+  try {
+    points = await seasonPointsByKey(leagueForPoints);
+  } catch (err) {
+    console.error('[fantasy] season points unavailable, ranking on OVR:', err.message);
+  }
+
+  const pool = [...seen.values(), ...defenses].map((a) => {
+    const pts = points.get(a.key);
+    return {
+      ...a,
+      season_points: pts ?? null,
+      // OVR-only players sort below anyone with real production. Scaling OVR
+      // into a small range keeps their relative order without letting an
+      // unproven 90 OVR outrank someone actually producing.
+      rank: pts != null ? pts : (a.ovr || 60) / 100,
+    };
+  }).sort((a, b) => b.rank - a.rank);
+
   poolCache = pool;
   poolCachedAt = Date.now();
-  console.log(`[fantasy] draft pool: ${seen.size} players + ${defenses.length} defenses across ${teamNames.size} teams`);
+  const scored = pool.filter((a) => a.season_points != null).length;
+  console.log(`[fantasy] draft pool: ${seen.size} players + ${defenses.length} defenses across ${teamNames.size} teams (${scored} with S${leagueForPoints.season_number} stats)`);
   return pool;
 }
 
@@ -266,7 +359,7 @@ export function canDraft(roster, position, league = null) {
 // ---------------------------------------------------------------------------
 
 export async function availableAssets(league, poolOverride = null) {
-  const pool = poolOverride || await buildDraftPool({ cycle: league.cycle || null });
+  const pool = poolOverride || await buildDraftPool({ cycle: league.cycle || null, league });
   const picks = await getPicks(league.id);
   const taken = new Set(picks.map((p) => p.player_key));
   return pool.filter((a) => !taken.has(a.key));
@@ -363,7 +456,9 @@ export async function pickForTeam(league, team, available) {
     const need = min[asset.position] || 0;
     const stillNeeded = Math.max(0, need - (counts[asset.position] || 0));
     const urgency = 1 + stillNeeded * 0.05;
-    const score = (asset.ovr || 60) * (NEED_WEIGHT[asset.position] || 1) * urgency;
+    // Prefer real production; OVR only breaks ties among the unproven.
+    const base = asset.season_points != null ? asset.season_points : (asset.ovr || 60) / 100;
+    const score = base * (NEED_WEIGHT[asset.position] || 1) * urgency;
     if (score > bestScore) { bestScore = score; best = asset; }
   }
   return best;
