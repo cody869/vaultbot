@@ -6,11 +6,18 @@
 //   "9 pm est"              -> scheduled, 9:00 PM EST
 //   "11pm  est Friday"      -> scheduled, 11:00 PM EST Friday
 //   "930pm EST"             -> scheduled, 9:30 PM EST
+//   "10a est Sunday"        -> scheduled, 10:00 AM EST Sunday
 //   "FW"                    -> forfeit
 //   "Sat afternoon ish or FW" -> needs_review (conflicting signals: a
 //                                 vague time AND a forfeit mention)
 //   "Sat afternoon ish"     -> needs_review (day known, no exact time)
 //   anything unrecognized   -> needs_review
+//
+// When no day name is found in the text, `day` defaults to the day the
+// message was posted (league default timezone, since that's the timezone
+// everyone in the channel is implicitly working in) — a bare "9pm est"
+// with no day means "tonight" by the same convention the league already
+// uses when people post without a date.
 
 const DAY_PATTERNS = [
   [/\bmonday\b/i, "Monday"], [/\bmon\b/i, "Monday"],
@@ -34,14 +41,30 @@ const FW_RE = /\bFW\b/; // case-sensitive on purpose — league shorthand is alw
 const FORFEIT_WORD_RE = /\bforfeit\b/i;
 const WEEK_RE = /\bweek\s*#?\s*(\d{1,2})\b/i;
 
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+// League's implicit timezone for "today" — matches the TZ_MAP default used
+// elsewhere when a time is given with no zone.
+const LEAGUE_TZ = "America/New_York";
+
+function currentWeekdayName(postedAt) {
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: LEAGUE_TZ, weekday: "long" }).format(postedAt);
+  return WEEKDAY_NAMES.includes(weekday) ? weekday : null;
+}
+
 // "930pm", "1030pm" — 3-4 digits directly against am/pm, no separator.
 const COMPACT_TIME_RE = /\b(\d{3,4})\s*(am|pm)\b/i;
 // "9 pm", "11pm", "9:30 pm" — 1-2 digit hour, optional :mm, optional space.
 const SPACED_TIME_RE = /\b(\d{1,2})(?::([0-5]\d))?\s*(am|pm)\b/i;
+// "10a", "7p", "10:30a" — single-letter shorthand for am/pm. Requires the
+// letter directly attached to the digits (no space) — that's how the
+// shorthand is actually written, and it rules out a stray standalone "a"
+// elsewhere in the sentence (e.g. "need a bit more time") from being
+// mis-read as AM just because a number appeared earlier in the message.
+const SHORT_TIME_RE = /\b(\d{1,2})(?::([0-5]\d))?([ap])\b/i;
 
-function to24Hour(h12, ampm) {
+function to24Hour(h12, ampmToken) {
   let h = h12 % 12;
-  if (/pm/i.test(ampm)) h += 12;
+  if (/^p/i.test(ampmToken)) h += 12; // matches "pm" or the "p" shorthand
   return h;
 }
 
@@ -80,11 +103,28 @@ function extractClockTime(content) {
     }
   }
 
+  // Fallback: single-letter shorthand ("10a", "7p"). Only reached if
+  // neither full am/pm pattern above matched, so "10am" is never
+  // mis-parsed as this branch — the "\b" after the single letter also
+  // rules out accidentally matching the start of an unrelated word (e.g.
+  // "4 away" doesn't match, since "a" there isn't followed by a boundary).
+  const short = content.match(SHORT_TIME_RE);
+  if (short) {
+    const h = parseInt(short[1], 10);
+    const m = short[2] ? parseInt(short[2], 10) : 0;
+    const ampm = short[3];
+    if (h >= 1 && h <= 12) {
+      return { hour24: to24Hour(h, ampm), minute: m };
+    }
+  }
+
   return { hour24: null, minute: null };
 }
 
 /**
  * @param {string} rawContent - the Discord message content
+ * @param {Date} [postedAt] - when the message was posted; used only to
+ *   default `day` when the text doesn't name one. Defaults to now.
  * @returns {{
  *   weekNumber: number|null,
  *   status: 'scheduled'|'forfeit'|'needs_review',
@@ -97,7 +137,7 @@ function extractClockTime(content) {
  *                           // caller to scan for a winner-team emoji after it
  * }}
  */
-export function parseScheduleMessage(rawContent) {
+export function parseScheduleMessage(rawContent, postedAt = new Date()) {
   const content = rawContent || "";
 
   const weekMatch = content.match(WEEK_RE);
@@ -119,6 +159,7 @@ export function parseScheduleMessage(rawContent) {
       break;
     }
   }
+  const explicitDay = day; // keep the raw text match separate from the default below
 
   const vagueMatch = content.match(VAGUE_RE);
 
@@ -134,10 +175,18 @@ export function parseScheduleMessage(rawContent) {
     status = "needs_review";
     timeText = `Ambiguous — mentions both a time (${formatClock(hour24, minute)} ${timezone || "EST"}) and FW`;
   } else if (hour24 != null) {
+    // A time was found but no day named — default to the day this was
+    // posted (league timezone), same convention as "9pm est" meaning
+    // "tonight" when someone says it out loud with no date attached.
+    day = explicitDay || currentWeekdayName(postedAt);
     status = "scheduled";
     timezone = timezone || "EST";
     timeText = `${formatClock(hour24, minute)} ${timezone}${day ? ` ${day}` : ""}`;
-  } else if (day || vagueMatch) {
+  } else if (explicitDay || vagueMatch) {
+    // Some schedule-related signal (a day name or a vague qualifier like
+    // "afternoon") but no exact time — still default a missing day here,
+    // since "afternoon ish" with no day also implicitly means today.
+    day = explicitDay || currentWeekdayName(postedAt);
     status = "needs_review";
     const parts = [];
     if (day) parts.push(day);
