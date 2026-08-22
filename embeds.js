@@ -621,11 +621,21 @@ export function playerChoicesEmbed(name, matches) {
   );
 }
 
+// Human-readable status line for an unplayed matchup, from whatever the
+// #schedule channel watcher (scheduleWatcher.js) parsed for it.
+function upcomingStatusText(g) {
+  if (g.status === "forfeit") return g.timeText || "FW";
+  if (g.status === "scheduled") return g.timeText || "Scheduled";
+  if (g.status === "needs_review") return g.timeText ? `⚠️ ${g.timeText}` : "⚠️ Needs review";
+  return "Not yet scheduled";
+}
+
 // Scores for a week — each game as "Team SCORE vs SCORE Team" with helmets and
-// the winner bolded. No home/away or status distinction.
-export function scoresEmbed({ season, week, games }) {
+// the winner bolded. No home/away or status distinction. Unplayed matchups
+// for the same week render below as "Upcoming" with their parsed day/time.
+export function scoresEmbed({ season, week, games, upcoming = [] }) {
   const e = base(`Scores — Season ${season ?? "?"}, Week ${week ?? "?"}`, ROUTES.schedule);
-  if (!games.length) return e.setDescription("No games found for that week.");
+  if (!games.length && !upcoming.length) return e.setDescription("No games found for that week.");
 
   const lines = games.map((g) => {
     const e1 = teamEmojiByName(g.home);
@@ -636,7 +646,19 @@ export function scoresEmbed({ season, week, games }) {
     const t2 = twoWon ? `**${g.awayScore} ${g.away}**` : `${g.awayScore} ${g.away}`;
     return `${e1} ${t1}  vs  ${t2} ${e2}`;
   });
-  return e.setDescription(lines.join("\n"));
+
+  let description = lines.length ? lines.join("\n") : "_No completed games yet this week._";
+
+  if (upcoming.length) {
+    const upLines = upcoming.map((g) => {
+      const e1 = teamEmojiByName(g.home);
+      const e2 = teamEmojiByName(g.away);
+      return `${e1} ${g.home}  vs  ${g.away} ${e2} — *${upcomingStatusText(g)}*`;
+    });
+    description += `\n\n**Upcoming**\n${upLines.join("\n")}`;
+  }
+
+  return e.setDescription(description);
 }
 
 // ===== /compare, /team, /rivalry, /myteam ================================
