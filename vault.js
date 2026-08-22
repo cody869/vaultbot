@@ -225,17 +225,77 @@ export async function getStandings(seasonNumber) {
   return { season, rows };
 }
 
+// Derives a week number from a Schedule row — `week` when present, else
+// `week_index + 1` (Schedule's week_index is 0-indexed).
+function scheduleWeekNumber(s) {
+  if (s.week != null) return s.week;
+  if (s.week_index != null) return s.week_index + 1;
+  return null;
+}
+
+// Unplayed matchups for a season+week, enriched with whatever the schedule
+// watcher (scheduleWatcher.js, reading the #schedule channel) has parsed for
+// them. `playedPairs` excludes matchups that already have a completed Game
+// row this week, so a game doesn't show as both "final" and "upcoming".
+async function getUpcomingForWeek(season, wk, playedPairs) {
+  try {
+    const cycle = await getCurrentCycle();
+    const scheduleRows = await list("Schedule", { cycle }, { limit: 5000 });
+    const inCycle = scheduleRows.filter((s) => !s.cycle || s.cycle === cycle);
+    const weekRows = inCycle.filter(
+      (s) => s.season_index === season && scheduleWeekNumber(s) === wk
+    );
+
+    const notYetPlayed = weekRows.filter((s) => {
+      const pair = [s.home_team, s.away_team].filter(Boolean).sort().join("|");
+      return s.status !== 2 && !playedPairs.has(pair);
+    });
+    if (!notYetPlayed.length) return [];
+
+    // ScheduledGame rows are keyed by season/week/team_a/team_b (see
+    // scheduleWatcher.js) — one row per matchup, latest parse wins if a
+    // message was edited and re-parsed more than once.
+    const scheduledRows = await list("ScheduledGame", {}, { limit: 5000 });
+    const byMatchup = new Map();
+    for (const r of scheduledRows) {
+      if (r.season_number !== season || r.week !== wk) continue;
+      const pair = [r.team_a, r.team_b].filter(Boolean).sort().join("|");
+      const prev = byMatchup.get(pair);
+      if (!prev || (r.parsed_at || "") > (prev.parsed_at || "")) byMatchup.set(pair, r);
+    }
+
+    return notYetPlayed.map((s) => {
+      const pair = [s.home_team, s.away_team].filter(Boolean).sort().join("|");
+      const sched = byMatchup.get(pair) || null;
+      return {
+        home: s.home_team ?? "",
+        away: s.away_team ?? "",
+        status: sched?.scheduled_status ?? "unscheduled",
+        timeText:
+          sched?.scheduled_status === "forfeit"
+            ? `FW${sched.forfeit_winner_team ? ` (${sched.forfeit_winner_team})` : ""}`
+            : sched?.scheduled_time_text ?? null,
+      };
+    });
+  } catch (err) {
+    console.error("[SCORES] upcoming lookup failed:", err.message);
+    return []; // non-fatal — completed games still show without this section
+  }
+}
+
 // Scores for a given week (defaults to the latest week with games) in the
 // latest season. Home team is user1, away is user2 by the export convention.
+// Also returns `upcoming`: unplayed matchups in that same week, with
+// whatever day/time the #schedule channel watcher has parsed for them.
 export async function getScores(week, seasonNumber) {
   const games = await list("Game");
-  if (!games.length) return { season: null, week: null, games: [] };
+  if (!games.length) return { season: null, week: null, games: [], upcoming: [] };
 
   const season =
     seasonNumber ?? Math.max(...games.map((g) => g.season_number ?? 0));
 
   const inSeason = games.filter((g) => g.season_number === season);
-  if (!inSeason.length) return { season, week: null, games: [] };
+  if (!inSeason.length) return { season, week: null, games: [], upcoming: [] };
 
   const wk =
     week ?? Math.max(...inSeason.map((g) => g.week ?? 0));
@@ -254,24 +314,47 @@ export async function getScores(week, seasonNumber) {
     // Final scores first by margin, just for stable ordering.
     .sort((a, b) => b.homeScore + b.awayScore - (a.homeScore + a.awayScore));
 
-  return { season, week: wk, games: wkGames };
+  const playedPairs = new Set(
+    wkGames.map((g) => [g.home, g.away].filter(Boolean).sort().join("|"))
+  );
+  const upcoming = await getUpcomingForWeek(season, wk, playedPairs);
+
+  return { season, week: wk, games: wkGames, upcoming };
 }
 
 // Weeks available in the latest season (for the /scores week autocomplete).
+// Includes weeks that only exist in Schedule (no Game rows yet) so an
+// upcoming, not-yet-played week is still suggested.
 export async function getScoreWeeks(seasonNumber) {
   const games = await list("Game");
-  if (!games.length) return { season: null, weeks: [] };
   const season =
-    seasonNumber ?? Math.max(...games.map((g) => g.season_number ?? 0));
-  const weeks = [
-    ...new Set(
-      games
-        .filter((g) => g.season_number === season)
-        .map((g) => g.week)
-        .filter((w) => w != null)
-    ),
-  ].sort((a, b) => a - b);
-  return { season, weeks };
+    seasonNumber ??
+    (games.length ? Math.max(...games.map((g) => g.season_number ?? 0)) : undefined);
+
+  const weeksSet = new Set(
+    games
+      .filter((g) => season == null || g.season_number === season)
+      .map((g) => g.week)
+      .filter((w) => w != null)
+  );
+
+  try {
+    const cycle = await getCurrentCycle();
+    const scheduleRows = await list("Schedule", { cycle }, { limit: 5000 });
+    const inCycle = scheduleRows.filter((s) => !s.cycle || s.cycle === cycle);
+    const targetSeason =
+      season ?? (inCycle.length ? Math.max(...inCycle.map((s) => s.season_index ?? 0)) : undefined);
+    for (const s of inCycle) {
+      if (targetSeason != null && s.season_index !== targetSeason) continue;
+      const wk = scheduleWeekNumber(s);
+      if (wk != null) weeksSet.add(wk);
+    }
+  } catch (err) {
+    console.error("[SCORES] schedule week lookup failed:", err.message);
+  }
+
+  const weeks = [...weeksSet].sort((a, b) => a - b);
+  return { season: season ?? null, weeks };
 }
 
 // A signature that changes whenever game data changes — the most recent
