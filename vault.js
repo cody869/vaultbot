@@ -2,6 +2,8 @@
 // If BOT_EMAIL/BOT_PASSWORD are set, the bot logs in as that user and sends a
 // bearer token (needed once the app requires login). Otherwise it falls back to
 // anonymous reads (works only while the app is public).
+import { abbrFromName } from "./emoji.js";
+
 const APP_ID = process.env.BASE44_APP_ID;
 const SERVER = process.env.BASE44_SERVER_URL || "https://base44.app";
 
@@ -244,17 +246,24 @@ async function getUpcomingForWeek(unplayedGames, season, wk) {
     // ScheduledGame rows are keyed by season/week/team_a/team_b (see
     // scheduleWatcher.js) — one row per matchup, latest parse wins if a
     // message was edited and re-parsed more than once.
+    //
+    // Match keys are built from team ABBREVIATION, not raw name string:
+    // Game stores full names ("Houston Texans") while ScheduledGame stores
+    // nickname-only names ("Texans", from the team-emoji lookup) — comparing
+    // those two strings directly never matches even when it's the same
+    // team, so both sides go through abbrFromName() to normalize first.
     const scheduledRows = await list("ScheduledGame", {}, { limit: 5000 });
     const byMatchup = new Map();
     for (const r of scheduledRows) {
       if (r.season_number !== season || r.week !== wk) continue;
-      const pair = [r.team_a, r.team_b].filter(Boolean).sort().join("|");
+      const pair = [abbrFromName(r.team_a), abbrFromName(r.team_b)].filter(Boolean).sort().join("|");
+      if (!pair) continue;
       const prev = byMatchup.get(pair);
       if (!prev || (r.parsed_at || "") > (prev.parsed_at || "")) byMatchup.set(pair, r);
     }
 
     return unplayedGames.map((g) => {
-      const pair = [g.homeTeam, g.awayTeam].filter(Boolean).sort().join("|");
+      const pair = [abbrFromName(g.homeTeam), abbrFromName(g.awayTeam)].filter(Boolean).sort().join("|");
       const sched = byMatchup.get(pair) || null;
       return {
         home: g.homeTeam ?? "",
@@ -282,8 +291,12 @@ async function getUpcomingForWeek(unplayedGames, season, wk) {
 // front (future weeks exist with status 1 and 0-0 scores before they're
 // played), so defaulting to the single highest `week` number in the season
 // — as this used to do — could land on a not-yet-played future week
-// instead of the most recent actual results. Defaulting to the latest
-// week with a completed game fixes that.
+// instead of the most recent actual results. Defaulting to the earliest
+// not-yet-fully-played week fixes that (verified against real data: weeks
+// 1-3 were entirely status 2/3, week 4 entirely status 1 — clean weekly
+// boundaries, not a mix within one week — so "the current week" is the
+// front line of play, not the last fully-resolved week or the season's
+// max week number).
 export async function getScores(week, seasonNumber) {
   const games = await list("Game");
   if (!games.length) return { season: null, week: null, games: [], upcoming: [] };
@@ -294,9 +307,9 @@ export async function getScores(week, seasonNumber) {
   const inSeason = games.filter((g) => g.season_number === season);
   if (!inSeason.length) return { season, week: null, games: [], upcoming: [] };
 
-  const playedWeeks = inSeason.filter(isPlayedGame).map((g) => g.week ?? 0);
+  const unplayedWeeks = inSeason.filter((g) => !isPlayedGame(g)).map((g) => g.week ?? 0);
   const wk =
-    week ?? (playedWeeks.length ? Math.max(...playedWeeks) : Math.max(...inSeason.map((g) => g.week ?? 0)));
+    week ?? (unplayedWeeks.length ? Math.min(...unplayedWeeks) : Math.max(...inSeason.map((g) => g.week ?? 0)));
 
   const wkAll = inSeason.filter((g) => g.week === wk);
   const wkPlayed = wkAll.filter(isPlayedGame);
