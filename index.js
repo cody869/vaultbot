@@ -9,6 +9,7 @@ import { handleTradeVote, startTradeWatcher } from "./tradeVoting.js";
 import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { startScheduleWatcher } from "./scheduleWatcher.js";
+import { startSuspensionWatcher } from "./suspensionWatcher.js";
 import bugReportCommands from "./bugReport.js";
 import { handleExport, handleEaStatus } from "./eaCommands.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams } from "./adminCommands.js";
@@ -95,6 +96,9 @@ client.once(Events.ClientReady, async (c) => {
   startNewsWatcher(c);
   startScorebugWatcher(c);
   startScheduleWatcher(c);
+  // Posts approved 70/30 Rule suspensions to SUSPENSIONS_CHANNEL_ID once each,
+  // tagging the affected owner. No-ops if that env var is unset.
+  startSuspensionWatcher(c);
   // Keeps the EA tokens alive (the refresh chain dies after ~10 days idle)
   // and, if EA_AUTO_EXPORT=true, exports when the league actually changes.
   startEAWatcher();
