@@ -273,6 +273,11 @@ async function getUpcomingForWeek(unplayedGames, season, wk) {
           sched?.scheduled_status === "forfeit"
             ? `FW${sched.forfeit_winner_team ? ` (${sched.forfeit_winner_team})` : ""}`
             : sched?.scheduled_time_text ?? null,
+        // Raw parsed fields, for sorting the Upcoming section chronologically
+        // (see scoresEmbed in embeds.js) — not just for display text.
+        day: sched?.scheduled_day ?? null,
+        hour24: sched?.scheduled_hour_24 ?? null,
+        minute: sched?.scheduled_minute ?? null,
       };
     });
   } catch (err) {
