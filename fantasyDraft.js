@@ -57,7 +57,7 @@ let poolCachedAt = 0;
  */
 export async function seasonPointsByKey(league) {
   const season = league?.season_number ?? LEAGUE_DEFAULTS.season_number;
-  const [statRows, games] = await Promise.all([getWeeklyStats(), getGames()]);
+  const [statRows, games] = await Promise.all([getWeeklyStats(season), getGames(season)]);
   const scoring = resolveScoring(league);
 
   const paByTeamWeek = new Map();
@@ -122,7 +122,7 @@ export async function buildDraftPool({ cycle = null, ttlMs = 10 * 60 * 1000, lea
   const leagueForPoints = league || { season_number: LEAGUE_DEFAULTS.season_number };
   if (poolCache && Date.now() - poolCachedAt < ttlMs) return poolCache;
 
-  const [players, rosters] = await Promise.all([getPlayers(), getRosters()]);
+  const [players, rosters] = await Promise.all([getPlayers(cycle), getRosters(cycle)]);
 
   // madden_roster_id -> team, with a normalized-name fallback.
   // VERIFIED: a meaningful share of Roster rows carry madden_roster_id: null
