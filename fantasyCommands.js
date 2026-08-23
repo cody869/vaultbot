@@ -855,12 +855,18 @@ async function cmdScoreWeek(interaction) {
 // ---------------------------------------------------------------------------
 
 /**
- * Cancels one pick with a tombstone row instead of mutating it.
- * FantasyPick is create-only for this Base44 app — PUT/PATCH/POST all come
- * back 403 "Permission denied for update operation", and DELETE 404s — so an
- * existing pick can never be changed or removed, only countered. getPicks()
- * nets a tombstone (undo_of = original id) against the pick it cancels, so
- * both vanish from the board and the "is this player taken" check.
+ * Cancels one pick using ONLY fields that were already part of FantasyPick's
+ * schema — a first attempt used an extra `undo_of` field to mark a
+ * cancelling row, and that field silently didn't persist (confirmed live:
+ * /fantasy board showed every "undone" pick twice, still stuck as taken).
+ * FantasyPick is create-only for this Base44 app (update -> 403, delete ->
+ * 404), and apparently a brand-new field on create doesn't stick either —
+ * only fields that existed in the entity from day one.
+ *
+ * So this creates a second row at the SAME pick_number with player_key:
+ * null, which can never match a real asset, timestamped later than the
+ * original. getPicks() keeps only the most recent row per pick_number, so
+ * this one supersedes the original and the pick_number reads as "open."
  */
 async function undoPick(league, pick) {
   await createEntity(ENTITIES.pick, {
@@ -868,13 +874,12 @@ async function undoPick(league, pick) {
     pick_number: pick.pick_number,
     round: pick.round,
     fantasy_team_id: pick.fantasy_team_id,
-    player_key: pick.player_key,
-    player_name: pick.player_name,
-    player_position: pick.player_position,
-    nfl_team: pick.nfl_team,
+    player_key: null,
+    player_name: null,
+    player_position: null,
+    nfl_team: null,
     auto: false,
     picked_at: new Date().toISOString(),
-    undo_of: pick.id,
   });
 }
 

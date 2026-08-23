@@ -260,16 +260,34 @@ export async function getPicks(leagueId) {
   const rows = await listEntity(ENTITIES.pick);
   const forLeague = rows.filter((p) => p.league_id === leagueId);
 
-  // FantasyPick is create-only for this Base44 app — both update (403
-  // Permission denied) and delete (404) are blocked, confirmed by /fantasy
-  // undo-pick hitting each in turn. A reversed pick can't be mutated or
-  // removed, so it's canceled out with a second row carrying undo_of set to
-  // the original's id. Filter out both the tombstone and the pick it
-  // cancels here, once, so the board, doctor, and "is this player taken"
-  // checks never have to know any of this happened.
-  const undoneIds = new Set(forLeague.filter((p) => p.undo_of).map((p) => p.undo_of));
-  return forLeague
-    .filter((p) => !p.undo_of && !undoneIds.has(p.id))
+  // FantasyPick is create-only for this Base44 app — update comes back 403
+  // Permission denied and delete comes back 404, confirmed by /fantasy
+  // undo-pick hitting each in turn. A follow-up attempt to cancel a pick
+  // out with a second row carrying an extra `undo_of` field *looked* like
+  // it worked (the create succeeded, no error) but that field silently
+  // didn't persist -- confirmed live: /fantasy board showed every reversed
+  // pick twice, and the player stayed stuck as "taken." A field that was
+  // never part of this entity's original schema apparently doesn't stick
+  // on create either, not just on update.
+  //
+  // So a pick can only ever be reversed using fields that already existed
+  // on day one. A reversal is a second row at the SAME pick_number with
+  // player_key: null (which can never match a real asset) and a later
+  // picked_at than what it's replacing. For each pick_number, only the
+  // most recent row is authoritative -- an original pick, an undo, and a
+  // subsequent re-pick can all coexist as rows, and whichever has the
+  // latest picked_at wins. A pick_number whose latest row has no
+  // player_key is simply "open again," not shown anywhere.
+  const latestByPickNumber = new Map();
+  for (const p of forLeague) {
+    const current = latestByPickNumber.get(p.pick_number);
+    if (!current || new Date(p.picked_at || 0) > new Date(current.picked_at || 0)) {
+      latestByPickNumber.set(p.pick_number, p);
+    }
+  }
+
+  return [...latestByPickNumber.values()]
+    .filter((p) => p.player_key)
     .sort((a, b) => (a.pick_number || 0) - (b.pick_number || 0));
 }
 
