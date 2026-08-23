@@ -25,19 +25,23 @@
 //
 // Environment:
 //   SCHEDULE_CHANNEL_ID   channel to watch (default: XCFL's #schedule)
+//   FW_STAFF_CHANNEL_ID   channel to prompt staff to confirm a detected
+//                         forced win (default below)
 //
 // Requires the Message Content privileged intent to be enabled for this bot
 // in the Discord Developer Portal (Bot -> Privileged Gateway Intents ->
 // MESSAGE CONTENT INTENT), plus GuildMessages/MessageContent/
 // GuildMessageReactions added to the Client's intents in index.js.
 
-import { Events } from "discord.js";
+import { Events, ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
 import { list, getCurrentCycle, createEntity, updateEntity } from "./vault.js";
 import { abbrFromName } from "./emoji.js";
 import { TEAMS } from "./teamLogos.js";
 import { parseScheduleMessage } from "./scheduleParser.js";
+import { resolveLiveGameByNicknames } from "./adminCommands.js";
 
 const CHANNEL_ID = process.env.SCHEDULE_CHANNEL_ID || "468580053865725994";
+const FW_STAFF_CHANNEL_ID = process.env.FW_STAFF_CHANNEL_ID || "951848098588663848";
 
 const SUCCESS_EMOJI = "✅";
 const REVIEW_EMOJI = "❓";
@@ -114,6 +118,76 @@ async function matchGame({ abbrA, abbrB, weekNumber }) {
     weekNumber: row ? row.week : null,
     note: row ? null : "Could not find an unplayed matchup for these team(s) this season — try including \"Week #\".",
   };
+}
+
+/**
+ * When a forfeit is detected, cross-reference it against live EA data and
+ * prompt staff in FW_STAFF_CHANNEL_ID to confirm it with one click — using
+ * the same force-win logic /admin force-home-win / force-away-win runs,
+ * via adminCommands.js's shared applyForceWin() (invoked through the
+ * fw:home/fw:away button handler, not called directly from here).
+ *
+ * teamBName may be unknown (a forfeit post can show only the winner's
+ * emoji, and the Vault Game match can also fail to fill it in) — in that
+ * case this still posts a notice, just without actionable buttons, since
+ * resolveLiveGameByNicknames needs both team names to find one game.
+ */
+async function notifyStaffOfForfeit(client, { teamAName, teamBName, weekNumber, messageUrl }) {
+  if (!FW_STAFF_CHANNEL_ID) return;
+  const channel = await client.channels.fetch(FW_STAFF_CHANNEL_ID).catch(() => null);
+  if (!channel) {
+    console.error(`[SCHEDULE] FW staff channel ${FW_STAFF_CHANNEL_ID} not found`);
+    return;
+  }
+
+  const weekLabel = weekNumber != null ? `week ${weekNumber}` : "this week";
+  const matchupLabel = teamBName ? `${teamAName} over ${teamBName}` : `${teamAName} (forfeit)`;
+  const sourceLine = messageUrl ? `\nSource: ${messageUrl}` : "";
+
+  if (!teamBName) {
+    await channel.send({
+      content: `⚠️ Detected a forced win in #schedule — **${teamAName}** forfeit win, ${weekLabel}, but couldn't identify the opponent from the post. Check manually with \`/admin force-home-win\` or \`/admin force-away-win\`.${sourceLine}`,
+    });
+    return;
+  }
+
+  const resolved = await resolveLiveGameByNicknames(teamAName, teamBName);
+  if (!resolved.ok) {
+    await channel.send({
+      content: `⚠️ Detected a forced win in #schedule (**${matchupLabel}**, ${weekLabel}) but couldn't confidently match it to a live EA game (\`${resolved.reason}\`) — check manually with \`/admin force-home-win\` or \`/admin force-away-win\`.${sourceLine}`,
+    });
+    return;
+  }
+
+  const { game } = resolved;
+  const [awayNick, homeNick] = (game.seasonGameInfo.matchup || "").split(" @ ").map((s) => s.trim());
+  const winnerIsHome = homeNick && teamAName.toLowerCase().includes(homeNick.toLowerCase());
+
+  const content = [
+    `🏈 **Forced win detected** — ${matchupLabel} (${game.seasonGameInfo.displayedWeek || weekLabel})`,
+    `Winner: **${teamAName}**${homeNick ? (winnerIsHome ? " (home)" : " (away)") : ""}`,
+    "Confirm below, or run `/admin force-home-win` / `/admin force-away-win` manually.",
+  ].join("\n") + sourceLine;
+
+  await channel.send({
+    content,
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`fw:home:${game.seasonGameKey}`)
+          .setLabel(`Confirm Home Win${homeNick ? ` (${homeNick})` : ""}`)
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`fw:away:${game.seasonGameKey}`)
+          .setLabel(`Confirm Away Win${awayNick ? ` (${awayNick})` : ""}`)
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(`fw:dismiss:${game.seasonGameKey}`)
+          .setLabel("Dismiss")
+          .setStyle(ButtonStyle.Secondary)
+      ),
+    ],
+  });
 }
 
 async function findExistingRow(messageId) {
@@ -214,6 +288,27 @@ async function handleScheduleMessage(message) {
     ? buildGameKey(season, weekNumber, teamAName, teamBName)
     : `unmatched-${message.id}`;
 
+  // Looked up early (not just at save time) so the forfeit-staff-prompt
+  // below can check whether this message already triggered one — a
+  // MessageUpdate re-trigger on the same post must not re-notify staff.
+  const existing = await findExistingRow(message.id);
+
+  let staffNotified = existing?.fw_staff_notified === true;
+  if (status === "forfeit" && teamAName && !staffNotified) {
+    try {
+      await notifyStaffOfForfeit(message.client, {
+        teamAName,
+        teamBName,
+        weekNumber,
+        messageUrl: message.url,
+      });
+      staffNotified = true;
+    } catch (err) {
+      console.error(`[SCHEDULE] FW staff notify failed for message ${message.id}: ${err.message}`);
+      // Leave staffNotified false — an edit re-trigger will retry.
+    }
+  }
+
   const payload = {
     game_key: gameKey,
     cycle,
@@ -230,6 +325,7 @@ async function handleScheduleMessage(message) {
     scheduled_minute: parsed.minute,
     scheduled_timezone: parsed.timezone,
     forfeit_winner_team: forfeitWinner,
+    fw_staff_notified: staffNotified,
     raw_message: content,
     discord_channel_id: message.channelId,
     discord_message_id: message.id,
@@ -240,7 +336,6 @@ async function handleScheduleMessage(message) {
   };
 
   try {
-    const existing = await findExistingRow(message.id);
     if (existing) {
       await updateEntity("ScheduledGame", existing.id, payload);
     } else {

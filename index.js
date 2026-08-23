@@ -10,7 +10,7 @@ import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { startScheduleWatcher } from "./scheduleWatcher.js";
 import { startSuspensionWatcher } from "./suspensionWatcher.js";
-import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams } from "./adminCommands.js";
+import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams, handleForceWinButton } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
 import { handleExportComponent } from "./eaCommands.js";
 import {
@@ -372,6 +372,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     interaction.customId.startsWith("export:")
   ) {
     await handleExportComponent(interaction);
+    return;
+  }
+
+  // Staff confirm/dismiss buttons for a schedule-watcher-detected forced win.
+  if (interaction.isButton() && interaction.customId.startsWith("fw:")) {
+    await handleForceWinButton(interaction);
     return;
   }
 

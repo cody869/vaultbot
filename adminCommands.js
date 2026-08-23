@@ -213,6 +213,103 @@ async function resolveTarget(interaction) {
   return { client, leagueId, blazeUserId, label };
 }
 
+/**
+ * Given two team nicknames (e.g. "Bengals", "Ravens" — the same format
+ * seasonGameInfo.matchup uses), find the single unplayed, forceable live EA
+ * game between them. Used by scheduleWatcher.js to cross-reference a
+ * forfeit detected in #schedule against a real seasonGameKey, without a
+ * human typing into the /admin force-* autocomplete.
+ */
+export async function resolveLiveGameByNicknames(nickA, nickB) {
+  const a = String(nickA || "").toLowerCase().trim();
+  const b = String(nickB || "").toLowerCase().trim();
+  if (!a || !b) return { ok: false, reason: "missing_team" };
+
+  try {
+    const { leagueInfo } = await getCachedLeagueInfo();
+    const games = leagueInfo.gameScheduleHubInfo.leagueSchedule;
+    const matches = games.filter((g) => {
+      const m = (g.seasonGameInfo.matchup || "").toLowerCase();
+      return m.includes(a) && m.includes(b);
+    });
+
+    if (matches.length !== 1) {
+      return { ok: false, reason: matches.length === 0 ? "no_match" : "ambiguous" };
+    }
+    const game = matches[0];
+    if (game.seasonGameInfo.isGamePlayed) return { ok: false, reason: "already_played", game };
+    if (!game.canForceWin) return { ok: false, reason: "cannot_force", game };
+    return { ok: true, game };
+  } catch (err) {
+    console.error("[ADMIN] resolveLiveGameByNicknames failed:", err.message);
+    return { ok: false, reason: "lookup_failed" };
+  }
+}
+
+/**
+ * Shared force-win execution, used by both the /admin slash command and the
+ * staff-channel confirm buttons (handleForceWinButton below) — one place
+ * that actually talks to EA, instead of duplicating the Blaze calls.
+ */
+export async function applyForceWin(sub, seasonGameKey) {
+  try {
+    const { client, leagueId } = await getConnectedClient();
+    const { leagueInfo } = await getCachedLeagueInfo();
+    const game = leagueInfo.gameScheduleHubInfo.leagueSchedule.find((g) => g.seasonGameKey === seasonGameKey);
+    const label = game ? game.seasonGameInfo.matchup : `game ${seasonGameKey}`;
+    if (game && !game.canForceWin && sub !== "force-no-win") {
+      return { ok: false, label, reason: `Force-win isn't available for **${label}** right now.` };
+    }
+
+    if (sub === "force-home-win") await client.forceHomeWin(leagueId, seasonGameKey);
+    if (sub === "force-away-win") await client.forceAwayWin(leagueId, seasonGameKey);
+    if (sub === "force-no-win") await client.forceNoWin(leagueId, seasonGameKey);
+
+    return { ok: true, label };
+  } catch (err) {
+    return { ok: false, reason: err.message || "That didn't work." };
+  }
+}
+
+/**
+ * Staff-channel confirm buttons posted by scheduleWatcher.js when it detects
+ * a forfeit it could confidently match to a live EA game. customId scheme:
+ * "fw:home:<seasonGameKey>" / "fw:away:<seasonGameKey>" / "fw:dismiss:<seasonGameKey>".
+ * Re-checks isAuthorized() itself — a button click doesn't inherit whatever
+ * authorization the original poster had.
+ */
+export async function handleForceWinButton(interaction) {
+  const [, action, keyStr] = interaction.customId.split(":");
+  const seasonGameKey = Number(keyStr);
+
+  if (!isAuthorized(interaction)) {
+    await interaction.reply({ content: "That control is limited to the league's export admins.", ephemeral: true });
+    return;
+  }
+
+  const original = interaction.message.content || "";
+
+  if (action === "dismiss") {
+    await interaction.update({
+      content: `${original}\n\n_Dismissed by <@${interaction.user.id}> — no action taken._`,
+      components: [],
+    });
+    return;
+  }
+
+  await interaction.deferUpdate();
+  const sub = action === "home" ? "force-home-win" : "force-away-win";
+  const result = await applyForceWin(sub, seasonGameKey);
+  const resultLine = result.ok
+    ? `✅ Confirmed by <@${interaction.user.id}> — **${result.label}**: ${action} win applied.`
+    : `❌ <@${interaction.user.id}> tried to confirm — failed: ${result.reason}`;
+
+  await interaction.editReply({
+    content: `${original}\n\n${resultLine}`,
+    components: [],
+  });
+}
+
 export async function handleAdminCommand(interaction) {
   if (!isAuthorized(interaction)) return denied(interaction);
 
@@ -255,23 +352,9 @@ export async function handleAdminCommand(interaction) {
       case "force-home-win":
       case "force-away-win":
       case "force-no-win": {
-        const { client, leagueId } = await getConnectedClient();
         const seasonGameKey = interaction.options.getInteger("game");
-
-        // Re-check against fresh-ish cached data — the picker could be
-        // showing a slightly stale list if EA's state changed mid-typing.
-        const { leagueInfo } = await getCachedLeagueInfo();
-        const game = leagueInfo.gameScheduleHubInfo.leagueSchedule.find((g) => g.seasonGameKey === seasonGameKey);
-        const label = game ? game.seasonGameInfo.matchup : `game ${seasonGameKey}`;
-        if (game && !game.canForceWin && sub !== "force-no-win") {
-          await interaction.editReply(`Force-win isn't available for **${label}** right now.`);
-          break;
-        }
-
-        if (sub === "force-home-win") await client.forceHomeWin(leagueId, seasonGameKey);
-        if (sub === "force-away-win") await client.forceAwayWin(leagueId, seasonGameKey);
-        if (sub === "force-no-win") await client.forceNoWin(leagueId, seasonGameKey);
-        await interaction.editReply(`Updated result for **${label}**.`);
+        const result = await applyForceWin(sub, seasonGameKey);
+        await interaction.editReply(result.ok ? `Updated result for **${result.label}**.` : result.reason);
         break;
       }
       case "export": {
