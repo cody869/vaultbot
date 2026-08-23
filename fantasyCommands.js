@@ -33,6 +33,8 @@ import {
   rosterCounts,
   eligiblePositions,
   processExpiredClocks,
+  setAutodraft,
+  isAutodraft,
 } from './fantasyDraft.js';
 
 import {
@@ -1023,12 +1025,14 @@ async function cmdAutodraft(interaction) {
     return interaction.editReply({ content: `${user.tag} isn't in this league.`, ...PLAIN });
   }
 
-  await updateEntity(ENTITIES.team, team.id, { autodraft: enabled });
-  invalidate(ENTITIES.team);
+  // In-memory, not a persisted FantasyTeam field -- see setAutodraft()'s
+  // comment in fantasyDraft.js for why. Resets on a restart/redeploy; just
+  // re-run this command if that happens mid-draft.
+  setAutodraft(team.id, enabled);
 
   return interaction.editReply({
     content: enabled
-      ? `Autodraft **ON** for **${teamLabel(team)}** — the bot picks for them (queue first, then best available) as soon as it's their turn, without waiting for the clock.`
+      ? `Autodraft **ON** for **${teamLabel(team)}** — the bot picks for them (queue first, then best available) as soon as it's their turn, without waiting for the clock. (Resets if the bot restarts — just re-run this if picks stop firing.)`
       : `Autodraft **OFF** for **${teamLabel(team)}** — back to picking manually (or via clock expiry).`,
     ...PLAIN,
   });
@@ -1132,7 +1136,7 @@ export function startDraftWatcher(client, { intervalMs = 60 * 1000 } = {}) {
         if (!expired.picks.length) break;
 
         for (const p of expired.picks) {
-          const why = p.team.autodraft ? 'autodraft' : 'clock expired';
+          const why = isAutodraft(p.team.id) ? 'autodraft' : 'clock expired';
           await channel.send({
             content: `**${teamLabel(p.team)}** auto-select **${p.asset.name}** — ${p.asset.position}, ${p.asset.nfl_team} _(${why})_`,
             ...PLAIN,

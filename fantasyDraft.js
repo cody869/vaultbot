@@ -485,6 +485,28 @@ export async function makePick(league, team, asset, { auto = false, expectedPick
 // ---------------------------------------------------------------------------
 
 /**
+ * In-memory autodraft flags, keyed by FantasyTeam id. Deliberately NOT a
+ * persisted `autodraft` field on FantasyTeam: tonight already confirmed
+ * three separate times (FantasyPick's undo_of, ScorebugPost's status/
+ * first_seen_at, and its discord_message_id update path) that this Base44
+ * app silently drops brand-new fields/writes in ways that look like they
+ * succeeded. Rather than risk a fourth, this trades "survives a restart"
+ * for "guaranteed to actually work" -- a commissioner just re-toggles it
+ * after a redeploy, which is rare mid-draft compared to how often this
+ * needs to work correctly in the moment.
+ */
+const autodraftTeams = new Set();
+
+export function setAutodraft(teamId, enabled) {
+  if (enabled) autodraftTeams.add(teamId);
+  else autodraftTeams.delete(teamId);
+}
+
+export function isAutodraft(teamId) {
+  return autodraftTeams.has(teamId);
+}
+
+/**
  * Best available for a team: their queue first, then need-weighted OVR.
  * Positional value multipliers keep it from taking a 4th TE at 88 OVR over a
  * WR2 at 85 when the WR slots are still thin.
@@ -540,7 +562,7 @@ export async function processExpiredClocks(league) {
 
   const deadline = league.current_pick_deadline ? new Date(league.current_pick_deadline) : null;
   const deadlineExpired = deadline && Date.now() >= deadline.getTime();
-  if (!deadlineExpired && !onClock.team.autodraft) return { picks: [] };
+  if (!deadlineExpired && !isAutodraft(onClock.team.id)) return { picks: [] };
 
   const available = await availableAssets(league);
   const asset = await pickForTeam(league, onClock.team, available);
