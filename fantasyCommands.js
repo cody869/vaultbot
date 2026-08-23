@@ -24,6 +24,7 @@ import {
 
 import {
   buildDraftPool,
+  invalidatePool,
   availableAssets,
   teamOnTheClock,
   makePick,
@@ -167,6 +168,7 @@ export async function handleFantasyCommand(interaction) {
     case 'score-week': return cmdScoreWeek(interaction);
     case 'doctor': return cmdDoctor(interaction);
     case 'undo-pick': return cmdUndoPick(interaction);
+    case 'restart-draft': return cmdRestartDraft(interaction);
     case 'autodraft': return cmdAutodraft(interaction);
     default:
       return interaction.editReply({ content: `Unknown subcommand: ${sub}`, ...PLAIN });
@@ -906,6 +908,66 @@ async function cmdUndoPick(interaction) {
       '# Pick undone',
       `Removed **${pick.player_name}** (${pick.player_position}, ${pick.nfl_team}) from **${teamLabel(team)}**.`,
       `Pick #${lastPickNumber} is open again — resume with \`/fantasy resume\` when ${team.discord_user_id ? `<@${team.discord_user_id}>` : 'they'} are ready to pick.`,
+    ].join('\n'),
+    ...PLAIN,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// restart-draft — wipe every pick and every roster, back to pre-draft
+// ---------------------------------------------------------------------------
+
+/**
+ * Full reset: clears every team's roster/queue, marks every pick for this
+ * league undone, and puts the league back in 'pending' status exactly as it
+ * was before /fantasy start — so the commissioner re-runs /fantasy start to
+ * reshuffle the order and begin a completely fresh draft.
+ */
+async function cmdRestartDraft(interaction) {
+  if (!isCommissioner(interaction)) {
+    return interaction.editReply({ content: 'Commissioner only.', ...PLAIN });
+  }
+  const league = await getLeague();
+  if (!league) return interaction.editReply({ content: 'No league found.', ...PLAIN });
+  if (league.draft_status === 'pending') {
+    return interaction.editReply({ content: "The draft hasn't started yet — nothing to restart.", ...PLAIN });
+  }
+  if (league.draft_status === 'in_progress' && !league.draft_paused) {
+    return interaction.editReply({
+      content: 'Pause the draft first with `/fantasy pause` — restarting while the clock is live could race a pick.',
+      ...PLAIN,
+    });
+  }
+
+  const teams = await getTeams(league.id);
+  for (const team of teams) {
+    await updateEntity(ENTITIES.team, team.id, { roster: [], queue: [] });
+  }
+
+  const picks = await getPicks(league.id);
+  for (const pick of picks) {
+    await updateEntity(ENTITIES.pick, pick.id, { undone: true });
+  }
+
+  await updateEntity(ENTITIES.league, league.id, {
+    draft_status: 'pending',
+    draft_paused: false,
+    paused_at: null,
+    current_pick_number: 1,
+    current_pick_deadline: null,
+    draft_order: [],
+  });
+
+  invalidate(ENTITIES.team);
+  invalidate(ENTITIES.pick);
+  invalidate(ENTITIES.league);
+  invalidatePool();
+
+  return interaction.editReply({
+    content: [
+      '# Draft restarted',
+      `Cleared **${picks.length}** pick${picks.length === 1 ? '' : 's'} and every team's roster and queue.`,
+      'Run `/fantasy start` when everyone is ready to reshuffle the order and begin a fresh draft.',
     ].join('\n'),
     ...PLAIN,
   });

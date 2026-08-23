@@ -182,6 +182,10 @@ export const fantasyCommand = [
       .setDescription('Reverse the most recent pick (commissioner only, draft must be paused)'))
 
     .addSubcommand((s) => s
+      .setName('restart-draft')
+      .setDescription('Wipe every pick and roster, back to pre-draft (commissioner only)'))
+
+    .addSubcommand((s) => s
       .setName('autodraft')
       .setDescription("Turn a team's autodraft on or off (commissioner only)")
       .addUserOption((o) => o
