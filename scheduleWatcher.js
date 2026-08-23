@@ -52,14 +52,17 @@ const EMOJI_TAG_RE = /<a?:([a-zA-Z0-9_]+):(\d+)>/g;
 // Pulls custom-emoji shortcodes out of the message and keeps only the ones
 // that match a known team abbreviation (server emoji are named "lar", "gb",
 // etc. — same convention emoji.js's TEAM_FALLBACK keys already assume).
-function extractTeamAbbrs(content, fromIndex = 0) {
+// Returns {abbr, index} pairs (not just abbrs) so a forfeit post can be
+// split around the "FW" marker: "Week 4 <NO> vs <ATL> FW <ATL>" names the
+// WINNER as whichever team's emoji appears after "FW", which is not
+// necessarily the first team emoji in the message.
+function extractTeamEmoji(content) {
   const found = [];
   EMOJI_TAG_RE.lastIndex = 0;
   let m;
   while ((m = EMOJI_TAG_RE.exec(content))) {
-    if (m.index < fromIndex) continue;
     const abbr = m[1].toUpperCase();
-    if (TEAM_ABBRS.has(abbr)) found.push(abbr);
+    if (TEAM_ABBRS.has(abbr)) found.push({ abbr, index: m.index });
   }
   return found;
 }
@@ -218,7 +221,8 @@ async function handleScheduleMessage(message) {
   // message doesn't change when it was originally sent) — that's the right
   // anchor for "today" here, not whenever the edit/re-parse happens to run.
   const parsed = parseScheduleMessage(content, message.createdAt);
-  const abbrs = extractTeamAbbrs(content);
+  const emoji = extractTeamEmoji(content);
+  const abbrs = emoji.map((e) => e.abbr);
 
   // scheduled_status reflects TEXT-parse confidence only, decided here.
   // Team-count requirements differ by shape: a real matchup needs both
@@ -228,9 +232,24 @@ async function handleScheduleMessage(message) {
   let abbrA = null, abbrB = null;
 
   if (status === "forfeit") {
-    if (abbrs.length >= 1) {
-      abbrA = abbrs[0];
-      if (abbrs.length >= 2) abbrB = abbrs[1];
+    // "FW <emoji>" names the WINNER specifically — it is not always the
+    // first team emoji in the message (e.g. "Week 4 <NO> vs <ATL> FW
+    // <ATL>" — ATL is the winner despite NO appearing first). Whichever
+    // team emoji appears at/after the FW marker is the winner; the emoji
+    // before it (the "X vs Y" pairing) give the full matchup.
+    const before = parsed.fwIndex != null ? emoji.filter((e) => e.index < parsed.fwIndex).map((e) => e.abbr) : [];
+    const after = parsed.fwIndex != null ? emoji.filter((e) => e.index >= parsed.fwIndex).map((e) => e.abbr) : abbrs;
+    const matchup = [...new Set(before.length ? before : abbrs)];
+
+    const winner = after[0] || null;
+    if (winner) {
+      abbrA = winner;
+      abbrB = matchup.find((a) => a !== winner) || null;
+    } else if (matchup.length >= 1) {
+      // No emoji at all after the FW marker (just the bare word) — fall
+      // back to the old assumption that the first named team is the winner.
+      abbrA = matchup[0];
+      abbrB = matchup[1] || null;
     } else {
       status = "needs_review";
       timeText = [timeText, "Could not identify the forfeit-winning team from message emoji."]
