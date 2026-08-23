@@ -18,7 +18,6 @@ import {
   getGames,
   createEntity,
   updateEntity,
-  deleteEntity,
   invalidate,
 } from './fantasyStore.js';
 
@@ -841,11 +840,35 @@ async function cmdScoreWeek(interaction) {
 // ---------------------------------------------------------------------------
 
 /**
- * Reverses the most recent pick: deletes its Pick record, drops it from the
- * team's roster, and rewinds current_pick_number so the same team is back on
- * the clock. Only ever touches the last pick — undoing an earlier one would
- * require renumbering every pick made after it, which isn't worth the risk
- * for what is meant to be a quick "that was a mistake" fix.
+ * Cancels one pick with a tombstone row instead of mutating it.
+ * FantasyPick is create-only for this Base44 app — PUT/PATCH/POST all come
+ * back 403 "Permission denied for update operation", and DELETE 404s — so an
+ * existing pick can never be changed or removed, only countered. getPicks()
+ * nets a tombstone (undo_of = original id) against the pick it cancels, so
+ * both vanish from the board and the "is this player taken" check.
+ */
+async function undoPick(league, pick) {
+  await createEntity(ENTITIES.pick, {
+    league_id: league.id,
+    pick_number: pick.pick_number,
+    round: pick.round,
+    fantasy_team_id: pick.fantasy_team_id,
+    player_key: pick.player_key,
+    player_name: pick.player_name,
+    player_position: pick.player_position,
+    nfl_team: pick.nfl_team,
+    auto: false,
+    picked_at: new Date().toISOString(),
+    undo_of: pick.id,
+  });
+}
+
+/**
+ * Reverses the most recent pick: tombstones its Pick record, drops it from
+ * the team's roster, and rewinds current_pick_number so the same team is
+ * back on the clock. Only ever touches the last pick — undoing an earlier
+ * one would require renumbering every pick made after it, which isn't worth
+ * the risk for what is meant to be a quick "that was a mistake" fix.
  */
 async function cmdUndoPick(interaction) {
   if (!isCommissioner(interaction)) {
@@ -882,19 +905,7 @@ async function cmdUndoPick(interaction) {
 
   const roster = (team.roster || []).filter((r) => r.key !== pick.player_key);
   await updateEntity(ENTITIES.team, team.id, { roster });
-  // Mark it undone rather than relying on a hard delete: deleteEntity's DELETE
-  // verb had never been exercised against this Base44 app before and 404'd on
-  // its first real use, while updateEntity's verb-detection is proven
-  // everywhere else in this bot. getPicks() filters out undone: true rows, so
-  // this alone makes the player available again and drops it off the board.
-  await updateEntity(ENTITIES.pick, pick.id, { undone: true });
-  try {
-    await deleteEntity(ENTITIES.pick, pick.id);
-  } catch (err) {
-    // Best-effort cleanup only — the undone flag above already makes this
-    // pick invisible everywhere, so a failed hard delete changes nothing.
-    console.warn('[fantasy] undo-pick: hard delete failed (harmless):', err.message);
-  }
+  await undoPick(league, pick);
   await updateEntity(ENTITIES.league, league.id, {
     current_pick_number: lastPickNumber,
     draft_status: 'in_progress',
@@ -946,7 +957,7 @@ async function cmdRestartDraft(interaction) {
 
   const picks = await getPicks(league.id);
   for (const pick of picks) {
-    await updateEntity(ENTITIES.pick, pick.id, { undone: true });
+    await undoPick(league, pick);
   }
 
   await updateEntity(ENTITIES.league, league.id, {

@@ -258,12 +258,18 @@ export async function getTeams(leagueId) {
 
 export async function getPicks(leagueId) {
   const rows = await listEntity(ENTITIES.pick);
-  return rows
-    // undone: true marks a pick reversed by /fantasy undo-pick. Filtered here
-    // rather than at each call site so a reversed pick is invisible to the
-    // board, doctor, and "is this player taken" checks with no chance of one
-    // of those spots forgetting to exclude it.
-    .filter((p) => p.league_id === leagueId && !p.undone)
+  const forLeague = rows.filter((p) => p.league_id === leagueId);
+
+  // FantasyPick is create-only for this Base44 app — both update (403
+  // Permission denied) and delete (404) are blocked, confirmed by /fantasy
+  // undo-pick hitting each in turn. A reversed pick can't be mutated or
+  // removed, so it's canceled out with a second row carrying undo_of set to
+  // the original's id. Filter out both the tombstone and the pick it
+  // cancels here, once, so the board, doctor, and "is this player taken"
+  // checks never have to know any of this happened.
+  const undoneIds = new Set(forLeague.filter((p) => p.undo_of).map((p) => p.undo_of));
+  return forLeague
+    .filter((p) => !p.undo_of && !undoneIds.has(p.id))
     .sort((a, b) => (a.pick_number || 0) - (b.pick_number || 0));
 }
 
