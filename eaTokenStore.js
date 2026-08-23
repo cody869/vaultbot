@@ -19,6 +19,23 @@ import { refreshToken, refreshBlazeSession, retrieveBlazeSession, createEAClient
 const STORE_PATH = process.env.EA_STORE_PATH || "/data/ea.json";
 const LOCK_PATH = `${STORE_PATH}.lock`;
 const LOCK_STALE_MS = 2 * 60 * 1000;
+const CONNECT_TIMEOUT_MS = Number(process.env.EA_CONNECT_TIMEOUT_MS || 30_000);
+
+// Rejects instead of hanging forever if refreshToken/refreshBlazeSession/
+// retrieveBlazeSession/createEAClient stalls on a slow or dead EA endpoint.
+// Unlike the export POSTs in eaExport.js (which already use
+// AbortSignal.timeout), nothing here had any timeout at all -- confirmed
+// live as "Connecting to EA…" sitting stuck indefinitely with no error.
+// Because every getConnectedClient() call is chained through the
+// `serialize()` queue below, an unbounded hang here doesn't just freeze one
+// export -- it wedges every future EA operation (other exports, the
+// keep-alive watcher, /admin's game pickers) behind it until a restart.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)),
+  ]);
+}
 
 /*
  * In-process serialization. Every refresh rotates BOTH EA tokens, so two
@@ -123,11 +140,18 @@ async function getConnectedClient() {
     try {
       // Re-read inside the lock — another process may have rotated already.
       const fresh = (await readStore()) || stored;
-      const token = await refreshToken(fresh.token);
-
-      let session = fresh.session
-        ? await refreshBlazeSession(token, fresh.session)
-        : await retrieveBlazeSession(token);
+      const { token, session, client } = await withTimeout(
+        (async () => {
+          const token = await refreshToken(fresh.token);
+          const session = fresh.session
+            ? await refreshBlazeSession(token, fresh.session)
+            : await retrieveBlazeSession(token);
+          const client = await createEAClient(token, session);
+          return { token, session, client };
+        })(),
+        CONNECT_TIMEOUT_MS,
+        "EA connect"
+      );
 
       const rotated =
         token.accessToken !== fresh.token.accessToken ||
@@ -136,8 +160,6 @@ async function getConnectedClient() {
       if (rotated || session.sessionKey !== fresh.session?.sessionKey) {
         await writeStore({ ...fresh, token, session });
       }
-
-      const client = await createEAClient(token, session);
       return { client, leagueId: fresh.leagueId, leagueName: fresh.leagueName };
     } finally {
       await releaseLock();
