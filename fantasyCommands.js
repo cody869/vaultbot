@@ -507,9 +507,24 @@ async function cmdStart(interaction) {
     return interaction.editReply({ content: `Need exactly ${league.team_slots} teams — currently ${teams.length}.`, ...PLAIN });
   }
 
-  const order = shuffle(teams.map((t) => t.id));
-  for (let i = 0; i < order.length; i += 1) {
-    await updateEntity(ENTITIES.team, order[i], { draft_slot: i + 1 });
+  // /fantasy restart-draft clears rosters/queue/picks but never touches
+  // draft_slot, so a prior draft's order survives a restart untouched.
+  // Reuse it by default — only reshuffle on an explicit request, or the
+  // first time this league ever starts (no valid slots assigned yet).
+  const reshuffle = interaction.options.getBoolean('reshuffle') ?? false;
+  const existingSlots = teams.map((t) => t.draft_slot).filter((s) => Number.isInteger(s) && s >= 1);
+  const hasSetOrder = !reshuffle
+    && existingSlots.length === teams.length
+    && new Set(existingSlots).size === teams.length;
+
+  let order;
+  if (hasSetOrder) {
+    order = [...teams].sort((a, b) => a.draft_slot - b.draft_slot).map((t) => t.id);
+  } else {
+    order = shuffle(teams.map((t) => t.id));
+    for (let i = 0; i < order.length; i += 1) {
+      await updateEntity(ENTITIES.team, order[i], { draft_slot: i + 1 });
+    }
   }
 
   const deadline = computeDeadline(league);
@@ -531,7 +546,7 @@ async function cmdStart(interaction) {
 
   return interaction.editReply({
     content: [
-      '# Draft order set',
+      hasSetOrder ? '# Draft started — reusing the existing order' : '# Draft order set',
       `Snake, ${league.roster_size} rounds, ${league.pick_clock_hours}h per pick (clock pauses ${league.quiet_start_hour}:00–${league.quiet_end_hour}:00).`,
       '',
       ...lines,

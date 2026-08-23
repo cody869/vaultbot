@@ -85,7 +85,11 @@ export const fantasyCommand = [
 
     .addSubcommand((s) => s
       .setName('start')
-      .setDescription('Randomize the order and open the draft (commissioner only)'))
+      .setDescription('Open the draft (commissioner only) — reuses the last order unless reshuffled')
+      .addBooleanOption((o) => o
+        .setName('reshuffle')
+        .setDescription('Randomize a new order instead of reusing the last one')
+        .setRequired(false)))
 
     .addSubcommand((s) => s
       .setName('order')
