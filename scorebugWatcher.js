@@ -42,11 +42,22 @@ const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
 const POLL_MS = Number(process.env.SCOREBUG_POLL_SECONDS || 60) * 1000;
 const SEED_HOURS = Number(process.env.SCOREBUG_SEED_HOURS || 24);
 const DELAY_MS = Number(process.env.SCOREBUG_DELAY_MINUTES || 5) * 60 * 1000;
+const POST_TIMEOUT_MS = Number(process.env.SCOREBUG_POST_TIMEOUT_MS || 30_000);
 
 // Games handled this process, so a slow render/post can't be picked up
 // twice by the next tick (same fast in-process guard news.js uses). This
 // is only a same-tick guard now — ScorebugPost is the real dedup record.
 const handled = new Set();
+
+// Rejects instead of hanging forever if a Vault/Discord call inside
+// postCard() stalls -- a bare `await` on a stuck fetch would otherwise sit
+// unresolved indefinitely, with no error to catch and retry from.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)),
+  ]);
+}
 
 // Stable key that survives Base44 re-imports regenerating row ids --
 // season+week+matchup is what actually identifies "this game" to a human.
@@ -243,8 +254,19 @@ async function tick(client, { seed = false } = {}) {
 
     handled.add(key); // fast in-process guard against a double-fire mid-render
     try {
-      const rows = await rowsFor(g.season_number);
-      const message = await postCard(client, g, rows);
+      // A stuck fetch inside rowsFor()/postCard() (Vault or Discord) can hang
+      // without ever resolving or rejecting -- confirmed live: a game sat
+      // "in progress" with no posted/failed log line for 10+ minutes, then
+      // posted instantly the moment the process restarted (which is what
+      // cleared `handled`, not anything about the hang itself resolving).
+      // A bounded timeout turns a silent indefinite hang into a real error
+      // that the catch below can see and retry from, without needing a
+      // manual restart.
+      const message = await withTimeout(
+        (async () => postCard(client, g, await rowsFor(g.season_number)))(),
+        POST_TIMEOUT_MS,
+        `[SCOREBUG] post for ${key}`
+      );
       // Record the post as a NEW row rather than updating the pending one --
       // ScorebugPost cannot be updated for this Base44 app (confirmed live:
       // 403 Permission denied), the same create-only behavior FantasyPick
@@ -260,10 +282,11 @@ async function tick(client, { seed = false } = {}) {
       });
     } catch (err) {
       console.error(`[SCOREBUG] post failed for ${key}: ${err.message}`);
-      // No "posted" row gets created on a genuine (thrown) failure, so
-      // `handled` only blocks retries within this process -- a restart
-      // clears it and the delay check above will retry automatically, no
-      // manual row deletion needed.
+      // Unlike a hang, a caught failure (including the timeout above) can
+      // safely retry within this same process: no "posted" row was created,
+      // so clearing `handled` lets the very next 60s poll try again instead
+      // of requiring a manual restart.
+      handled.delete(key);
     }
   }
 }
