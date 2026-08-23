@@ -880,7 +880,19 @@ async function cmdUndoPick(interaction) {
 
   const roster = (team.roster || []).filter((r) => r.key !== pick.player_key);
   await updateEntity(ENTITIES.team, team.id, { roster });
-  await deleteEntity(ENTITIES.pick, pick.id);
+  // Mark it undone rather than relying on a hard delete: deleteEntity's DELETE
+  // verb had never been exercised against this Base44 app before and 404'd on
+  // its first real use, while updateEntity's verb-detection is proven
+  // everywhere else in this bot. getPicks() filters out undone: true rows, so
+  // this alone makes the player available again and drops it off the board.
+  await updateEntity(ENTITIES.pick, pick.id, { undone: true });
+  try {
+    await deleteEntity(ENTITIES.pick, pick.id);
+  } catch (err) {
+    // Best-effort cleanup only — the undone flag above already makes this
+    // pick invisible everywhere, so a failed hard delete changes nothing.
+    console.warn('[fantasy] undo-pick: hard delete failed (harmless):', err.message);
+  }
   await updateEntity(ENTITIES.league, league.id, {
     current_pick_number: lastPickNumber,
     draft_status: 'in_progress',

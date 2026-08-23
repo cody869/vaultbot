@@ -259,7 +259,11 @@ export async function getTeams(leagueId) {
 export async function getPicks(leagueId) {
   const rows = await listEntity(ENTITIES.pick);
   return rows
-    .filter((p) => p.league_id === leagueId)
+    // undone: true marks a pick reversed by /fantasy undo-pick. Filtered here
+    // rather than at each call site so a reversed pick is invisible to the
+    // board, doctor, and "is this player taken" checks with no chance of one
+    // of those spots forgetting to exclude it.
+    .filter((p) => p.league_id === leagueId && !p.undone)
     .sort((a, b) => (a.pick_number || 0) - (b.pick_number || 0));
 }
 
