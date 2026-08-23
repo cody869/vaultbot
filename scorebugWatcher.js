@@ -31,7 +31,7 @@
 //                           the "pending" state below)
 
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
-import { list, getStandings, getCurrentCycle, createEntity, updateEntity } from "./vault.js";
+import { list, getStandings, getCurrentCycle, createEntity } from "./vault.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
 import { isGameFinal, getGameContributors } from "./scorebugHelper.js";
@@ -54,16 +54,25 @@ function gameKey(g) {
   return `${g.season_number ?? "?"}-${g.week ?? "?"}-${g.awayTeam ?? "?"}-${g.homeTeam ?? "?"}`;
 }
 
-// Pull every ScorebugPost row for this key's-eye view of state, keyed by
-// game_key -> full row (not just a Set) so the delay logic below can read
-// each row's discord_message_id/created_date. Backed by Base44, one broad
-// read per tick.
+// Pull every ScorebugPost row into a per-key {pending, posted} view. Two rows
+// can legitimately exist for the same game_key -- see claim()'s comment below
+// for why this entity is never updated, only ever created -- so this groups
+// them: `posted` is any row that already carries a discord_message_id,
+// `pending` is the earliest row that doesn't (the sync-delay clock). Backed
+// by Base44, one broad read per tick.
 async function loadState() {
   try {
     const rows = await list("ScorebugPost", {}, { limit: 5000 });
     const byKey = new Map();
     for (const r of rows) {
-      if (r.game_key) byKey.set(r.game_key, r);
+      if (!r.game_key) continue;
+      const entry = byKey.get(r.game_key) || { pending: null, posted: null };
+      if (r.discord_message_id) {
+        entry.posted = r;
+      } else if (!entry.pending || new Date(r.created_date || 0) < new Date(entry.pending.created_date || 0)) {
+        entry.pending = r;
+      }
+      byKey.set(r.game_key, entry);
     }
     return byKey;
   } catch (err) {
@@ -74,13 +83,22 @@ async function loadState() {
   }
 }
 
-// Claim a key by creating its ScorebugPost row BEFORE sending to Discord (or,
-// for a fresh final, before starting the sync-delay wait). If two ticks
-// somehow race on the same key, the loser just gets a create that succeeds
-// harmlessly (no uniqueness constraint at the DB level) -- the in-process
-// `handled` Set is what actually prevents that within one process, and a
-// second process racing this is not a scenario this league's single-instance
-// Railway deploy hits in practice.
+// Creates a ScorebugPost row -- for a fresh final, before starting the
+// sync-delay wait (no discord_message_id yet); once actually posted, a
+// SECOND row for the same key carrying discord_message_id, rather than
+// updating the first one. ScorebugPost cannot be updated for this Base44
+// app (confirmed live: HTTP 403 "Permission denied for update operation" —
+// the same create-only behavior FantasyPick has), so "mark this row as
+// posted" isn't expressible as a mutation; posting is instead recorded by
+// creating a new, self-contained row. loadState() reads across every row
+// for a key rather than assuming one row per key, so two rows here is by
+// design, not a bug.
+//
+// If two ticks somehow race on the same key, the loser just gets a create
+// that succeeds harmlessly (no uniqueness constraint at the DB level) --
+// the in-process `handled` Set is what actually prevents that within one
+// process, and a second process racing this is not a scenario this
+// league's single-instance Railway deploy hits in practice.
 async function claim(key, g, extra = {}) {
   return createEntity("ScorebugPost", {
     game_key: key,
@@ -182,17 +200,17 @@ async function tick(client, { seed = false } = {}) {
     const key = gameKey(g);
     if (handled.has(key)) continue;
 
-    const existing = state.get(key);
+    const entry = state.get(key) || { pending: null, posted: null };
+
+    if (entry.posted) continue; // some row for this key already carries a discord_message_id — done
 
     // First boot on a Vault that already has final games: mark the backlog
     // as already-handled (no delay) rather than dumping a season's worth of
     // cards at once or making them all wait out the sync delay. Uses the
     // same seeded:<timestamp> sentinel suspensionWatcher.js's seedBacklog()
-    // already established for "claimed without actually posting" -- see the
-    // note on claim()/discord_message_id below for why this stays a
-    // pre-existing field rather than a new one.
+    // already established for "claimed without actually posting."
     if (seed && importedTime(g) < cutoff) {
-      if (existing) continue; // already recorded from a prior boot
+      if (entry.pending) continue; // already recorded from a prior boot
       handled.add(key); // avoid re-claiming every tick until the create lands
       try {
         await claim(key, g, { discord_message_id: `seeded:${Date.now()}` });
@@ -205,18 +223,11 @@ async function tick(client, { seed = false } = {}) {
     // No row yet: this is a newly-final game. Start the sync-delay wait
     // instead of posting immediately -- WeeklyStats (the contributor/leader
     // data) lags behind the score itself, so posting right away can render
-    // an incomplete stat strip.
-    //
-    // The delay is tracked WITHOUT any new field: a bare claim() row (no
-    // discord_message_id yet) is "pending," and Base44's own created_date
-    // timestamp is the "pending since" clock. A first version of this used
-    // custom status/first_seen_at fields instead, and those silently didn't
-    // persist -- confirmed the same way the FantasyPick undo bug was (a
-    // create with a field outside the entity's original schema succeeds
-    // with no error, but the field itself doesn't stick). discord_message_id
-    // and created_date both predate tonight, so there's nothing new here
-    // for Base44 to drop.
-    if (!existing) {
+    // an incomplete stat strip. A bare claim() row (no discord_message_id
+    // yet) is "pending," and Base44's own created_date timestamp is the
+    // "pending since" clock -- both predate tonight, so there's no new
+    // field here for Base44 to drop.
+    if (!entry.pending) {
       handled.add(key);
       try {
         await claim(key, g);
@@ -227,27 +238,29 @@ async function tick(client, { seed = false } = {}) {
       continue;
     }
 
-    if (existing.discord_message_id) continue; // already posted (or seeded) — nothing to do
-
-    const pendingSince = existing.created_date ? new Date(existing.created_date).getTime() : 0;
+    const pendingSince = entry.pending.created_date ? new Date(entry.pending.created_date).getTime() : 0;
     if (Date.now() - pendingSince < DELAY_MS) continue; // still waiting for stats to sync
 
     handled.add(key); // fast in-process guard against a double-fire mid-render
     try {
       const rows = await rowsFor(g.season_number);
       const message = await postCard(client, g, rows);
-      await updateEntity("ScorebugPost", existing.id, {
+      // Record the post as a NEW row rather than updating the pending one --
+      // ScorebugPost cannot be updated for this Base44 app (confirmed live:
+      // 403 Permission denied), the same create-only behavior FantasyPick
+      // has. loadState() already reads across every row for a key, so a
+      // second row here is expected, not a leak.
+      await claim(key, g, {
         posted_at: new Date().toISOString(),
         // postCard() returns undefined (not a throw) when it can't resolve
         // both team abbreviations -- a permanent, not transient, failure.
-        // Stamp a sentinel so that's treated as "handled" too, matching
-        // this entity's pre-existing claim-before-sending convention,
-        // rather than retrying forever on a game that can never resolve.
+        // Stamp a sentinel so that's treated as "handled" too, rather than
+        // retrying forever on a game that can never resolve.
         discord_message_id: message?.id || `unresolved:${Date.now()}`,
       });
     } catch (err) {
       console.error(`[SCOREBUG] post failed for ${key}: ${err.message}`);
-      // discord_message_id stays unset on a genuine (thrown) failure, so
+      // No "posted" row gets created on a genuine (thrown) failure, so
       // `handled` only blocks retries within this process -- a restart
       // clears it and the delay check above will retry automatically, no
       // manual row deletion needed.
