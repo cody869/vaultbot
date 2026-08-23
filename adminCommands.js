@@ -12,7 +12,7 @@
 
 import { SlashCommandBuilder } from "discord.js";
 import { getConnectedClient } from "./eaTokenStore.js";
-import { handleExport, handleEaStatus } from "./eaCommands.js";
+import { startExportFlow, handleEaStatus } from "./eaCommands.js";
 import bugReportCommands from "./bugReport.js";
 
 // Reuses the same allowlist /export and /ea-status already gate on — these
@@ -113,39 +113,7 @@ export const adminCommandBuilder = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName("export")
-      .setDescription("Pull a fresh Madden export from EA into the Vault")
-      .addStringOption((o) =>
-        o
-          .setName("scope")
-          .setDescription("Which weeks to pull (defaults to the current week)")
-          .addChoices(
-            { name: "Current week", value: "current" },
-            { name: "Surrounding weeks (prev / current / next)", value: "surrounding" },
-            { name: "Specific week", value: "week" },
-            { name: "All weeks (slow)", value: "all" }
-          )
-      )
-      .addIntegerOption((o) =>
-        o
-          .setName("week")
-          .setDescription('Week number to pull — only used when scope is "Specific week"')
-          .setMinValue(1)
-          .setMaxValue(23)
-      )
-      .addStringOption((o) =>
-        o
-          .setName("data")
-          .setDescription("Which data to pull (defaults to everything)")
-          .addChoices(
-            { name: "Everything", value: "all" },
-            { name: "Schedules only", value: "schedules" }
-          )
-      )
-      .addBooleanOption((o) =>
-        o
-          .setName("rosters")
-          .setDescription("Also pull all 32 rosters and free agents (slow)")
-      )
+      .setDescription("Pull a fresh Madden export from EA into the Vault — walks you through week, then what to pull")
   )
   .addSubcommand((sub) =>
     sub
@@ -307,7 +275,7 @@ export async function handleAdminCommand(interaction) {
         break;
       }
       case "export": {
-        await handleExport(interaction);
+        await startExportFlow(interaction);
         break;
       }
       case "ea-status": {

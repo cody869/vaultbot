@@ -19,6 +19,11 @@ import { runExport, runRosterExport, getLeagueFingerprint } from "./eaExport.js"
 const POLL_MINUTES = Number(process.env.EA_POLL_MINUTES || 15);
 const AUTO_EXPORT = process.env.EA_AUTO_EXPORT === "true";
 
+// The fingerprint check itself (and the export it can trigger) only runs this
+// often; the outer POLL_MINUTES tick still fires more frequently for token
+// keep-alive and the roster-export check.
+const STATS_HOURS = Number(process.env.EA_STATS_HOURS || 1);
+
 // Rosters change on trades/signings/cuts, not on games, so they get their own
 // cadence rather than riding the game-completion fingerprint. 0 disables.
 const ROSTER_HOURS = Number(process.env.EA_ROSTER_HOURS ?? 48);
@@ -29,6 +34,8 @@ const ROSTER_HOURS = Number(process.env.EA_ROSTER_HOURS ?? 48);
 const ROSTER_STATE_PATH = process.env.EA_ROSTER_STATE_PATH || "/data/ea-roster.json";
 
 let lastKey = null;
+let lastStatsCheckAt = 0;
+let lastStatsCheckResult = null; // 'seeded' | 'unchanged' | 'exported' | null (never checked yet)
 let timer = null;
 let running = false;
 
@@ -89,21 +96,32 @@ async function tick() {
       return;
     }
 
+    // The fingerprint check (and any export it triggers) only runs on its own
+    // STATS_HOURS clock, independent of the more frequent outer poll — this
+    // is what "every hour" actually gates, separate from token keep-alive.
+    if (Date.now() - lastStatsCheckAt < STATS_HOURS * 3600 * 1000) return;
+    lastStatsCheckAt = Date.now();
+
     const fingerprint = await getLeagueFingerprint();
 
-    // First tick after a restart just records where things stand — otherwise
+    // First check after a restart just records where things stand — otherwise
     // every deploy would fire a spurious export.
     if (lastKey === null) {
       lastKey = fingerprint.key;
+      lastStatsCheckResult = "seeded";
       console.log(`[EA] watcher seeded at ${fingerprint.key}`);
       return;
     }
 
+    console.log(`[EA] stats check: last=${lastKey} current=${fingerprint.key}`);
     if (fingerprint.key !== lastKey) {
-      console.log(`[EA] change detected ${lastKey} -> ${fingerprint.key}, exporting`);
       lastKey = fingerprint.key;
-      await runExport({ mode: "surrounding", rosters: false });
+      lastStatsCheckResult = "exported";
+      console.log(`[EA] change detected, exporting current week`);
+      await runExport({ mode: "current", rosters: false });
       console.log("[EA] auto export complete");
+    } else {
+      lastStatsCheckResult = "unchanged";
     }
   } catch (e) {
     // Never throw out of the interval — a transient EA outage should not
@@ -117,7 +135,8 @@ async function tick() {
 function startEAWatcher() {
   if (timer) return;
   console.log(
-    `[EA] watcher starting (every ${POLL_MINUTES}m, auto-export ${AUTO_EXPORT ? "on" : "off"}` +
+    `[EA] watcher starting (poll every ${POLL_MINUTES}m, ` +
+      `stats auto-export ${AUTO_EXPORT ? `current week every ${STATS_HOURS}h` : "off"}` +
       `, roster export ${ROSTER_HOURS > 0 ? `every ${ROSTER_HOURS}h` : "off"})`
   );
   // Small delay so this doesn't compete with the player cache warm at boot.
@@ -130,7 +149,21 @@ function stopEAWatcher() {
   timer = null;
 }
 
+/** For /admin ea-status — lets it report auto-export health without reaching into watcher internals. */
+async function getWatcherStatus() {
+  const rosterState = await readRosterState();
+  return {
+    autoExport: AUTO_EXPORT,
+    statsHours: STATS_HOURS,
+    lastStatsCheckAt: lastStatsCheckAt || null,
+    lastStatsCheckResult,
+    rosterHours: ROSTER_HOURS,
+    lastRosterExportAt: rosterState.lastRosterExportAt || null,
+  };
+}
+
 export {
   startEAWatcher,
   stopEAWatcher,
+  getWatcherStatus,
 };

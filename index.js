@@ -12,6 +12,7 @@ import { startScheduleWatcher } from "./scheduleWatcher.js";
 import { startSuspensionWatcher } from "./suspensionWatcher.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
+import { handleExportComponent } from "./eaCommands.js";
 import {
   handleFantasyCommand,
   handleFantasyAutocomplete,
@@ -362,6 +363,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // Committee vote buttons — checked before the trade-builder router.
   if (interaction.isButton() && interaction.customId.startsWith("tvote:")) {
     await handleTradeVote(interaction);
+    return;
+  }
+
+  // /admin export's week/data picker — also before the trade catch-all.
+  if (
+    (interaction.isButton() || interaction.isStringSelectMenu()) &&
+    interaction.customId.startsWith("export:")
+  ) {
+    await handleExportComponent(interaction);
     return;
   }
 
