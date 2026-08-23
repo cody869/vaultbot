@@ -175,5 +175,21 @@ export const fantasyCommand = [
 
     .addSubcommand((s) => s
       .setName('doctor')
-      .setDescription('Check stat field mapping against live data (commissioner only)')),
+      .setDescription('Check stat field mapping against live data (commissioner only)'))
+
+    .addSubcommand((s) => s
+      .setName('undo-pick')
+      .setDescription('Reverse the most recent pick (commissioner only, draft must be paused)'))
+
+    .addSubcommand((s) => s
+      .setName('autodraft')
+      .setDescription("Turn a team's autodraft on or off (commissioner only)")
+      .addUserOption((o) => o
+        .setName('user')
+        .setDescription('Which manager')
+        .setRequired(true))
+      .addBooleanOption((o) => o
+        .setName('enabled')
+        .setDescription('On = bot picks for them as soon as it\'s their turn')
+        .setRequired(true))),
 ];

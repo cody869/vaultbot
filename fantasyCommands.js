@@ -18,6 +18,7 @@ import {
   getGames,
   createEntity,
   updateEntity,
+  deleteEntity,
   invalidate,
 } from './fantasyStore.js';
 
@@ -165,6 +166,8 @@ export async function handleFantasyCommand(interaction) {
     case 'scores': return cmdScores(interaction);
     case 'score-week': return cmdScoreWeek(interaction);
     case 'doctor': return cmdDoctor(interaction);
+    case 'undo-pick': return cmdUndoPick(interaction);
+    case 'autodraft': return cmdAutodraft(interaction);
     default:
       return interaction.editReply({ content: `Unknown subcommand: ${sub}`, ...PLAIN });
   }
@@ -832,6 +835,101 @@ async function cmdScoreWeek(interaction) {
 }
 
 // ---------------------------------------------------------------------------
+// undo-pick — reverse the single most recent pick
+// ---------------------------------------------------------------------------
+
+/**
+ * Reverses the most recent pick: deletes its Pick record, drops it from the
+ * team's roster, and rewinds current_pick_number so the same team is back on
+ * the clock. Only ever touches the last pick — undoing an earlier one would
+ * require renumbering every pick made after it, which isn't worth the risk
+ * for what is meant to be a quick "that was a mistake" fix.
+ */
+async function cmdUndoPick(interaction) {
+  if (!isCommissioner(interaction)) {
+    return interaction.editReply({ content: 'Commissioner only.', ...PLAIN });
+  }
+  const league = await getLeague();
+  if (!league) return interaction.editReply({ content: 'No league found.', ...PLAIN });
+  if (league.draft_status !== 'in_progress') {
+    return interaction.editReply({ content: 'No draft in progress.', ...PLAIN });
+  }
+  if (!league.draft_paused) {
+    return interaction.editReply({
+      content: 'Pause the draft first with `/fantasy pause` — undoing while the clock is live could race a new pick.',
+      ...PLAIN,
+    });
+  }
+
+  const lastPickNumber = (league.current_pick_number || 1) - 1;
+  if (lastPickNumber < 1) {
+    return interaction.editReply({ content: 'No picks have been made yet.', ...PLAIN });
+  }
+
+  const picks = await getPicks(league.id);
+  const pick = picks.find((p) => p.pick_number === lastPickNumber);
+  if (!pick) {
+    return interaction.editReply({ content: `Couldn't find pick #${lastPickNumber}.`, ...PLAIN });
+  }
+
+  const teams = await getTeams(league.id);
+  const team = teams.find((t) => t.id === pick.fantasy_team_id);
+  if (!team) {
+    return interaction.editReply({ content: "That pick's team no longer exists.", ...PLAIN });
+  }
+
+  const roster = (team.roster || []).filter((r) => r.key !== pick.player_key);
+  await updateEntity(ENTITIES.team, team.id, { roster });
+  await deleteEntity(ENTITIES.pick, pick.id);
+  await updateEntity(ENTITIES.league, league.id, {
+    current_pick_number: lastPickNumber,
+    draft_status: 'in_progress',
+  });
+  invalidate(ENTITIES.pick);
+  invalidate(ENTITIES.team);
+  invalidate(ENTITIES.league);
+
+  return interaction.editReply({
+    content: [
+      '# Pick undone',
+      `Removed **${pick.player_name}** (${pick.player_position}, ${pick.nfl_team}) from **${teamLabel(team)}**.`,
+      `Pick #${lastPickNumber} is open again — resume with \`/fantasy resume\` when ${team.discord_user_id ? `<@${team.discord_user_id}>` : 'they'} are ready to pick.`,
+    ].join('\n'),
+    ...PLAIN,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// autodraft — commissioner toggle for a team's picks
+// ---------------------------------------------------------------------------
+
+async function cmdAutodraft(interaction) {
+  if (!isCommissioner(interaction)) {
+    return interaction.editReply({ content: 'Commissioner only.', ...PLAIN });
+  }
+  const league = await getLeague();
+  if (!league) return interaction.editReply({ content: 'No league found.', ...PLAIN });
+
+  const user = interaction.options.getUser('user');
+  const enabled = interaction.options.getBoolean('enabled');
+  const teams = await getTeams(league.id);
+  const team = teams.find((t) => t.discord_user_id === user.id);
+  if (!team) {
+    return interaction.editReply({ content: `${user.tag} isn't in this league.`, ...PLAIN });
+  }
+
+  await updateEntity(ENTITIES.team, team.id, { autodraft: enabled });
+  invalidate(ENTITIES.team);
+
+  return interaction.editReply({
+    content: enabled
+      ? `Autodraft **ON** for **${teamLabel(team)}** — the bot picks for them (queue first, then best available) as soon as it's their turn, without waiting for the clock.`
+      : `Autodraft **OFF** for **${teamLabel(team)}** — back to picking manually (or via clock expiry).`,
+    ...PLAIN,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // doctor — verify field-name resolution against live rows
 // ---------------------------------------------------------------------------
 
@@ -929,8 +1027,9 @@ export function startDraftWatcher(client, { intervalMs = 60 * 1000 } = {}) {
         if (!expired.picks.length) break;
 
         for (const p of expired.picks) {
+          const why = p.team.autodraft ? 'autodraft' : 'clock expired';
           await channel.send({
-            content: `**${teamLabel(p.team)}** auto-select **${p.asset.name}** — ${p.asset.position}, ${p.asset.nfl_team} _(clock expired)_`,
+            content: `**${teamLabel(p.team)}** auto-select **${p.asset.name}** — ${p.asset.position}, ${p.asset.nfl_team} _(${why})_`,
             ...PLAIN,
           });
         }

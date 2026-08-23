@@ -15,6 +15,7 @@ import {
 } from './fantasyStore.js';
 
 import { scorePlayerRow, scoreTeamDefense } from './fantasyScoring.js';
+import { getMemberByDiscordId } from './vault.js';
 
 import {
   GAME_FIELDS,
@@ -389,6 +390,20 @@ export function canDraft(roster, position, league = null) {
   return { ok: true };
 }
 
+/**
+ * The real NFL team this manager controls in the underlying Madden
+ * franchise, normalized for comparison against asset.nfl_team — or null if
+ * their Discord isn't linked to a LeagueMember with a team.
+ *
+ * A manager drafting their own controlled team's player onto their fantasy
+ * roster is a conflict of interest (they control that player's real-game
+ * usage), so this is checked before every pick, manual or auto.
+ */
+async function controlledTeamOf(team) {
+  const member = await getMemberByDiscordId(team.discord_user_id);
+  return member?.team_name ? normalizeName(member.team_name) : null;
+}
+
 // ---------------------------------------------------------------------------
 // Making a pick
 // ---------------------------------------------------------------------------
@@ -413,6 +428,11 @@ export async function makePick(league, team, asset, { auto = false, expectedPick
   const roster = Array.isArray(team.roster) ? [...team.roster] : [];
   const legality = canDraft(roster, asset.position, league);
   if (!legality.ok) return { ok: false, reason: legality.reason };
+
+  const ownTeam = await controlledTeamOf(team);
+  if (ownTeam && normalizeName(asset.nfl_team) === ownTeam) {
+    return { ok: false, reason: `${asset.nfl_team} is the team you control — you can't draft your own players.` };
+  }
 
   const order = league.draft_order || [];
   const { round } = snakePosition(pickNumber, order.length, league.draft_type);
@@ -475,11 +495,14 @@ export async function pickForTeam(league, team, available) {
   const roster = team.roster || [];
   const allowed = new Set(eligiblePositions(roster, league));
   const { min } = resolveRosterLimits(league);
+  const ownTeam = await controlledTeamOf(team);
+  const draftable = (asset) => allowed.has(asset.position)
+    && (!ownTeam || normalizeName(asset.nfl_team) !== ownTeam);
 
   const queue = team.queue || [];
   for (const key of queue) {
     const asset = available.find((a) => a.key === key);
-    if (asset && allowed.has(asset.position)) return asset;
+    if (asset && draftable(asset)) return asset;
   }
 
   const counts = rosterCounts(roster);
@@ -487,7 +510,7 @@ export async function pickForTeam(league, team, available) {
   let bestScore = -Infinity;
 
   for (const asset of available) {
-    if (!allowed.has(asset.position)) continue;
+    if (!draftable(asset)) continue;
     const need = min[asset.position] || 0;
     const stillNeeded = Math.max(0, need - (counts[asset.position] || 0));
     const urgency = 1 + stillNeeded * 0.05;
@@ -499,19 +522,25 @@ export async function pickForTeam(league, team, available) {
   return best;
 }
 
-/** Fire autopicks for every expired clock. Returns what it did. */
+/**
+ * Fire autopicks for every expired clock — or, for a team with autodraft
+ * enabled, immediately once it's their turn regardless of the deadline.
+ * Returns what it did.
+ */
 export async function processExpiredClocks(league) {
   if (league.draft_status !== 'in_progress') return { picks: [] };
   // A paused draft never autopicks. The deadline is left untouched while
   // paused and shifted forward on resume, so whoever is on the clock keeps
   // exactly the time they had left.
   if (league.draft_paused) return { picks: [], paused: true };
-  const deadline = league.current_pick_deadline ? new Date(league.current_pick_deadline) : null;
-  if (!deadline || Date.now() < deadline.getTime()) return { picks: [] };
 
   const teams = await getTeams(league.id);
   const onClock = teamOnTheClock(league, teams);
   if (!onClock) return { picks: [] };
+
+  const deadline = league.current_pick_deadline ? new Date(league.current_pick_deadline) : null;
+  const deadlineExpired = deadline && Date.now() >= deadline.getTime();
+  if (!deadlineExpired && !onClock.team.autodraft) return { picks: [] };
 
   const available = await availableAssets(league);
   const asset = await pickForTeam(league, onClock.team, available);
