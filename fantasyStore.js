@@ -242,22 +242,32 @@ export const ENTITIES = {
   weekScore: 'FantasyWeekScore',
 };
 
+// League/team/pick reads are the ones hit on every single autocomplete
+// keystroke in /fantasy pick and /fantasy queue (and every draft-watcher
+// tick) -- confirmed live: Base44 started 429ing FantasyPick reads with
+// "App entity read traffic volume limit exceeded" during an active draft.
+// Every write path already calls invalidate(ENTITIES.league/team/pick), as
+// if these were meant to be cached from the start; they just never
+// actually were. A short TTL is enough to absorb a burst of keystrokes
+// (typically well under 10s) without making draft state feel stale.
+const FANTASY_READ_TTL_MS = 10_000;
+
 export async function getLeague() {
-  const rows = await listEntity(ENTITIES.league);
+  const rows = await cachedList(ENTITIES.league, FANTASY_READ_TTL_MS);
   if (!rows.length) return null;
   const active = rows.find((r) => r.status && r.status !== 'complete');
   return active || rows[rows.length - 1];
 }
 
 export async function getTeams(leagueId) {
-  const rows = await listEntity(ENTITIES.team);
+  const rows = await cachedList(ENTITIES.team, FANTASY_READ_TTL_MS);
   return rows
     .filter((t) => t.league_id === leagueId)
     .sort((a, b) => (a.draft_slot || 99) - (b.draft_slot || 99));
 }
 
 export async function getPicks(leagueId) {
-  const rows = await listEntity(ENTITIES.pick);
+  const rows = await cachedList(ENTITIES.pick, FANTASY_READ_TTL_MS);
   const forLeague = rows.filter((p) => p.league_id === leagueId);
 
   // FantasyPick is create-only for this Base44 app — update comes back 403
