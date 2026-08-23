@@ -98,13 +98,25 @@ client.once(Events.ClientReady, async (c) => {
     warmDraftPool().catch(() => {});
   }, 240_000);
   startScheduler(c);
-  startTradeWatcher(c);
-  startNewsWatcher(c);
-  startScorebugWatcher(c);
-  startScheduleWatcher(c);
+  // Trade/news/scorebug/suspension each fire an immediate, unstaged
+  // full-collection "seed" read the moment they start (confirmed live: a
+  // 429 'App entity read traffic volume limit exceeded' hit FantasyLeague,
+  // Game, TradeSubmission, Suspension, NewsArticle, LeagueMember, and
+  // ScorebugPost all within the same second after a restart). Calling them
+  // back-to-back with no gap means every restart re-creates that same
+  // thundering herd. Staggering the START of each by a few seconds spreads
+  // those seed reads out instead of piling them onto one instant — the
+  // watchers themselves are unchanged, this only delays when each one's
+  // first read fires. startEAWatcher/startDraftWatcher/startFantasyWatcher
+  // already have their own internal first-tick delays (30s/20s/30s) and
+  // don't need this.
+  setTimeout(() => startTradeWatcher(c), 0);
+  setTimeout(() => startNewsWatcher(c), 5_000);
+  setTimeout(() => startScorebugWatcher(c), 10_000);
+  startScheduleWatcher(c); // event-driven only (message listeners), no seed read
   // Posts approved 70/30 Rule suspensions to SUSPENSIONS_CHANNEL_ID once each,
   // tagging the affected owner. No-ops if that env var is unset.
-  startSuspensionWatcher(c);
+  setTimeout(() => startSuspensionWatcher(c), 15_000);
   // Keeps the EA tokens alive (the refresh chain dies after ~10 days idle)
   // and, if EA_AUTO_EXPORT=true, exports when the league actually changes.
   startEAWatcher();
