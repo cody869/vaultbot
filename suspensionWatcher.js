@@ -24,8 +24,10 @@
 //                            records older than this are marked handled so a
 //                            first deploy doesn't flood the channel
 
-import { MessageFlags } from 'discord.js';
+import { MessageFlags, AttachmentBuilder, EmbedBuilder } from 'discord.js';
 import { list, getLeagueMembers, memberDisplayName, updateEntity } from './vault.js';
+import { renderSuspensionCard } from './suspensionCard.js';
+import { abbrFromName } from './emoji.js';
 
 const CHANNEL_ID = process.env.SUSPENSIONS_CHANNEL_ID;
 const POLL_MS = (Number(process.env.SUSPENSION_POLL_SECONDS) || 60) * 1000;
@@ -148,6 +150,45 @@ async function writeBackMessageId(suspension, message) {
   return false;
 }
 
+/**
+ * Render the stylized card, matching scorebugCard.js's visual language.
+ * Returns null (never throws) so a render failure can fall back to the
+ * plain-text message instead of losing the post entirely.
+ */
+async function buildCard(s) {
+  const abbr = abbrFromName(s.team_name);
+  if (!abbr) {
+    console.warn(`[SUSPENSION] could not resolve team abbr for "${s.team_name}", falling back to text`);
+    return null;
+  }
+  try {
+    const png = await renderSuspensionCard({
+      abbr,
+      teamName: s.team_name,
+      season: s.season_number,
+      week: s.violation_week,
+      passRatio: s.violation_pass_ratio,
+      violationNumber: s.violation_number,
+      games: s.suspension_games ?? 0,
+      positions: s.suspended_positions,
+      players: s.suspended_player_names,
+      appliesToWeek: s.applies_to_week,
+    });
+    const filename = `suspension-${abbr}-${s.id}.png`;
+    return {
+      files: [new AttachmentBuilder(png, { name: filename })],
+      embeds: [
+        new EmbedBuilder()
+          .setColor(isWarning(s) ? 0xffb612 : 0xc60c30)
+          .setImage(`attachment://${filename}`),
+      ],
+    };
+  } catch (err) {
+    console.error(`[SUSPENSION] card render failed for ${s.id}, falling back to text:`, err.message);
+    return null;
+  }
+}
+
 async function postOne(client, suspension, members) {
   if (!(await claim(suspension))) return false;
 
@@ -158,11 +199,20 @@ async function postOne(client, suspension, members) {
   }
 
   const ownerMention = resolveOwnerMention(suspension, members);
-  const content = buildMessage(suspension, ownerMention);
+  const card = await buildCard(suspension);
+
+  // Mention pings and the admin-notes aside need to be real message content,
+  // not baked into the image, so they still render/ping normally. The full
+  // plain-text layout is only used as a fallback when the card can't render.
+  const content = card
+    ? [`Owner: ${ownerMention}`, suspension.admin_notes ? `> Note: ${suspension.admin_notes}` : null].filter(Boolean).join('\n')
+    : buildMessage(suspension, ownerMention);
 
   const message = await channel.send({
     content,
-    flags: MessageFlags.SuppressEmbeds,
+    embeds: card?.embeds ?? [],
+    files: card?.files ?? [],
+    flags: card ? undefined : MessageFlags.SuppressEmbeds,
     allowedMentions: { users: ownerMention.startsWith('<@') ? [ownerMention.slice(2, -1)] : [] },
   });
 
