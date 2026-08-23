@@ -43,9 +43,7 @@ const DIRECT = EXPORT_MODE === "direct";
  * URL. Failures here are logged and swallowed — they never block or fail
  * the primary export to MADDEN_EXPORT_URL.
  */
-const EXTRA_EXPORT_URLS = [
-  "https://xcfl.vercel.app/api/export",
-];
+const EXTRA_EXPORT_URLS = [];
 
 /*
  * Teams/standings are only sent when the destination can parse them. A
