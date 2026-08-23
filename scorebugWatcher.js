@@ -31,7 +31,7 @@
 //                           the "pending" state below)
 
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
-import { list, getStandings, getCurrentCycle, createEntity } from "./vault.js";
+import { list, getStandings, getCurrentCycle, createEntity, pollCached } from "./vault.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
 import { isGameFinal, getGameContributors } from "./scorebugHelper.js";
@@ -73,7 +73,7 @@ function gameKey(g) {
 // by Base44, one broad read per tick.
 async function loadState() {
   try {
-    const rows = await list("ScorebugPost", {}, { limit: 5000 });
+    const rows = await pollCached('scorebug:posts', 15_000, () => list("ScorebugPost", {}, { limit: 5000 }));
     const byKey = new Map();
     for (const r of rows) {
       if (!r.game_key) continue;
@@ -180,7 +180,11 @@ async function postCard(client, g, standingsRows) {
 async function tick(client, { seed = false } = {}) {
   let games;
   try {
-    games = await list("Game");
+    // Cached -- this watcher's own 60s poll re-reading the whole Game
+    // collection every tick with no caching was part of what tripped
+    // Base44's read-rate limit. scheduleWatcher.js's own list("Game") is
+    // event-driven (fires on a Discord message, not a poll) and untouched.
+    games = await pollCached('scorebug:games', 15_000, () => list("Game"));
   } catch (err) {
     console.error(`[SCOREBUG] fetch failed: ${err.message}`);
     return;

@@ -17,7 +17,7 @@
 
 import crypto from "node:crypto";
 import { SlashCommandBuilder, MessageFlags } from "discord.js";
-import { list, updateEntity } from "./vault.js";
+import { list, updateEntity, pollCached } from "./vault.js";
 import { playerUrl, teamUrl, routeUrl } from "./embeds.js";
 import { teamEmojiByName } from "./emoji.js";
 
@@ -269,7 +269,10 @@ async function editArticle(client, a) {
 // Server-side filters aren't reliable here (same as everywhere else in the
 // bot), so pull broad and decide in memory.
 async function fetchArticles(limit = 500) {
-  return list(ENTITY, {}, { sort: "-published_at", limit });
+  // Backs both the 60s watcher tick and /news — neither needs sub-minute
+  // freshness, and re-reading the whole collection every tick with no
+  // caching was part of what tripped Base44's read-rate limit.
+  return pollCached(`news:${limit}`, 15_000, () => list(ENTITY, {}, { sort: "-published_at", limit }));
 }
 
 function isDue(a) {

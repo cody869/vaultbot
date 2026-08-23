@@ -25,7 +25,7 @@
 //                            first deploy doesn't flood the channel
 
 import { MessageFlags, AttachmentBuilder, EmbedBuilder } from 'discord.js';
-import { list, getLeagueMembers, memberDisplayName, updateEntity } from './vault.js';
+import { list, getLeagueMembers, memberDisplayName, updateEntity, pollCached } from './vault.js';
 import { renderSuspensionCard } from './suspensionCard.js';
 import { abbrFromName } from './emoji.js';
 
@@ -249,8 +249,11 @@ async function seedBacklog() {
 
 async function tick(client) {
   try {
+    // Cached (not claim()'s own re-read above, which must stay live to
+    // verify a write actually stuck) -- this is just "scan for anything
+    // newly due," which doesn't need sub-minute freshness on a 60s poll.
     const [all, members] = await Promise.all([
-      list('Suspension', {}, { sort: '-created_date', limit: 5000 }),
+      pollCached('suspension:all', 15_000, () => list('Suspension', {}, { sort: '-created_date', limit: 5000 })),
       getLeagueMembers(),
     ]);
 

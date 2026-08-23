@@ -90,6 +90,27 @@ function authHeaders() {
 
 // --- helpers -------------------------------------------------------------
 
+// Generic short-TTL memoizer for a watcher's own periodic "scan the whole
+// collection for anything new" call — NOT a cache on list() itself, and NOT
+// safe for any read that needs guaranteed-fresh data right after a write
+// (e.g. a claim-then-reread-to-verify-ownership pattern). Confirmed live: at
+// least four watchers (news, suspension, trade voting, scorebug) each
+// re-read their whole collection on every 60s tick with zero caching, and
+// that steady-state volume was enough on its own to trip Base44's read-rate
+// limit ("App entity read traffic volume limit exceeded") well after any
+// restart-time burst had already cleared. Each watcher opts in explicitly
+// at its own polling call site, with its own key and TTL — every other read
+// (user-facing commands, write-verification reads) is untouched and stays
+// fully live.
+const _pollCaches = new Map();
+export async function pollCached(key, ttlMs, fn) {
+  const hit = _pollCaches.get(key);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.value;
+  const value = await fn();
+  _pollCaches.set(key, { value, at: Date.now() });
+  return value;
+}
+
 // Read an entity via the REST endpoint. `filter` is a plain object; it's sent
 // as Base44's query params. Returns an array (possibly empty). Throws only on
 // an actual network/HTTP failure — an empty entity returns []. If a request is
