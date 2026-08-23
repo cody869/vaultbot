@@ -102,13 +102,33 @@ function authHeaders() {
 // at its own polling call site, with its own key and TTL — every other read
 // (user-facing commands, write-verification reads) is untouched and stays
 // fully live.
+//
+// Single-flight: the cache holds the in-flight PROMISE the instant a call
+// starts, not just its eventual result — otherwise concurrent callers that
+// arrive before the first resolves all see an empty cache and all fire
+// their own redundant request. Confirmed live on the fantasy equivalent of
+// this cache (fantasyStore.js's cachedList): several near-simultaneous
+// calls each 429'd independently instead of one request serving all of
+// them.
 const _pollCaches = new Map();
 export async function pollCached(key, ttlMs, fn) {
   const hit = _pollCaches.get(key);
-  if (hit && Date.now() - hit.at < ttlMs) return hit.value;
-  const value = await fn();
-  _pollCaches.set(key, { value, at: Date.now() });
-  return value;
+  if (hit) {
+    if (hit.promise) return hit.promise;
+    if (Date.now() - hit.at < ttlMs) return hit.value;
+  }
+
+  const promise = fn();
+  _pollCaches.set(key, { promise });
+
+  try {
+    const value = await promise;
+    _pollCaches.set(key, { value, at: Date.now() });
+    return value;
+  } catch (err) {
+    _pollCaches.delete(key);
+    throw err;
+  }
 }
 
 // Read an entity via the REST endpoint. `filter` is a plain object; it's sent

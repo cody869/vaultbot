@@ -215,14 +215,35 @@ export async function deleteEntity(entity, id) {
 // Cached reads for the big collections
 // ---------------------------------------------------------------------------
 
-const caches = new Map(); // entity -> { rows, at }
+const caches = new Map(); // entity -> { rows, at } | { promise }
 
+// Single-flight: the cache is populated with the IN-FLIGHT PROMISE the
+// instant a request starts, not just with its eventual result. Without
+// this, concurrent callers that arrive before the first request resolves
+// (e.g. several autocomplete keystrokes fired within the same handful of
+// milliseconds) all see an empty cache and all fire their own redundant
+// Base44 request — confirmed live: six separate FantasyLeague reads 429'd
+// within the same second, each from a different getLeague() call, none of
+// which had waited long enough for the other's result to land in the
+// cache. Concurrent callers now join the one request already underway.
 export async function cachedList(cacheKey, ttlMs = 5 * 60 * 1000, opts = {}) {
   const hit = caches.get(cacheKey);
-  if (hit && Date.now() - hit.at < ttlMs) return hit.rows;
-  const rows = await listEntity(opts.entity || cacheKey, { query: opts.query || null });
-  caches.set(cacheKey, { rows, at: Date.now() });
-  return rows;
+  if (hit) {
+    if (hit.promise) return hit.promise;
+    if (Date.now() - hit.at < ttlMs) return hit.rows;
+  }
+
+  const promise = listEntity(opts.entity || cacheKey, { query: opts.query || null });
+  caches.set(cacheKey, { promise });
+
+  try {
+    const rows = await promise;
+    caches.set(cacheKey, { rows, at: Date.now() });
+    return rows;
+  } catch (err) {
+    caches.delete(cacheKey); // don't cache a failure — let the next caller try fresh
+    throw err;
+  }
 }
 
 export function invalidate(entity) {
