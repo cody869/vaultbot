@@ -571,21 +571,44 @@ export function startTradeWatcher(client) {
   }
 
   // On startup, treat everything already decided as announced so a restart
-  // never replays old approvals into the channel.
+  // never replays old approvals into the channel. `announced` is purely
+  // in-memory (no persisted record), so this seed is the ONLY thing
+  // standing between a restart and re-blasting every approved trade in the
+  // league — confirmed live: a transient failure here let ticking start
+  // anyway with an empty set, and the very next tick announced all of them
+  // at once. Retries with backoff instead of silently giving up after one
+  // attempt.
   const seed = async () => {
-    try {
-      const all = await getAllTrades();
-      let n = 0;
-      for (const t of all) {
-        if ((t.status ?? "pending") !== "pending") {
-          announced.add(t.id);
-          n++;
-        }
+    const all = await getAllTrades(); // let it throw — seedWithRetry() below decides what to do
+    let n = 0;
+    for (const t of all) {
+      if ((t.status ?? "pending") !== "pending") {
+        announced.add(t.id);
+        n++;
       }
-      console.log(`[TRADE VOTE] seeded ${n} already-decided trade(s).`);
-    } catch (err) {
-      console.error("[TRADE VOTE] seed failed:", err.message);
     }
+    console.log(`[TRADE VOTE] seeded ${n} already-decided trade(s).`);
+  };
+
+  const seedWithRetry = async () => {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        await seed();
+        return;
+      } catch (err) {
+        console.error(`[TRADE VOTE] seed attempt ${attempt}/5 failed:`, err.message);
+        await new Promise((r) => setTimeout(r, 5000 * attempt));
+      }
+    }
+    // Still couldn't seed after 5 tries. Ticking has to start eventually —
+    // a permanently silent trade watcher is worse than a bounded, one-time
+    // reflood risk — but this is loud on purpose, since it's the one
+    // condition that can still cause exactly the bug this retry loop
+    // exists to prevent.
+    console.error(
+      "[TRADE VOTE] seed failed after 5 attempts — starting the watcher anyway. " +
+        "Approved trades may re-announce until this resolves; check Base44/network health."
+    );
   };
 
   const tick = async () => {
@@ -617,7 +640,7 @@ export function startTradeWatcher(client) {
   };
 
   // Seed first, then sweep shortly after startup and on an interval.
-  seed().then(() => {
+  seedWithRetry().then(() => {
     setTimeout(tick, 10_000);
     setInterval(tick, WATCH_INTERVAL_MS);
   });
