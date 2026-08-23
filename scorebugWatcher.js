@@ -23,9 +23,12 @@
 // touched by the Madden import pipeline and isn't lost on redeploy.
 //
 // Environment:
-//   SCOREBUG_CHANNEL_ID    channel to post cards to (default below)
-//   SCOREBUG_POLL_SECONDS  optional — default 60
-//   SCOREBUG_SEED_HOURS    optional — default 24 (first-boot backlog grace window)
+//   SCOREBUG_CHANNEL_ID     channel to post cards to (default below)
+//   SCOREBUG_POLL_SECONDS   optional — default 60
+//   SCOREBUG_SEED_HOURS     optional — default 24 (first-boot backlog grace window)
+//   SCOREBUG_DELAY_MINUTES  optional — default 5 (wait after final before
+//                           posting, so WeeklyStats has time to sync — see
+//                           the "pending" state below)
 
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
 import { list, getStandings, getCurrentCycle, createEntity, updateEntity } from "./vault.js";
@@ -38,6 +41,7 @@ const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
 const POLL_MS = Number(process.env.SCOREBUG_POLL_SECONDS || 60) * 1000;
 const SEED_HOURS = Number(process.env.SCOREBUG_SEED_HOURS || 24);
+const DELAY_MS = Number(process.env.SCOREBUG_DELAY_MINUTES || 5) * 60 * 1000;
 
 // Games handled this process, so a slow render/post can't be picked up
 // twice by the next tick (same fast in-process guard news.js uses). This
@@ -50,13 +54,17 @@ function gameKey(g) {
   return `${g.season_number ?? "?"}-${g.week ?? "?"}-${g.awayTeam ?? "?"}-${g.homeTeam ?? "?"}`;
 }
 
-// Pull every already-posted key from ScorebugPost. One broad read per tick
-// (same shape as the old loadPosted()), just backed by Base44 instead of a
-// local file.
-async function loadPosted() {
+// Pull every ScorebugPost row for this key's-eye view of state, keyed by
+// game_key -> full row (not just a Set) so the delay logic below can read
+// each row's status/first_seen_at. Backed by Base44, one broad read per tick.
+async function loadState() {
   try {
     const rows = await list("ScorebugPost", {}, { limit: 5000 });
-    return new Set(rows.map((r) => r.game_key).filter(Boolean));
+    const byKey = new Map();
+    for (const r of rows) {
+      if (r.game_key) byKey.set(r.game_key, r);
+    }
+    return byKey;
   } catch (err) {
     console.error(`[SCOREBUG] could not read ScorebugPost: ${err.message}`);
     // Fail closed on the side of NOT reposting: if we can't confirm what's
@@ -65,14 +73,15 @@ async function loadPosted() {
   }
 }
 
-// Claim a key by creating its ScorebugPost row BEFORE sending to Discord.
-// If two ticks somehow race on the same key, the loser just gets a create
-// that succeeds harmlessly (no uniqueness constraint at the DB level) --
-// the in-process `handled` Set is what actually prevents that within one
-// process, and a second process racing this is not a scenario this league's
-// single-instance Railway deploy hits in practice.
-async function claim(key, g) {
-  await createEntity("ScorebugPost", {
+// Claim a key by creating its ScorebugPost row BEFORE sending to Discord (or,
+// for a fresh final, before starting the sync-delay wait). If two ticks
+// somehow race on the same key, the loser just gets a create that succeeds
+// harmlessly (no uniqueness constraint at the DB level) -- the in-process
+// `handled` Set is what actually prevents that within one process, and a
+// second process racing this is not a scenario this league's single-instance
+// Railway deploy hits in practice.
+async function claim(key, g, extra = {}) {
+  return createEntity("ScorebugPost", {
     game_key: key,
     season_number: g.season_number,
     week: g.week,
@@ -80,7 +89,7 @@ async function claim(key, g) {
     away_team: g.awayTeam,
     home_team: g.homeTeam,
     discord_channel_id: CHANNEL_ID,
-    posted_at: new Date().toISOString(),
+    ...extra,
   });
 }
 
@@ -154,8 +163,8 @@ async function tick(client, { seed = false } = {}) {
   const finals = games.filter((g) => g.cycle === currentCycle && isFinal(g));
   if (!finals.length) return;
 
-  const posted = await loadPosted();
-  if (posted === null) return; // couldn't confirm dedup state — skip this tick, don't risk a repost flood
+  const state = await loadState();
+  if (state === null) return; // couldn't confirm dedup state — skip this tick, don't risk a repost flood
   const cutoff = Date.now() - SEED_HOURS * 3600 * 1000;
 
   // Standings are the same for every game in a given season within one
@@ -170,51 +179,71 @@ async function tick(client, { seed = false } = {}) {
 
   for (const g of finals) {
     const key = gameKey(g);
-    if (handled.has(key) || posted.has(key)) continue;
+    if (handled.has(key)) continue;
+
+    const existing = state.get(key);
 
     // First boot on a Vault that already has final games: mark the backlog
-    // as handled rather than dumping a season's worth of cards at once.
-    // NOTE: this cutoff is now a genuine first-boot-only backlog guard --
-    // it no longer has to also compensate for lost dedup state, since
-    // ScorebugPost persists across restarts and reimports. A reimport that
-    // bumps updated_date on old games can no longer cause a repost: those
-    // keys are already sitting in ScorebugPost from when they first posted.
+    // as already-posted (status: 'posted', no delay) rather than dumping a
+    // season's worth of cards at once or making them all wait out the sync
+    // delay. NOTE: this cutoff is now a genuine first-boot-only backlog
+    // guard -- it no longer has to also compensate for lost dedup state,
+    // since ScorebugPost persists across restarts and reimports. A reimport
+    // that bumps updated_date on old games can no longer cause a repost:
+    // those keys are already sitting in ScorebugPost from when they first
+    // posted (or were backlog-claimed).
     if (seed && importedTime(g) < cutoff) {
+      if (existing) continue; // already recorded from a prior boot
       handled.add(key); // avoid re-claiming every tick until the create lands
       try {
-        await claim(key, g);
+        await claim(key, g, { status: "posted", posted_at: new Date().toISOString() });
       } catch (err) {
         console.error(`[SCOREBUG] backlog claim failed for ${key}: ${err.message}`);
       }
       continue;
     }
 
+    // No row yet: this is a newly-final game. Start the sync-delay wait
+    // instead of posting immediately -- WeeklyStats (the contributor/leader
+    // data) lags behind the score itself, so posting right away can render
+    // an incomplete stat strip. A row with no `status` at all is a legacy
+    // row from before this delay existed; treat anything that isn't
+    // literally "pending" as already handled so old posted games can never
+    // be mistaken for freshly-final and re-posted.
+    if (!existing) {
+      handled.add(key);
+      try {
+        await claim(key, g, { status: "pending", first_seen_at: new Date().toISOString() });
+        console.log(`[SCOREBUG] ${key} went final — waiting ${DELAY_MS / 60000}m for stats to sync`);
+      } catch (err) {
+        console.error(`[SCOREBUG] pending claim failed for ${key}: ${err.message}`);
+      }
+      continue;
+    }
+
+    if (existing.status !== "pending") continue; // already posted (or a legacy/undated row) — nothing to do
+
+    const firstSeenAt = existing.first_seen_at ? new Date(existing.first_seen_at).getTime() : 0;
+    if (Date.now() - firstSeenAt < DELAY_MS) continue; // still waiting for stats to sync
+
     handled.add(key); // fast in-process guard against a double-fire mid-render
     try {
-      // Claim BEFORE sending: if the claim write fails, we skip posting
-      // rather than post without a record of having done so.
-      await claim(key, g);
       const rows = await rowsFor(g.season_number);
       const message = await postCard(client, g, rows);
-      if (message) {
-        try {
-          // Best-effort follow-up write; the row already exists from claim(),
-          // so a failure here just means discord_message_id stays blank.
-          const existing = (await list("ScorebugPost", { game_key: key })).find((r) => r.game_key === key);
-          if (existing) {
-            await updateEntity("ScorebugPost", existing.id, { discord_message_id: message.id });
-          }
-        } catch (err) {
-          console.error(`[SCOREBUG] could not stamp message id for ${key}: ${err.message}`);
-        }
-      }
+      await updateEntity("ScorebugPost", existing.id, {
+        status: "posted",
+        posted_at: new Date().toISOString(),
+        discord_message_id: message?.id,
+      });
     } catch (err) {
       console.error(`[SCOREBUG] post failed for ${key}: ${err.message}`);
-      // Claim already landed even on a postCard failure, so this key won't
-      // be retried automatically. That's a deliberate tradeoff: better to
-      // occasionally miss a card than to flood-repost on a render error
-      // that recurs every tick. Check logs for "[SCOREBUG] post failed" and
-      // delete the ScorebugPost row manually to force a retry if needed.
+      // `handled` keeps this key from being retried again within this same
+      // process (matches the pre-existing tradeoff: an occasional miss beats
+      // flood-reposting on a render error that recurs every tick). Unlike
+      // before, though, the row is still sitting at status 'pending' rather
+      // than already marked 'posted' -- a restart (which clears `handled`)
+      // will pick it back up and retry automatically, no manual row deletion
+      // needed.
     }
   }
 }
