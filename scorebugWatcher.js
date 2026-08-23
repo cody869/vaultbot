@@ -56,7 +56,8 @@ function gameKey(g) {
 
 // Pull every ScorebugPost row for this key's-eye view of state, keyed by
 // game_key -> full row (not just a Set) so the delay logic below can read
-// each row's status/first_seen_at. Backed by Base44, one broad read per tick.
+// each row's discord_message_id/created_date. Backed by Base44, one broad
+// read per tick.
 async function loadState() {
   try {
     const rows = await list("ScorebugPost", {}, { limit: 5000 });
@@ -184,19 +185,17 @@ async function tick(client, { seed = false } = {}) {
     const existing = state.get(key);
 
     // First boot on a Vault that already has final games: mark the backlog
-    // as already-posted (status: 'posted', no delay) rather than dumping a
-    // season's worth of cards at once or making them all wait out the sync
-    // delay. NOTE: this cutoff is now a genuine first-boot-only backlog
-    // guard -- it no longer has to also compensate for lost dedup state,
-    // since ScorebugPost persists across restarts and reimports. A reimport
-    // that bumps updated_date on old games can no longer cause a repost:
-    // those keys are already sitting in ScorebugPost from when they first
-    // posted (or were backlog-claimed).
+    // as already-handled (no delay) rather than dumping a season's worth of
+    // cards at once or making them all wait out the sync delay. Uses the
+    // same seeded:<timestamp> sentinel suspensionWatcher.js's seedBacklog()
+    // already established for "claimed without actually posting" -- see the
+    // note on claim()/discord_message_id below for why this stays a
+    // pre-existing field rather than a new one.
     if (seed && importedTime(g) < cutoff) {
       if (existing) continue; // already recorded from a prior boot
       handled.add(key); // avoid re-claiming every tick until the create lands
       try {
-        await claim(key, g, { status: "posted", posted_at: new Date().toISOString() });
+        await claim(key, g, { discord_message_id: `seeded:${Date.now()}` });
       } catch (err) {
         console.error(`[SCOREBUG] backlog claim failed for ${key}: ${err.message}`);
       }
@@ -206,14 +205,21 @@ async function tick(client, { seed = false } = {}) {
     // No row yet: this is a newly-final game. Start the sync-delay wait
     // instead of posting immediately -- WeeklyStats (the contributor/leader
     // data) lags behind the score itself, so posting right away can render
-    // an incomplete stat strip. A row with no `status` at all is a legacy
-    // row from before this delay existed; treat anything that isn't
-    // literally "pending" as already handled so old posted games can never
-    // be mistaken for freshly-final and re-posted.
+    // an incomplete stat strip.
+    //
+    // The delay is tracked WITHOUT any new field: a bare claim() row (no
+    // discord_message_id yet) is "pending," and Base44's own created_date
+    // timestamp is the "pending since" clock. A first version of this used
+    // custom status/first_seen_at fields instead, and those silently didn't
+    // persist -- confirmed the same way the FantasyPick undo bug was (a
+    // create with a field outside the entity's original schema succeeds
+    // with no error, but the field itself doesn't stick). discord_message_id
+    // and created_date both predate tonight, so there's nothing new here
+    // for Base44 to drop.
     if (!existing) {
       handled.add(key);
       try {
-        await claim(key, g, { status: "pending", first_seen_at: new Date().toISOString() });
+        await claim(key, g);
         console.log(`[SCOREBUG] ${key} went final — waiting ${DELAY_MS / 60000}m for stats to sync`);
       } catch (err) {
         console.error(`[SCOREBUG] pending claim failed for ${key}: ${err.message}`);
@@ -221,29 +227,30 @@ async function tick(client, { seed = false } = {}) {
       continue;
     }
 
-    if (existing.status !== "pending") continue; // already posted (or a legacy/undated row) — nothing to do
+    if (existing.discord_message_id) continue; // already posted (or seeded) — nothing to do
 
-    const firstSeenAt = existing.first_seen_at ? new Date(existing.first_seen_at).getTime() : 0;
-    if (Date.now() - firstSeenAt < DELAY_MS) continue; // still waiting for stats to sync
+    const pendingSince = existing.created_date ? new Date(existing.created_date).getTime() : 0;
+    if (Date.now() - pendingSince < DELAY_MS) continue; // still waiting for stats to sync
 
     handled.add(key); // fast in-process guard against a double-fire mid-render
     try {
       const rows = await rowsFor(g.season_number);
       const message = await postCard(client, g, rows);
       await updateEntity("ScorebugPost", existing.id, {
-        status: "posted",
         posted_at: new Date().toISOString(),
-        discord_message_id: message?.id,
+        // postCard() returns undefined (not a throw) when it can't resolve
+        // both team abbreviations -- a permanent, not transient, failure.
+        // Stamp a sentinel so that's treated as "handled" too, matching
+        // this entity's pre-existing claim-before-sending convention,
+        // rather than retrying forever on a game that can never resolve.
+        discord_message_id: message?.id || `unresolved:${Date.now()}`,
       });
     } catch (err) {
       console.error(`[SCOREBUG] post failed for ${key}: ${err.message}`);
-      // `handled` keeps this key from being retried again within this same
-      // process (matches the pre-existing tradeoff: an occasional miss beats
-      // flood-reposting on a render error that recurs every tick). Unlike
-      // before, though, the row is still sitting at status 'pending' rather
-      // than already marked 'posted' -- a restart (which clears `handled`)
-      // will pick it back up and retry automatically, no manual row deletion
-      // needed.
+      // discord_message_id stays unset on a genuine (thrown) failure, so
+      // `handled` only blocks retries within this process -- a restart
+      // clears it and the delay check above will retry automatically, no
+      // manual row deletion needed.
     }
   }
 }
