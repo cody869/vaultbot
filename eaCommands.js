@@ -95,6 +95,21 @@ const DATASET_LABELS = {
   teamstats: "Team stats",
 };
 
+// 18 regular-season weeks, then the postseason: 19 Wild Card, 20 Divisional,
+// 21 Conference Championship, 22 Pro Bowl (excluded below — Madden has no
+// exportable data for it), 23 Super Bowl.
+const PLAYOFF_WEEK_NAMES = {
+  19: "Wild Card",
+  20: "Divisional",
+  21: "Conference Championship",
+  23: "Super Bowl",
+};
+
+function weekOptionLabel(n) {
+  const name = PLAYOFF_WEEK_NAMES[n];
+  return name ? `Week ${n} — ${name}` : `Week ${n}`;
+}
+
 function weekStepRow() {
   // Discord caps a select menu at 25 options. "Previous + current week" +
   // "Current week only" + "All weeks" already takes 3, so week 22 (the Pro
@@ -105,7 +120,7 @@ function weekStepRow() {
     { label: "Current week only", value: "current" },
     ...Array.from({ length: 23 }, (_, i) => i + 1)
       .filter((n) => n !== 22)
-      .map((n) => ({ label: `Week ${n}`, value: String(n) })),
+      .map((n) => ({ label: weekOptionLabel(n), value: String(n) })),
     { label: "All weeks (slow)", value: "all" },
   ];
   return new ActionRowBuilder().addComponents(
@@ -120,7 +135,7 @@ function weekLabel(session) {
   if (session.mode === "current") return "Current week only";
   if (session.mode === "recent") return "Previous + current week";
   if (session.mode === "all") return "All weeks";
-  return `Week ${session.week}`;
+  return weekOptionLabel(session.week);
 }
 
 function dataStepPayload(session) {
@@ -254,7 +269,7 @@ async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DA
     const summary = await inFlight;
     const secs = Math.round((Date.now() - started) / 1000);
     console.log(`[EA] export complete in ${secs}s`, summary);
-    const weekNote = mode === "week" ? ` (week ${week})` : mode === "recent" ? " (previous + current)" : "";
+    const weekNote = mode === "week" ? ` (${weekOptionLabel(week)})` : mode === "recent" ? " (previous + current)" : "";
     const datasetNote =
       datasets.length === ALL_DATASETS.length
         ? "all 8 datasets"
