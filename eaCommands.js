@@ -115,8 +115,17 @@ function weekStepRow() {
   // "Current week only" + "All weeks" already takes 3, so week 22 (the Pro
   // Bowl, already rejected by resolveWeeks' "week" mode) is dropped to make
   // room rather than offering a week number that would just error out.
+  //
+  // Deliberately NOT marking "recent" `default: true`: that renders it as
+  // already-selected in the closed dropdown, but the wizard only advances
+  // when the select menu actually fires a change interaction — clicking the
+  // option that's already shown as chosen doesn't reliably do that, and
+  // there's no separate confirm button on this step. Leaving nothing
+  // default shows the neutral placeholder instead, so any click (including
+  // on "Previous + current week", which stays first/most visible) fires the
+  // interaction and moves to step 2.
   const options = [
-    { label: "Previous + current week", value: "recent", default: true },
+    { label: "Previous + current week", value: "recent" },
     { label: "Current week only", value: "current" },
     ...Array.from({ length: 23 }, (_, i) => i + 1)
       .filter((n) => n !== 22)
@@ -126,7 +135,7 @@ function weekStepRow() {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId("export:week")
-      .setPlaceholder("Select a week")
+      .setPlaceholder("Select a week — Previous + current week is recommended")
       .addOptions(options)
   );
 }
