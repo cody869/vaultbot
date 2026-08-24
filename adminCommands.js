@@ -113,7 +113,7 @@ export const adminCommandBuilder = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName("export")
-      .setDescription("Pull a fresh Madden export from EA into the Vault — walks you through week, then what to pull")
+      .setDescription("Pull a fresh Madden export from EA into the Vault — walks you through week, then which stat categories to pull")
   )
   .addSubcommand((sub) =>
     sub

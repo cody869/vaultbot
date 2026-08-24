@@ -188,14 +188,16 @@ const stagePrefix = (stage) => (stage === Stage.SEASON ? "reg" : "pre");
 /**
  * Work out which weeks to pull.
  *  current     — just the week the league is sitting on
+ *  recent      — previous + current week (the default the /admin export
+ *                wizard opens with)
  *  surrounding — previous, current, next (what snallabot uses on advance)
  *  all         — every preseason + regular/playoff week
  *  week        — one specific regular-season/playoff week, given as a
  *                1-based number (what the app and Discord show). Preseason
  *                isn't reachable this way since the app drops preseason
  *                games on import anyway (see maddenWebhook) — "current" /
- *                "surrounding" still work fine during preseason since they
- *                read the league's actual live stage.
+ *                "recent" / "surrounding" still work fine during preseason
+ *                since they read the league's actual live stage.
  */
 function resolveWeeks(mode, leagueInfo, weekNumber) {
   const { seasonWeek, seasonWeekType } = leagueInfo.careerHubInfo.seasonInfo;
@@ -218,17 +220,25 @@ function resolveWeeks(mode, leagueInfo, weekNumber) {
 
   if (mode === "current") return [{ weekIndex: seasonWeek, stage }];
 
-  // seasonWeekType 8 means the offseason/final week; index 21 is the Pro Bowl
+  // "recent" and "surrounding" below. seasonWeekType 8 means the
+  // offseason/final week; index 21 is the Pro Bowl.
   const current = seasonWeekType === 8 ? 22 : seasonWeek;
   const maxWeek = stage === Stage.PRESEASON ? 3 : 22;
   const prev = current - 1;
   const next = current + 1;
-  return [prev === 21 ? 20 : prev, current, next === 21 ? 22 : next]
-    .filter((w) => w >= 0 && w <= maxWeek)
+  const inRange = (w) =>
+    w >= 0 &&
+    w <= maxWeek &&
     // Guard the case where the league is sitting ON week 21 — upstream lets
     // that through, but there is nothing to export for the Pro Bowl.
-    .filter((w) => !(stage === Stage.SEASON && w === 21))
-    .map((weekIndex) => ({ weekIndex, stage }));
+    !(stage === Stage.SEASON && w === 21);
+
+  const weekIndexes =
+    mode === "surrounding"
+      ? [prev === 21 ? 20 : prev, current, next === 21 ? 22 : next]
+      : [prev === 21 ? 20 : prev, current]; // "recent" (and any unknown mode)
+
+  return weekIndexes.filter(inRange).map((weekIndex) => ({ weekIndex, stage }));
 }
 
 async function exportWeek(client, leagueId, platform, { weekIndex, stage }, datasets) {
@@ -294,7 +304,7 @@ async function exportRosters(client, leagueId, platform, teamList, onProgress) {
  * Run an export.
  *
  * @param {object}   opts
- * @param {"current"|"surrounding"|"all"|"week"} opts.mode   which weeks to pull
+ * @param {"current"|"recent"|"surrounding"|"all"|"week"} opts.mode   which weeks to pull
  * @param {number}   [opts.week]       1-based week number, required when mode is "week"
  * @param {boolean}  opts.rosters      also pull all 32 rosters + free agents
  * @param {boolean}  opts.leagueInfo   also pull teams + standings

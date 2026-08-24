@@ -10,7 +10,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
 } from "discord.js";
-import { runExport } from "./eaExport.js";
+import { runExport, ALL_DATASETS } from "./eaExport.js";
 import { getConnection } from "./eaTokenStore.js";
 import { getWatcherStatus } from "./eaWatcher.js";
 
@@ -82,10 +82,30 @@ setInterval(() => {
   }
 }, 60_000);
 
+// Display labels for the eight per-week datasets — keyed the same as
+// eaExport.js's WEEK_DATASETS so a new dataset there just needs a label here.
+const DATASET_LABELS = {
+  passing: "Passing",
+  rushing: "Rushing",
+  receiving: "Receiving",
+  defense: "Defense",
+  kicking: "Kicking",
+  punting: "Punting",
+  schedules: "Schedules",
+  teamstats: "Team stats",
+};
+
 function weekStepRow() {
+  // Discord caps a select menu at 25 options. "Previous + current week" +
+  // "Current week only" + "All weeks" already takes 3, so week 22 (the Pro
+  // Bowl, already rejected by resolveWeeks' "week" mode) is dropped to make
+  // room rather than offering a week number that would just error out.
   const options = [
-    { label: "Current week", value: "current" },
-    ...Array.from({ length: 23 }, (_, i) => ({ label: `Week ${i + 1}`, value: String(i + 1) })),
+    { label: "Previous + current week", value: "recent", default: true },
+    { label: "Current week only", value: "current" },
+    ...Array.from({ length: 23 }, (_, i) => i + 1)
+      .filter((n) => n !== 22)
+      .map((n) => ({ label: `Week ${n}`, value: String(n) })),
     { label: "All weeks (slow)", value: "all" },
   ];
   return new ActionRowBuilder().addComponents(
@@ -96,15 +116,45 @@ function weekStepRow() {
   );
 }
 
+function weekLabel(session) {
+  if (session.mode === "current") return "Current week only";
+  if (session.mode === "recent") return "Previous + current week";
+  if (session.mode === "all") return "All weeks";
+  return `Week ${session.week}`;
+}
+
 function dataStepPayload(session) {
-  const label = session.mode === "current" ? "Current week" : session.mode === "all" ? "All weeks" : `Week ${session.week}`;
+  const datasets = session.datasets || (session.datasets = ALL_DATASETS.slice());
+  const chosen =
+    datasets.length === ALL_DATASETS.length
+      ? "all 8 categories"
+      : datasets.map((d) => DATASET_LABELS[d]).join(", ");
+
+  const datasetSelect = new StringSelectMenuBuilder()
+    .setCustomId("export:datasets")
+    .setPlaceholder("Choose stat categories")
+    .setMinValues(1)
+    .setMaxValues(ALL_DATASETS.length)
+    .addOptions(
+      ALL_DATASETS.map((d) => ({
+        label: DATASET_LABELS[d],
+        value: d,
+        default: datasets.includes(d),
+      }))
+    );
+
   return {
-    content: `# Madden Export\n**Step 2 of 2 — ${label}.** What should this pull?`,
+    content: [
+      "# Madden Export",
+      `**Step 2 of 2 — ${weekLabel(session)}.**`,
+      `Categories: ${chosen}. Narrow it below to send just one or a few (e.g. passing/rushing/receiving/defense), or leave it as-is for everything, then run.`,
+    ].join("\n"),
     embeds: [],
     components: [
+      new ActionRowBuilder().addComponents(datasetSelect),
       new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("export:data:stats").setLabel("Stats only").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("export:data:rosters").setLabel("Rosters + stats").setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId("export:data:stats").setLabel("Run export").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("export:data:rosters").setLabel("Run export + rosters").setStyle(ButtonStyle.Secondary)
       ),
     ],
   };
@@ -118,7 +168,7 @@ export async function startExportFlow(interaction) {
   }
   newExportSession(interaction.user.id);
   await interaction.editReply({
-    content: "# Madden Export\n**Step 1 of 2 — pick a week.**",
+    content: "# Madden Export\n**Step 1 of 2 — pick a week.** Defaults to previous + current.",
     embeds: [],
     components: [weekStepRow()],
   });
@@ -143,38 +193,47 @@ export async function handleExportComponent(interaction) {
   const parts = id.split(":");
 
   if (parts[1] === "week") {
-    const value = interaction.values[0]; // "current" | "1".."23" | "all"
-    if (value === "current" || value === "all") {
+    const value = interaction.values[0]; // "recent" | "current" | "1".."23" (minus 22) | "all"
+    if (value === "recent" || value === "current" || value === "all") {
       session.mode = value;
       session.week = undefined;
     } else {
       session.mode = "week";
       session.week = Number(value);
     }
+    session.datasets = ALL_DATASETS.slice();
+    await interaction.update(dataStepPayload(session));
+    return true;
+  }
+
+  if (parts[1] === "datasets") {
+    session.datasets = interaction.values;
     await interaction.update(dataStepPayload(session));
     return true;
   }
 
   if (parts[1] === "data") {
     const rosters = parts[2] === "rosters";
-    const { mode, week } = session;
+    const { mode, week, datasets } = session;
     endExportSession(interaction.user.id);
     await interaction.update({ content: "# Madden Export\nStarting…", embeds: [], components: [] });
-    await runExportFlow(interaction, mode, week, rosters);
+    await runExportFlow(interaction, mode, week, rosters, datasets);
     return true;
   }
 
   return true;
 }
 
-async function runExportFlow(interaction, mode, week, rosters) {
+async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DATASETS) {
   if (inFlight) {
     await interaction.editReply({ content: "An export is already running. Give it a minute.", components: [] });
     return;
   }
 
   const started = Date.now();
-  console.log(`[EA] /admin export mode=${mode}${mode === "week" ? ` week=${week}` : ""} rosters=${rosters} by ${interaction.user.tag}`);
+  console.log(
+    `[EA] /admin export mode=${mode}${mode === "week" ? ` week=${week}` : ""} datasets=${datasets.join(",")} rosters=${rosters} by ${interaction.user.tag}`
+  );
 
   // Discord only lets an interaction be edited for 15 minutes, and a full
   // roster pull can approach that. Throttle progress edits, and never let a
@@ -190,16 +249,21 @@ async function runExportFlow(interaction, mode, week, rosters) {
     }
   };
 
-  inFlight = runExport({ mode, week, rosters, datasets: undefined, leagueInfo: true, onProgress });
+  inFlight = runExport({ mode, week, rosters, datasets, leagueInfo: true, onProgress });
   try {
     const summary = await inFlight;
     const secs = Math.round((Date.now() - started) / 1000);
     console.log(`[EA] export complete in ${secs}s`, summary);
+    const weekNote = mode === "week" ? ` (week ${week})` : mode === "recent" ? " (previous + current)" : "";
+    const datasetNote =
+      datasets.length === ALL_DATASETS.length
+        ? "all 8 datasets"
+        : datasets.map((d) => DATASET_LABELS[d] || d).join(", ");
     await interaction.editReply({
       content: [
         "# Madden Export complete",
-        `> Weeks: ${summary.weeks}${mode === "week" ? ` (week ${week})` : ""}`,
-        "> Per week: all 8 datasets",
+        `> Weeks: ${summary.weeks}${weekNote}`,
+        `> Per week: ${datasetNote}`,
         `> League info: ${summary.leagueInfo ? "teams + standings" : "skipped"}`,
         `> Rosters: ${summary.rosters ? `${summary.rosters} teams + free agents` : "skipped"}`,
         `> Took ${secs}s`,
