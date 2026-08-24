@@ -44,10 +44,20 @@ const SEED_HOURS = Number(process.env.SCOREBUG_SEED_HOURS || 24);
 const DELAY_MS = Number(process.env.SCOREBUG_DELAY_MINUTES || 5) * 60 * 1000;
 const POST_TIMEOUT_MS = Number(process.env.SCOREBUG_POST_TIMEOUT_MS || 30_000);
 
-// Games handled this process, so a slow render/post can't be picked up
-// twice by the next tick (same fast in-process guard news.js uses). This
-// is only a same-tick guard now — ScorebugPost is the real dedup record.
-const handled = new Set();
+// NOTE: `handled` is created fresh INSIDE tick() (below), not here at
+// module scope. It used to live here, back when a game was claimed and
+// posted in one shot within a single tick — "added once this process" and
+// "posted forever" were the same thing, so a module-level Set was safe.
+// That stopped being true once a game could sit in `pending` for minutes
+// across many ticks: a module-level Set meant the very first tick to see a
+// new final added it here and NOTHING ever removed it except a failed post
+// attempt — so a game that was simply still waiting out its sync delay got
+// silently skipped by every tick from then on, forever, with no error to
+// log. Confirmed live: two separate games each sat stuck for 30-60+
+// minutes with zero log output, and only posted once a restart wiped this
+// Set clean. A per-tick Set fixes that — it only needs to guard against
+// processing the same key twice within ONE tick's loop (finals shouldn't
+// contain duplicates, but this is cheap insurance), not across ticks.
 
 // Rejects instead of hanging forever if a Vault/Discord call inside
 // postCard() stalls -- a bare `await` on a stuck fetch would otherwise sit
@@ -178,6 +188,11 @@ async function postCard(client, g, standingsRows) {
 }
 
 async function tick(client, { seed = false } = {}) {
+  // Fresh every tick — see the comment above where this used to live at
+  // module scope for why that was the actual bug behind games getting
+  // stuck forever.
+  const handled = new Set();
+
   let games;
   try {
     // Cached -- this watcher's own 60s poll re-reading the whole Game
@@ -258,14 +273,13 @@ async function tick(client, { seed = false } = {}) {
 
     handled.add(key); // fast in-process guard against a double-fire mid-render
     try {
-      // A stuck fetch inside rowsFor()/postCard() (Vault or Discord) can hang
-      // without ever resolving or rejecting -- confirmed live: a game sat
-      // "in progress" with no posted/failed log line for 10+ minutes, then
-      // posted instantly the moment the process restarted (which is what
-      // cleared `handled`, not anything about the hang itself resolving).
-      // A bounded timeout turns a silent indefinite hang into a real error
-      // that the catch below can see and retry from, without needing a
-      // manual restart.
+      // A stuck fetch inside rowsFor()/postCard() (Vault or Discord) could in
+      // principle hang without ever resolving or rejecting. (An earlier
+      // incident that looked exactly like this -- a game silently stuck for
+      // 10+ minutes, then posted instantly on restart -- turned out to
+      // actually be the module-level `handled` Set bug described above, not
+      // a real hang. This timeout is still worth keeping as genuine
+      // insurance against a real one.)
       const message = await withTimeout(
         (async () => postCard(client, g, await rowsFor(g.season_number)))(),
         POST_TIMEOUT_MS,
@@ -286,11 +300,9 @@ async function tick(client, { seed = false } = {}) {
       });
     } catch (err) {
       console.error(`[SCOREBUG] post failed for ${key}: ${err.message}`);
-      // Unlike a hang, a caught failure (including the timeout above) can
-      // safely retry within this same process: no "posted" row was created,
-      // so clearing `handled` lets the very next 60s poll try again instead
-      // of requiring a manual restart.
-      handled.delete(key);
+      // No "posted" row was created, and `handled` is fresh every tick, so
+      // the very next 60s poll retries automatically -- no manual restart
+      // needed.
     }
   }
 }
