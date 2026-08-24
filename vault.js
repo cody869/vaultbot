@@ -1270,6 +1270,35 @@ export async function createEntity(entity, data) {
   return res.json().catch(() => ({}));
 }
 
+// Invoke a Base44 backend function by name. Same auth/retry shape as
+// updateEntity/createEntity — POST verb, retry once on 401/403 after a
+// re-login.
+export async function invokeFunction(name, data = {}) {
+  const url = `${SERVER}/api/apps/${APP_ID}/functions/${name}`;
+  const doFetch = () =>
+    fetch(url, { method: "POST", headers: authHeaders(), body: JSON.stringify(data) });
+
+  let res;
+  try {
+    res = await doFetch();
+    if ((res.status === 401 || res.status === 403) &&
+        (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
+      await botLogin();
+      res = await doFetch();
+    }
+  } catch (err) {
+    console.error(`[FUNC] ${name} invoke failed:`, err.message);
+    throw new Error(`Could not reach the Vault: ${err.message}`);
+  }
+
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.error(`[FUNC] ${name} failed: HTTP ${res.status}`, body);
+    throw new Error(`${name} failed: HTTP ${res.status} ${body?.error ?? ""}`);
+  }
+  return body;
+}
+
 // Trades awaiting committee review.
 export async function getPendingTrades() {
   const rows = await list("TradeSubmission", {}, { sort: "-created_date", limit: 200 });

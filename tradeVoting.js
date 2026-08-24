@@ -22,6 +22,7 @@ import {
   findMemberByTeam,
   memberDisplayName,
   updateEntity,
+  invokeFunction,
   pollCached,
 } from "./vault.js";
 
@@ -527,6 +528,25 @@ export function approvalMessage(trade, players = new Map(), { owners = [] } = {}
 export async function announceApproval(client, trade) {
   if (announced.has(trade.id)) return null;
   announced.add(trade.id); // claim it up front so a race can't double-post
+
+  // This is the one place that reliably sees every newly-approved trade
+  // regardless of how it got approved (in-app committee vote, admin force
+  // approve, or these Discord buttons) — so it's also the right place to
+  // make sure the roster actually moved. processApprovedTrade is idempotent
+  // (Base44-side roster_processed flag), so calling it again here for a
+  // trade the app already processed is a harmless no-op.
+  try {
+    const result = await invokeFunction("processApprovedTrade", { trade_id: trade.id });
+    if (result?.result?.warnings?.length) {
+      console.warn(`[TRADE VOTE] roster move for ${trade.id} had warnings:`, result.result.warnings);
+    } else {
+      console.log(`[TRADE VOTE] roster synced for approved trade ${trade.id}.`);
+    }
+  } catch (err) {
+    console.error(`[TRADE VOTE] roster sync failed for trade ${trade.id}:`, err.message);
+    // Don't block the announcement on this — Cody can replay it later via
+    // Force Approve / processApprovedTrade, which is safe to call again.
+  }
 
   if (!TRADE_ANNOUNCE_CHANNEL_ID) {
     console.log("[TRADE VOTE] TRADE_ANNOUNCE_CHANNEL_ID not set — skipping announcement.");
