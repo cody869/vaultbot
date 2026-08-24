@@ -243,9 +243,27 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
   // the Week 1 AND Week 2 duplicate-row bugs. Posting one dataset at a time
   // means each call's snapshot already includes everything the previous call
   // committed, so there's nothing left to race.
+  //
+  // Each dataset is isolated in its own try/catch. Confirmed live: a game's
+  // final score and passing stats posted successfully, but nothing else did
+  // -- because the old code let one dataset's failure (an EA hiccup, a bad
+  // payload) abort every dataset still queued after it for that week,
+  // silently. Failures are collected and thrown as a single error only
+  // AFTER every dataset has been attempted, so a week ends up as complete
+  // as it can be instead of stopping at the first failure, while the
+  // caller still learns something needs a retry.
+  const failures = [];
   for (const key of datasets) {
-    const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
-    await post(`${base}/${key}`, data);
+    try {
+      const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
+      await post(`${base}/${key}`, data);
+    } catch (err) {
+      console.error(`[EA] week ${weekIndex + 1} ${key} failed: ${err.message}`);
+      failures.push(key);
+    }
+  }
+  if (failures.length) {
+    throw new Error(`week ${weekIndex + 1}: ${failures.join(", ")} failed (see logs)`);
   }
 }
 

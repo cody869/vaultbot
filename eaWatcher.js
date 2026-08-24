@@ -115,10 +115,18 @@ async function tick() {
 
     console.log(`[EA] stats check: last=${lastKey} current=${fingerprint.key}`);
     if (fingerprint.key !== lastKey) {
+      console.log(`[EA] change detected, exporting current week`);
+      // lastKey only advances AFTER a successful export. Advancing it first
+      // (the old order) meant a failed or partial export -- e.g. one of the
+      // 8 per-week datasets erroring out partway through -- still marked
+      // this fingerprint as "handled," so it was silently never retried:
+      // the next check would see the same (or a newer) fingerprint and have
+      // no idea anything was left incomplete. A thrown error here now
+      // leaves lastKey untouched, so the next hourly check re-detects the
+      // same change and tries the export again.
+      await runExport({ mode: "current", rosters: false });
       lastKey = fingerprint.key;
       lastStatsCheckResult = "exported";
-      console.log(`[EA] change detected, exporting current week`);
-      await runExport({ mode: "current", rosters: false });
       console.log("[EA] auto export complete");
     } else {
       lastStatsCheckResult = "unchanged";
