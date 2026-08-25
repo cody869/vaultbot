@@ -35,6 +35,7 @@
 
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
 import { list, getStandings, getCurrentCycle, createEntity, pollCached } from "./vault.js";
+import { isRateLimited } from "./base44Pacer.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
 import { isGameFinal, getGameContributors, getGameStatsCompleteness } from "./scorebugHelper.js";
@@ -192,6 +193,10 @@ async function postCard(client, g, standingsRows) {
 }
 
 async function tick(client, { seed = false } = {}) {
+  // An app-wide Base44 pause is in effect (see base44Pacer.js) -- sit this
+  // tick out rather than piling onto it. The next tick checks again.
+  if (isRateLimited()) return;
+
   // Fresh every tick — see the comment above where this used to live at
   // module scope for why that was the actual bug behind games getting
   // stuck forever.

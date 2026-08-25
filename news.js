@@ -18,12 +18,15 @@
 import crypto from "node:crypto";
 import { SlashCommandBuilder, MessageFlags } from "discord.js";
 import { list, updateEntity, pollCached } from "./vault.js";
+import { isRateLimited } from "./base44Pacer.js";
 import { playerUrl, teamUrl, routeUrl } from "./embeds.js";
 import { teamEmojiByName } from "./emoji.js";
 
 const ENTITY = "NewsArticle";
 const CONTENT_CHANNEL_ID = process.env.CONTENT_CHANNEL_ID || "654425873004625929";
-const POLL_MS = Number(process.env.NEWS_POLL_SECONDS || 60) * 1000;
+// Article posts are inherently asynchronous editorial content -- a several-
+// minute delay reads as normal for a news feed, unlike live game scores.
+const POLL_MS = Number(process.env.NEWS_POLL_SECONDS || 360) * 1000;
 const SEED_HOURS = Number(process.env.NEWS_SEED_HOURS || 24);
 const PING_ROLE_ID = process.env.NEWS_PING_ROLE_ID || "";
 
@@ -269,10 +272,10 @@ async function editArticle(client, a) {
 // Server-side filters aren't reliable here (same as everywhere else in the
 // bot), so pull broad and decide in memory.
 async function fetchArticles(limit = 500) {
-  // Backs both the 60s watcher tick and /news — neither needs sub-minute
+  // Backs both the watcher tick and /news — neither needs sub-minute
   // freshness, and re-reading the whole collection every tick with no
   // caching was part of what tripped Base44's read-rate limit.
-  return pollCached(`news:${limit}`, 55_000, () => list(ENTITY, {}, { sort: "-published_at", limit }));
+  return pollCached(`news:${limit}`, 355_000, () => list(ENTITY, {}, { sort: "-published_at", limit }));
 }
 
 function isDue(a) {
@@ -286,6 +289,10 @@ function publishedTime(a) {
 }
 
 async function tick(client, { seed = false } = {}) {
+  // An app-wide Base44 pause is in effect (see base44Pacer.js) -- sit this
+  // tick out rather than piling onto it. The next tick checks again.
+  if (isRateLimited()) return;
+
   let rows;
   try {
     rows = await fetchArticles();

@@ -6,6 +6,8 @@
 
 import { MessageFlags } from 'discord.js';
 
+import { isRateLimited } from './base44Pacer.js';
+
 import {
   ENTITIES,
   getLeague,
@@ -1113,11 +1115,26 @@ async function cmdDoctor(interaction) {
 
 let lastPingedPick = null;
 
-export function startDraftWatcher(client, { intervalMs = 60 * 1000 } = {}) {
+// intervalMs is the tick cadence while a draft is actually live (clock pings,
+// autopicks need that tightness). idleIntervalMs is used the rest of the
+// season, when draft_status isn't 'in_progress' -- which is most of it --
+// so this watcher isn't polling FantasyLeague every 60s for nothing. Not
+// applied to warmDraftPool (index.js): that one is deliberately NOT gated on
+// draft_status, since /fantasy queue needs to autocomplete before a draft
+// starts too.
+export function startDraftWatcher(client, { intervalMs = 60 * 1000, idleIntervalMs = 5 * 60 * 1000 } = {}) {
   const tick = async () => {
+    let delay = idleIntervalMs; // default: back off; tightened below only once a draft is live
     try {
+      // An export (or any other burst) can drain the app-wide read budget.
+      // Skip this turn rather than adding to the pile -- the clock is
+      // checked again next tick, and autopick deadlines are absolute so
+      // nothing is missed by sitting one out. See base44Pacer.js.
+      if (isRateLimited()) return;
+
       const league = await getLeague();
-      if (!league || league.draft_status !== 'in_progress') return;
+      if (!league || league.draft_status !== 'in_progress') return; // stays at idleIntervalMs
+      delay = intervalMs; // draft is live -- resume the tight cadence autopick deadlines need
       // Paused: no autopicks, no "on the clock" pings. Everything resumes
       // where it left off when the commissioner runs /fantasy resume.
       if (league.draft_paused) return;
@@ -1171,12 +1188,14 @@ export function startDraftWatcher(client, { intervalMs = 60 * 1000 } = {}) {
         });
       }
     } catch (err) {
+      if (err.status === 429) return; // expected during a 429 pause; not an error
       console.error('[fantasy] draft watcher failed:', err.message);
+    } finally {
+      setTimeout(tick, delay);
     }
   };
 
   setTimeout(tick, 20 * 1000);
-  setInterval(tick, intervalMs);
   console.log('[fantasy] draft watcher started');
 }
 

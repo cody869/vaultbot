@@ -24,6 +24,7 @@ import {
   invokeFunction,
   pollCached,
 } from "./vault.js";
+import { isRateLimited } from "./base44Pacer.js";
 
 const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 
@@ -41,8 +42,9 @@ const TRADE_CHANNEL_ID = process.env.TRADE_CHANNEL_ID || null;
 // the review card updates in place and nothing else is posted.
 const TRADE_ANNOUNCE_CHANNEL_ID = process.env.TRADE_ANNOUNCE_CHANNEL_ID || null;
 
-// How often to look for newly submitted trades to post.
-const WATCH_INTERVAL_MS = 60_000;
+// How often to look for newly submitted trades to post. Committee review
+// isn't split-second, so this can run a bit slower than a live-data watcher.
+const WATCH_INTERVAL_MS = 90_000;
 
 // customId: tvote:<action>:<tradeId>
 const ID = (action, tradeId) => `tvote:${action}:${tradeId}`;
@@ -632,19 +634,23 @@ export function startTradeWatcher(client) {
   };
 
   const tick = async () => {
+    // An app-wide Base44 pause is in effect (see base44Pacer.js) -- sit this
+    // tick out rather than piling onto it. The next tick checks again.
+    if (isRateLimited()) return;
+
     try {
       // Cached -- getPendingTrades/getAllTrades are only ever used by this
       // watcher's own seed/tick, so re-reading the whole TradeSubmission
-      // collection every 60s with no caching was pure waste, and part of
+      // collection every tick with no caching was pure waste, and part of
       // what tripped Base44's read-rate limit. One read now serves both the
       // pending list (derived in memory, same filter getPendingTrades()
       // uses) and the full list, instead of two separate live reads per
-      // tick. TTL is just under the 60s tick interval so the watcher's own
+      // tick. TTL is just under the tick interval so the watcher's own
       // scheduled tick always finds it expired, while anything landing in
       // the same window is served from cache. handleTradeVote's own
       // getTradeById() (a live, per-vote lookup) is untouched and stays
       // fully fresh.
-      const all = await pollCached('trades:all', 55_000, () => getAllTrades(300));
+      const all = await pollCached('trades:all', 85_000, () => getAllTrades(300));
 
       // 1) Post newly submitted trades for review.
       const pending = all.filter((t) => (t.status ?? 'pending') === 'pending');

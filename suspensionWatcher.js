@@ -26,11 +26,15 @@
 
 import { MessageFlags, AttachmentBuilder, EmbedBuilder } from 'discord.js';
 import { list, getLeagueMembers, memberDisplayName, updateEntity, pollCached } from './vault.js';
+import { isRateLimited } from './base44Pacer.js';
 import { renderSuspensionCard } from './suspensionCard.js';
 import { abbrFromName } from './emoji.js';
 
 const CHANNEL_ID = process.env.SUSPENSIONS_CHANNEL_ID;
-const POLL_MS = (Number(process.env.SUSPENSION_POLL_SECONDS) || 60) * 1000;
+// A suspension is posted after a human committee/admin decision already
+// happened elsewhere -- there's no "live" event being tracked here, just
+// propagation delay to Discord, so several minutes is imperceptible.
+const POLL_MS = (Number(process.env.SUSPENSION_POLL_SECONDS) || 720) * 1000;
 const SEED_HOURS = Number(process.env.SUSPENSION_SEED_HOURS) || 24;
 
 const PID = process.pid;
@@ -248,12 +252,16 @@ async function seedBacklog() {
 }
 
 async function tick(client) {
+  // An app-wide Base44 pause is in effect (see base44Pacer.js) -- sit this
+  // tick out rather than piling onto it. The next tick checks again.
+  if (isRateLimited()) return;
+
   try {
     // Cached (not claim()'s own re-read above, which must stay live to
     // verify a write actually stuck) -- this is just "scan for anything
-    // newly due," which doesn't need sub-minute freshness on a 60s poll.
+    // newly due," which doesn't need sub-minute freshness on this poll.
     const [all, members] = await Promise.all([
-      pollCached('suspension:all', 55_000, () => list('Suspension', {}, { sort: '-created_date', limit: 5000 })),
+      pollCached('suspension:all', 715_000, () => list('Suspension', {}, { sort: '-created_date', limit: 5000 })),
       getLeagueMembers(),
     ]);
 

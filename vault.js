@@ -3,7 +3,7 @@
 // bearer token (needed once the app requires login). Otherwise it falls back to
 // anonymous reads (works only while the app is public).
 import { abbrFromName } from "./emoji.js";
-import { pace } from "./base44Pacer.js";
+import { pace, recordRetryAfter } from "./base44Pacer.js";
 
 const APP_ID = process.env.BASE44_APP_ID;
 const SERVER = process.env.BASE44_SERVER_URL || "https://base44.app";
@@ -134,20 +134,6 @@ export async function pollCached(key, ttlMs, fn) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Base44's 429 body names exactly how long to back off (e.g. "Retry after 7
-// seconds."). Honor that instead of guessing — but cap it, so a request on a
-// hard-deadline path (autocomplete's 3s budget) can never hang indefinitely
-// waiting out one of the much longer backoffs seen during sustained overload
-// (confirmed live: up to 56s). A caller past its own deadline by the time
-// this resolves just fails as before; this only helps the common case where
-// a short, honored backoff clears the very next attempt.
-const RETRY_429_CAP_MS = 10_000;
-function parseRetryAfterMs(body) {
-  const m = /retry after (\d+(?:\.\d+)?)\s*second/i.exec(body || "");
-  const seconds = m ? Number(m[1]) : 3;
-  return Math.min(RETRY_429_CAP_MS, Math.max(500, seconds * 1000));
-}
-
 // Read an entity via the REST endpoint. `filter` is a plain object; it's sent
 // as Base44's query params. Returns an array (possibly empty). Throws only on
 // an actual network/HTTP failure — an empty entity returns []. If a request is
@@ -179,7 +165,9 @@ export async function list(entity, filter = {}, opts = {}) {
     }
     if (res.status === 429) {
       const body = await res.text().catch(() => "");
-      const waitMs = parseRetryAfterMs(body);
+      // recordRetryAfter also marks the app-wide pause every watcher's
+      // isRateLimited() check sees -- see base44Pacer.js.
+      const waitMs = recordRetryAfter(body);
       console.warn(`[VAULT] 429 reading ${entity}, retrying in ${waitMs}ms`);
       await sleep(waitMs);
       res = await doFetch();

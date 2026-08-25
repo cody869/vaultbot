@@ -5,7 +5,7 @@
 // rest of vaultbot. Query-param filters on Base44 REST are unreliable from the
 // bot, so every read pulls the collection and filters in memory.
 
-import { pace } from './base44Pacer.js';
+import { pace, recordRetryAfter } from './base44Pacer.js';
 
 const BASE = process.env.BASE44_BASE || 'https://app.base44.com';
 const APP_ID = process.env.BASE44_APP_ID || '69d09944c8636f39abaa7ef0';
@@ -84,17 +84,6 @@ async function authHeaders() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Base44's 429 body names exactly how long to back off (e.g. "Retry after 7
-// seconds."). Honor that instead of failing outright — capped so a caller on
-// a hard-deadline path never hangs indefinitely waiting out one of the much
-// longer backoffs seen during sustained overload (confirmed live: up to 56s).
-const RETRY_429_CAP_MS = 10_000;
-function parseRetryAfterMs(body) {
-  const m = /retry after (\d+(?:\.\d+)?)\s*second/i.exec(body || '');
-  const seconds = m ? Number(m[1]) : 3;
-  return Math.min(RETRY_429_CAP_MS, Math.max(500, seconds * 1000));
-}
-
 async function request(method, url, body, { retryAuth = true, retry429 = true } = {}) {
   await pace(); // bot-wide minimum spacing -- see base44Pacer.js
   const res = await fetch(url, {
@@ -113,12 +102,18 @@ async function request(method, url, body, { retryAuth = true, retry429 = true } 
   // than waiting the few seconds Base44 itself asked for. A 429 means the
   // request was rejected before doing anything, so retrying a write is safe
   // too -- nothing was applied on the first attempt.
-  if (res.status === 429 && retry429) {
+  if (res.status === 429) {
     const text = await res.text().catch(() => '');
-    const waitMs = parseRetryAfterMs(text);
-    console.warn(`[fantasy] 429 on ${method} ${url}, retrying in ${waitMs}ms`);
-    await sleep(waitMs);
-    return request(method, url, body, { retryAuth, retry429: false });
+    // recordRetryAfter also marks the app-wide pause every watcher's
+    // isRateLimited() check sees -- see base44Pacer.js. Record it even when
+    // this particular call isn't retrying (retry429:false), so a background
+    // watcher's own 429 still pauses everyone else.
+    const waitMs = recordRetryAfter(text);
+    if (retry429) {
+      console.warn(`[fantasy] 429 on ${method} ${url}, retrying in ${waitMs}ms`);
+      await sleep(waitMs);
+      return request(method, url, body, { retryAuth, retry429: false });
+    }
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -296,11 +291,15 @@ export const ENTITIES = {
 // keystroke in /fantasy pick and /fantasy queue (and every draft-watcher
 // tick) -- confirmed live: Base44 started 429ing FantasyPick reads with
 // "App entity read traffic volume limit exceeded" during an active draft.
-// Every write path already calls invalidate(ENTITIES.league/team/pick), as
-// if these were meant to be cached from the start; they just never
-// actually were. A short TTL is enough to absorb a burst of keystrokes
-// (typically well under 10s) without making draft state feel stale.
-const FANTASY_READ_TTL_MS = 10_000;
+// Every write path already calls invalidate(ENTITIES.league/team/pick), so a
+// change made through the bot is reflected immediately regardless of TTL --
+// this only bounds staleness for an edit made directly in the Base44 app
+// instead of through the bot, which is rare. 50s (just under the draft
+// watcher's 60s tick and warmDraftPool's 240s tick -- see fantasyCommands.js
+// / index.js) is still well within a keystroke burst's actual span, but
+// means those watchers' own scheduled reads stop hitting Base44 live every
+// single tick, which a 10s TTL never actually prevented.
+const FANTASY_READ_TTL_MS = 50_000;
 
 export async function getLeague() {
   const rows = await cachedList(ENTITIES.league, FANTASY_READ_TTL_MS);

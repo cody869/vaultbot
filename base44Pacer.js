@@ -35,3 +35,42 @@ export async function pace() {
     await new Promise((r) => setTimeout(r, wait));
   }
 }
+
+// --- circuit breaker -------------------------------------------------------
+//
+// The pacer above only spaces requests apart; it doesn't stop a genuine 429
+// burst (e.g. several EA-export rollup reads landing close together) from
+// having every independent watcher retry into the same wall at once. When
+// ANY caller sees a 429, it records how long Base44 itself asked for via
+// recordRetryAfter() below -- every OTHER caller checking isRateLimited()
+// then sees the app-wide pause and can sit its turn out instead of piling
+// on. Watchers check this at the top of their own tick and skip; user-facing
+// command paths are NOT gated on it (a user is actively waiting on those) and
+// keep using the bounded single-retry wait recordRetryAfter() also returns.
+
+const RETRY_CAP_MS = 10_000; // per-request bounded retry cap (existing behavior)
+const PAUSE_CAP_MS = 120_000; // app-wide circuit-breaker pause cap
+
+let pausedUntil = 0;
+
+function parseRetrySeconds(body) {
+  const m = /retry after (\d+(?:\.\d+)?)\s*second/i.exec(body || "");
+  return m ? Number(m[1]) : 3;
+}
+
+/**
+ * Call this from the one place each caller already detects a 429. Records
+ * the app-wide pause AND returns the same bounded wait that caller uses for
+ * its own single retry -- one parse serves both purposes instead of every
+ * module duplicating the same regex.
+ */
+export function recordRetryAfter(body) {
+  const seconds = parseRetrySeconds(body);
+  pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(PAUSE_CAP_MS, Math.max(1000, seconds * 1000)));
+  return Math.min(RETRY_CAP_MS, Math.max(500, seconds * 1000));
+}
+
+/** Background watchers check this and skip their turn while a pause is active. */
+export function isRateLimited() {
+  return Date.now() < pausedUntil;
+}

@@ -21,6 +21,7 @@ import {
 } from "./fantasyCommands.js";
 import { startFantasyWatcher } from "./fantasyLeague.js";
 import { warmDraftPool } from "./fantasyDraft.js";
+import { isRateLimited } from "./base44Pacer.js";
 import {
   getStandings,
   getStatLeaders,
@@ -93,12 +94,16 @@ client.once(Events.ClientReady, async (c) => {
   // own TTL was forcing a full 10k-row Player fetch every cycle regardless
   // of whether the cache had actually gone stale yet.
   setInterval(() => {
+    // An app-wide Base44 pause is in effect (see base44Pacer.js) -- sit
+    // this cycle out rather than piling onto it.
+    if (isRateLimited()) return;
     warmPlayerCache().catch(() => {});
   }, 300_000);
   // Same 3-second autocomplete deadline applies to /fantasy pick and
   // /fantasy queue — warm the draft pool too (no-ops when no draft is live).
   await warmDraftPool().catch((err) => console.error('[fantasy] pool warm-up failed:', err.message));
   setInterval(() => {
+    if (isRateLimited()) return;
     warmDraftPool().catch(() => {});
   }, 240_000);
   startScheduler(c);

@@ -14,6 +14,8 @@ import {
   invalidate,
 } from './fantasyStore.js';
 
+import { isRateLimited } from './base44Pacer.js';
+
 import {
   indexWeeklyStats,
   pointsAllowedByTeam,
@@ -429,11 +431,17 @@ export async function runScoringPass({ onWeekScored } = {}) {
 export function startFantasyWatcher(client, { intervalMs = 10 * 60 * 1000, onWeekScored } = {}) {
   const tick = async () => {
     try {
+      // Scoring is never urgent -- a week that just finished can wait for
+      // the next pass rather than competing with an export for read
+      // budget. See base44Pacer.js.
+      if (isRateLimited()) return;
+
       const result = await runScoringPass({ onWeekScored });
       if (result?.scored?.length) {
         console.log(`[fantasy] scored ${result.scored.length} week(s)`);
       }
     } catch (err) {
+      if (err.status === 429) return; // expected during a 429 pause; not an error
       console.error('[fantasy] scoring pass failed:', err.message);
     }
   };
