@@ -60,7 +60,15 @@ function buildStatusLines(items, statuses) {
     byWeek.get(it.week).push(i);
   });
   for (const wk of weekOrder) {
-    const parts = byWeek.get(wk).map((i) => `${icon(i)} ${DATASET_LABELS[items[i].dataset] || items[i].dataset}`);
+    const parts = byWeek.get(wk).map((i) => {
+      // A combined item (see eaExport.js's COMBINE_STATS) carries multiple
+      // categories in `datasets` -- show all of them, not just the one
+      // `dataset` anchors the POST path to.
+      const label = items[i].datasets
+        ? items[i].datasets.map((d) => DATASET_LABELS[d] || d).join("+")
+        : DATASET_LABELS[items[i].dataset] || items[i].dataset;
+      return `${icon(i)} ${label}`;
+    });
     lines.push(`**Week ${wk}:** ${parts.join(" ")}`);
   }
 

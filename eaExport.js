@@ -140,6 +140,30 @@ const WEEK_DATASETS = {
 
 const ALL_DATASETS = Object.keys(WEEK_DATASETS);
 
+/*
+ * The four per-week player-stat datasets all describe the same players in
+ * the same games for the same week, just split by category. Confirmed live
+ * (via summarizeFetchedShape's diagnostic log) that each comes back under
+ * its own non-colliding top-level key -- playerPassingStatInfoList,
+ * playerRushingStatInfoList, playerReceivingStatInfoList,
+ * playerDefensiveStatInfoList -- so a shallow merge of any subset is safe
+ * and lossless on EA's side.
+ *
+ * What's NOT verified is how the destination (maddenWebhook's
+ * detectPayloadType, outside this repo) handles a body carrying more than
+ * one of those keys at once -- it's already been observed misclassifying a
+ * single-category "defense" pull as "rushing" once, which suggests its
+ * detection is not simple/robust. OFF by default for that reason: set
+ * EA_COMBINE_STATS=true only after confirming the destination actually
+ * imports every combined category correctly (the [EA] ... fetched -> log
+ * line for a combined item lists every list key + row count it merged, so a
+ * mismatch between what was sent and what landed downstream is easy to
+ * spot). Trivial to roll back -- unset the var, next export goes back to
+ * one POST per category.
+ */
+const PLAYER_STAT_DATASETS = ["passing", "rushing", "receiving", "defense"];
+const COMBINE_STATS = process.env.EA_COMBINE_STATS === "true";
+
 function requireUrl() {
   if (!EXPORT_URL) {
     throw new Error("MADDEN_EXPORT_URL is not set — nowhere to send the export.");
@@ -335,8 +359,28 @@ function buildPlan({ weeks, datasets, willExportLeagueInfo, rosters, teamList })
     items.push({ type: "teams", label: "Teams" });
     items.push({ type: "standings", label: "Standings" });
   }
+
+  // When enabled (see COMBINE_STATS above), the player-stat categories among
+  // the requested datasets collapse into one combined item per week instead
+  // of one item each -- same total data, one POST instead of up to four.
+  // Only worth doing with 2+ of them actually selected; datasets doesn't
+  // change per week, so this is computed once outside the loop.
+  const combinable = COMBINE_STATS ? datasets.filter((k) => PLAYER_STAT_DATASETS.includes(k)) : [];
+  const singles = combinable.length > 1 ? datasets.filter((k) => !combinable.includes(k)) : datasets;
+
   for (const w of weeks) {
-    for (const key of datasets) {
+    if (combinable.length > 1) {
+      items.push({
+        type: "stat",
+        weekIndex: w.weekIndex,
+        stage: w.stage,
+        datasets: combinable, // combined categories -- see processItem's "stat" case
+        dataset: combinable[0], // anchors the POST path; see processItem
+        week: w.weekIndex + 1,
+        label: `Week ${w.weekIndex + 1} — ${combinable.join("+")} (combined)`,
+      });
+    }
+    for (const key of singles) {
       items.push({
         type: "stat",
         weekIndex: w.weekIndex,
@@ -372,6 +416,31 @@ async function processItem(client, leagueId, platform, item, cancelSignal) {
       return;
     }
     case "stat": {
+      const base = `/${platform}/${leagueId}/week/${stagePrefix(item.stage)}/${item.weekIndex + 1}`;
+
+      if (item.datasets) {
+        // Combined player-stat categories -- see COMBINE_STATS above. Each
+        // dataset's own fetch is unchanged; only the posting is merged into
+        // one body. Fetches run in parallel since they're independent EA
+        // reads, not destination POSTs -- the "post one item at a time"
+        // rule is about not stacking load on the destination, which this
+        // still honors (exactly one POST for the whole combined set).
+        const parts = await Promise.all(
+          item.datasets.map((key) => WEEK_DATASETS[key](client)(leagueId, item.stage, item.weekIndex))
+        );
+        // Each part contributes its own non-colliding *StatInfoList key
+        // (confirmed live -- see COMBINE_STATS above), so a shallow merge is
+        // lossless.
+        const merged = Object.assign({}, ...parts);
+        const lists = Object.keys(merged).filter((k) => Array.isArray(merged[k]));
+        console.log(
+          `[EA] ${item.label} fetched -> combined ${item.datasets.length} datasets into 1 POST ` +
+          `(${lists.map((k) => `${k}:${merged[k].length}`).join(", ")})`
+        );
+        await post(`${base}/${item.dataset}`, merged, 3, cancelSignal);
+        return;
+      }
+
       const data = await WEEK_DATASETS[item.dataset](client)(leagueId, item.stage, item.weekIndex);
       // Diagnostic only: confirmed live that a "defense" pull got classified
       // as "rushing" by the destination even though this code unambiguously
@@ -382,7 +451,6 @@ async function processItem(client, leagueId, platform, item, cancelSignal) {
       // from here. Logging what EA actually sent back, right before it's
       // posted, settles which side it's on without guessing.
       console.log(`[EA] ${item.label} fetched -> ${summarizeFetchedShape(data)}`);
-      const base = `/${platform}/${leagueId}/week/${stagePrefix(item.stage)}/${item.weekIndex + 1}`;
       await post(`${base}/${item.dataset}`, data, 3, cancelSignal);
       return;
     }
