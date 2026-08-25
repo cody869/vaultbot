@@ -131,11 +131,31 @@ export async function pollCached(key, ttlMs, fn) {
   }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Base44's 429 body names exactly how long to back off (e.g. "Retry after 7
+// seconds."). Honor that instead of guessing — but cap it, so a request on a
+// hard-deadline path (autocomplete's 3s budget) can never hang indefinitely
+// waiting out one of the much longer backoffs seen during sustained overload
+// (confirmed live: up to 56s). A caller past its own deadline by the time
+// this resolves just fails as before; this only helps the common case where
+// a short, honored backoff clears the very next attempt.
+const RETRY_429_CAP_MS = 10_000;
+function parseRetryAfterMs(body) {
+  const m = /retry after (\d+(?:\.\d+)?)\s*second/i.exec(body || "");
+  const seconds = m ? Number(m[1]) : 3;
+  return Math.min(RETRY_429_CAP_MS, Math.max(500, seconds * 1000));
+}
+
 // Read an entity via the REST endpoint. `filter` is a plain object; it's sent
 // as Base44's query params. Returns an array (possibly empty). Throws only on
 // an actual network/HTTP failure — an empty entity returns []. If a request is
 // rejected for auth (401/403) and we have credentials, it re-logs in once and
-// retries.
+// retries. A 429 (rate limit) also gets a single bounded retry, honoring the
+// server's own suggested wait — confirmed live: a redeploy's burst of
+// boot-time reads (player cache warm, draft pool warm, every watcher's seed
+// read) reliably 429s on the very first attempt, and previously just failed
+// outright rather than waiting the few seconds Base44 itself asked for.
 export async function list(entity, filter = {}, opts = {}) {
   const doFetch = async () => {
     const url = new URL(`${SERVER}/api/apps/${APP_ID}/entities/${entity}`);
@@ -153,6 +173,13 @@ export async function list(entity, filter = {}, opts = {}) {
     // Token expired or app now requires auth — re-login once and retry.
     if ((res.status === 401 || res.status === 403) && (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
       await botLogin();
+      res = await doFetch();
+    }
+    if (res.status === 429) {
+      const body = await res.text().catch(() => "");
+      const waitMs = parseRetryAfterMs(body);
+      console.warn(`[VAULT] 429 reading ${entity}, retrying in ${waitMs}ms`);
+      await sleep(waitMs);
       res = await doFetch();
     }
   } catch (err) {

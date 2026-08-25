@@ -80,7 +80,20 @@ async function authHeaders() {
   };
 }
 
-async function request(method, url, body, { retryAuth = true } = {}) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Base44's 429 body names exactly how long to back off (e.g. "Retry after 7
+// seconds."). Honor that instead of failing outright — capped so a caller on
+// a hard-deadline path never hangs indefinitely waiting out one of the much
+// longer backoffs seen during sustained overload (confirmed live: up to 56s).
+const RETRY_429_CAP_MS = 10_000;
+function parseRetryAfterMs(body) {
+  const m = /retry after (\d+(?:\.\d+)?)\s*second/i.exec(body || '');
+  const seconds = m ? Number(m[1]) : 3;
+  return Math.min(RETRY_429_CAP_MS, Math.max(500, seconds * 1000));
+}
+
+async function request(method, url, body, { retryAuth = true, retry429 = true } = {}) {
   const res = await fetch(url, {
     method,
     headers: await authHeaders(),
@@ -89,7 +102,20 @@ async function request(method, url, body, { retryAuth = true } = {}) {
 
   if (res.status === 401 && retryAuth) {
     cachedToken = null;
-    return request(method, url, body, { retryAuth: false });
+    return request(method, url, body, { retryAuth: false, retry429 });
+  }
+  // A single bounded retry, honoring the server's own suggested wait --
+  // confirmed live: FantasyLeague/FantasyPick reads reliably 429 right after
+  // a redeploy's boot-time burst, and previously just failed outright rather
+  // than waiting the few seconds Base44 itself asked for. A 429 means the
+  // request was rejected before doing anything, so retrying a write is safe
+  // too -- nothing was applied on the first attempt.
+  if (res.status === 429 && retry429) {
+    const text = await res.text().catch(() => '');
+    const waitMs = parseRetryAfterMs(text);
+    console.warn(`[fantasy] 429 on ${method} ${url}, retrying in ${waitMs}ms`);
+    await sleep(waitMs);
+    return request(method, url, body, { retryAuth, retry429: false });
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
