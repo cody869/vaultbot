@@ -170,48 +170,78 @@ function calculateMessageAuthData(blazeId, requestId) {
   };
 }
 
-async function sendBlazeRequest(token, session, request) {
-  const authData = calculateMessageAuthData(session.blazeId, session.requestId);
-  const { requestPayload, ...rest } = request;
+// A Blaze session can go stale mid-export on a league that takes a while to
+// pull (confirmed live: ERR_AUTHENTICATION_REQUIRED starting partway through
+// an export that had been working fine for several minutes, failing every
+// remaining payload at once). sendBlazeRequest/getExportData below take a
+// `sessionBox` (holding the session by reference, not by value) rather than
+// a plain session, so a refresh from inside one request is immediately
+// visible to every other in-flight or subsequent request sharing the same
+// client -- see createEAClient below.
+const isAuthError = (parsed) => parsed?.error?.errorname === "ERR_AUTHENTICATION_REQUIRED";
 
-  const body = {
-    apiVersion: 2,
-    clientDevice: 3,
-    requestInfo: JSON.stringify({
-      ...rest,
-      messageAuthData: authData,
-      messageExpirationTime: Math.floor(Date.now() / 1000),
-      deviceId: MACHINE_KEY,
-      ipAddress: "127.0.0.1",
-      requestPayload: JSON.stringify(requestPayload),
-    }),
+async function refreshSessionBox(token, sessionBox) {
+  sessionBox.current = { ...(await retrieveBlazeSession(token)), requestId: sessionBox.current.requestId };
+}
+
+async function sendBlazeRequest(token, sessionBox, request) {
+  const attempt = async () => {
+    const session = sessionBox.current;
+    const authData = calculateMessageAuthData(session.blazeId, session.requestId);
+    const { requestPayload, ...rest } = request;
+
+    const body = {
+      apiVersion: 2,
+      clientDevice: 3,
+      requestInfo: JSON.stringify({
+        ...rest,
+        messageAuthData: authData,
+        messageExpirationTime: Math.floor(Date.now() / 1000),
+        deviceId: MACHINE_KEY,
+        ipAddress: "127.0.0.1",
+        requestPayload: JSON.stringify(requestPayload),
+      }),
+    };
+
+    const res = await fetch(`${BLAZE_BASE}/mca/Process/${session.sessionKey}`, {
+      dispatcher,
+      method: "POST",
+      headers: blazeHeaders(token),
+      body: JSON.stringify(body),
+    });
+
+    const text = await res.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      throw new EAAccountError(`Failed to send Blaze request. Response: ${text}`);
+    }
+    if (parsed.error) throw new BlazeError(parsed);
+    return parsed;
   };
 
-  const res = await fetch(`${BLAZE_BASE}/mca/Process/${session.sessionKey}`, {
-    dispatcher,
-    method: "POST",
-    headers: blazeHeaders(token),
-    body: JSON.stringify(body),
-  });
-
-  const text = await res.text();
-  let parsed;
   try {
-    parsed = JSON.parse(text);
+    return await attempt();
   } catch (e) {
-    throw new EAAccountError(`Failed to send Blaze request. Response: ${text}`);
+    if (e instanceof BlazeError && isAuthError(e.error)) {
+      await refreshSessionBox(token, sessionBox);
+      return attempt();
+    }
+    throw e;
   }
-  if (parsed.error) throw new BlazeError(parsed);
-  return parsed;
 }
 
 /**
  * Fetch one export payload. EA returns ERR_TIMEOUT under load fairly
  * often on big leagues, so this backs off and retries rather than
- * failing the whole export.
+ * failing the whole export. Also self-heals a session that expired
+ * mid-export (see sessionBox above) by refreshing once and retrying the
+ * same attempt slot, rather than failing every remaining payload.
  */
-async function getExportData(token, session, exportType, body, retries = 5, baseDelayMs = 1000) {
+async function getExportData(token, sessionBox, exportType, body, retries = 5, baseDelayMs = 1000) {
   for (let attempt = 0; attempt < retries; attempt++) {
+    const session = sessionBox.current;
     const res = await fetch(`${BLAZE_BASE}/mca/${exportType}/${session.sessionKey}`, {
       dispatcher,
       method: "POST",
@@ -234,10 +264,14 @@ async function getExportData(token, session, exportType, body, retries = 5, base
         await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** attempt));
         continue;
       }
-      // Any EA-side error response (not just ERR_TIMEOUT, and ERR_TIMEOUT
-      // once retries are exhausted) must never be returned as if it were
-      // data. Confirmed live: an unhandled error shape here silently made
-      // it all the way through the export pipeline and got POSTed to the
+      if (isAuthError(parsed) && attempt < retries - 1) {
+        await refreshSessionBox(token, sessionBox);
+        continue;
+      }
+      // Any other EA-side error response (or either of the above once
+      // retries are exhausted) must never be returned as if it were data.
+      // Confirmed live: an unhandled error shape here silently made it all
+      // the way through the export pipeline and got POSTed to the
       // destination as "defense stats" -- which correctly rejected it with
       // 400 "Could not detect payload type" since it obviously wasn't.
       throw new BlazeError(parsed);
@@ -250,15 +284,21 @@ async function getExportData(token, session, exportType, body, retries = 5, base
 
 /** Cheap probe: if the session is stale, Blaze errors and we re-login. */
 async function refreshBlazeSession(token, session) {
+  // sendBlazeRequest takes a sessionBox now (see above), not a plain
+  // session -- wrap this one-off session in a throwaway box. Its own
+  // internal auth-error self-heal already covers the common case; the
+  // catch below stays as a fallback for a BlazeError that ISN'T specifically
+  // ERR_AUTHENTICATION_REQUIRED but still means the session is no good.
+  const sessionBox = { current: session };
   try {
-    await sendBlazeRequest(token, session, {
+    await sendBlazeRequest(token, sessionBox, {
       commandName: "Mobile_GetMyLeagues",
       componentId: 2060,
       commandId: 801,
       requestPayload: {},
       componentName: "franchisemode",
     });
-    return session;
+    return sessionBox.current;
   } catch (e) {
     if (e instanceof BlazeError) {
       const fresh = await retrieveBlazeSession(token);
@@ -273,16 +313,19 @@ async function refreshBlazeSession(token, session) {
  * Every method here maps 1:1 to a companion-app call.
  */
 async function createEAClient(token, session) {
-  const validSession = session || (await retrieveBlazeSession(token));
+  // Held by reference (see sendBlazeRequest/getExportData above) so a
+  // mid-export session refresh is shared by every method on this client,
+  // not just the one call that triggered it.
+  const sessionBox = { current: session || (await retrieveBlazeSession(token)) };
   const weekly = (type) => (leagueId, stage, weekIndex) =>
-    getExportData(token, validSession, type, { leagueId, stageIndex: stage, weekIndex });
+    getExportData(token, sessionBox, type, { leagueId, stageIndex: stage, weekIndex });
 
   return {
     getSystemConsole: () => token.console,
-    getSession: () => validSession,
+    getSession: () => sessionBox.current,
 
     async getLeagues() {
-      const res = await sendBlazeRequest(token, validSession, {
+      const res = await sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_GetMyLeagues",
         componentId: 2060,
         commandId: 801,
@@ -293,7 +336,7 @@ async function createEAClient(token, session) {
     },
 
     async getLeagueInfo(leagueId) {
-      const res = await sendBlazeRequest(token, validSession, {
+      const res = await sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_Career_GetLeagueHub",
         componentId: 2060,
         commandId: 811,
@@ -304,9 +347,9 @@ async function createEAClient(token, session) {
     },
 
     getTeams: (leagueId) =>
-      getExportData(token, validSession, LeagueData.TEAMS, { leagueId }),
+      getExportData(token, sessionBox, LeagueData.TEAMS, { leagueId }),
     getStandings: (leagueId) =>
-      getExportData(token, validSession, LeagueData.STANDINGS, { leagueId }),
+      getExportData(token, sessionBox, LeagueData.STANDINGS, { leagueId }),
 
     getSchedules: weekly(LeagueData.WEEKLY_SCHEDULE),
     getRushingStats: weekly(LeagueData.RUSHING_STATS),
@@ -319,7 +362,7 @@ async function createEAClient(token, session) {
 
     // teamIndex is the team's position in leagueInfo.teamIdInfoList, not its id
     getTeamRoster: (leagueId, teamId, teamIndex) =>
-      getExportData(token, validSession, LeagueData.TEAM_ROSTER, {
+      getExportData(token, sessionBox, LeagueData.TEAM_ROSTER, {
         leagueId,
         listIndex: teamIndex,
         returnFreeAgents: false,
@@ -327,7 +370,7 @@ async function createEAClient(token, session) {
       }),
 
     getFreeAgents: (leagueId) =>
-      getExportData(token, validSession, LeagueData.TEAM_ROSTER, {
+      getExportData(token, sessionBox, LeagueData.TEAM_ROSTER, {
         leagueId,
         listIndex: -1,
         returnFreeAgents: true,
@@ -347,7 +390,7 @@ async function createEAClient(token, session) {
      * Test toggleAutoPilot first — reversible, visible in-app.
      */
     bootUser: (leagueId, bootedUserId) =>
-      sendBlazeRequest(token, validSession, {
+      sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_UserAdmin_BootUser",
         componentId: 2060,
         commandId: 0,
@@ -356,7 +399,7 @@ async function createEAClient(token, session) {
       }),
 
     addAdmin: (leagueId, newAdminUserId) =>
-      sendBlazeRequest(token, validSession, {
+      sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_UserAdmin_AddAdmin",
         componentId: 2060,
         commandId: 0,
@@ -365,7 +408,7 @@ async function createEAClient(token, session) {
       }),
 
     removeAdmin: (leagueId, newAdminUserId) =>
-      sendBlazeRequest(token, validSession, {
+      sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_UserAdmin_RemoveAdmin",
         componentId: 2060,
         commandId: 0,
@@ -374,7 +417,7 @@ async function createEAClient(token, session) {
       }),
 
     clearCapPenalties: (leagueId, clearedUserId) =>
-      sendBlazeRequest(token, validSession, {
+      sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_UserAdmin_ClearCapPenalties",
         componentId: 2060,
         commandId: 0,
@@ -383,7 +426,7 @@ async function createEAClient(token, session) {
       }),
 
     toggleAutoPilot: (leagueId, toggleAutoPilotUserId, actionTimeout = 0) =>
-      sendBlazeRequest(token, validSession, {
+      sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_UserAdmin_ToggleAutoPilot",
         componentId: 2060,
         commandId: 0,
@@ -392,7 +435,7 @@ async function createEAClient(token, session) {
       }),
 
     forceHomeWin: (leagueId, seasonGameKey) =>
-      sendBlazeRequest(token, validSession, {
+      sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_GameSchedule_ForceHomeWin",
         componentId: 2060,
         commandId: 0,
@@ -401,7 +444,7 @@ async function createEAClient(token, session) {
       }),
 
     forceAwayWin: (leagueId, seasonGameKey) =>
-      sendBlazeRequest(token, validSession, {
+      sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_GameSchedule_ForceAwayWin",
         componentId: 2060,
         commandId: 0,
@@ -410,7 +453,7 @@ async function createEAClient(token, session) {
       }),
 
     forceNoWin: (leagueId, seasonGameKey) =>
-      sendBlazeRequest(token, validSession, {
+      sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_GameSchedule_ForceNoWin",
         componentId: 2060,
         commandId: 0,
