@@ -82,7 +82,7 @@ const POST_TIMEOUT_MS = Math.max(5000, Number(process.env.EA_POST_TIMEOUT_MS || 
  * concurrently — it just gives the receiving webhook breathing room between
  * requests instead of hitting it back-to-back.
  */
-const CATEGORY_DELAY_MS = Math.max(0, Number(process.env.EA_CATEGORY_DELAY_MS || 500));
+const CATEGORY_DELAY_MS = Math.max(0, Number(process.env.EA_CATEGORY_DELAY_MS || 2000));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
