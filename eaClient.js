@@ -229,12 +229,18 @@ async function getExportData(token, session, exportType, body, retries = 5, base
       throw new EAAccountError(`Could not fetch league data: ${e}`);
     }
 
-    if (parsed && typeof parsed === "object" && parsed.error?.errorname === "ERR_TIMEOUT") {
-      if (attempt < retries - 1) {
+    if (parsed && typeof parsed === "object" && parsed.error) {
+      if (parsed.error.errorname === "ERR_TIMEOUT" && attempt < retries - 1) {
         await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** attempt));
         continue;
       }
-      throw new EAAccountError(`EA request timed out after ${retries} attempts`);
+      // Any EA-side error response (not just ERR_TIMEOUT, and ERR_TIMEOUT
+      // once retries are exhausted) must never be returned as if it were
+      // data. Confirmed live: an unhandled error shape here silently made
+      // it all the way through the export pipeline and got POSTed to the
+      // destination as "defense stats" -- which correctly rejected it with
+      // 400 "Could not detect payload type" since it obviously wasn't.
+      throw new BlazeError(parsed);
     }
 
     return parsed;
