@@ -118,6 +118,28 @@ function combineSignals(signals) {
   return controller.signal;
 }
 
+// Best-effort description of whatever EA's export endpoint actually handed
+// back — top-level keys, or (if there's an array in there somewhere) the
+// array's length plus its first element's field names. Shape-agnostic on
+// purpose: this doesn't assume the exact structure any one category returns,
+// it just shows enough to tell rushing-shaped fields (rush_yds, rush_att)
+// apart from defensive ones (def_total_tackles, def_sacks) at a glance.
+function summarizeFetchedShape(data) {
+  if (Array.isArray(data)) {
+    return `array(${data.length}) fields: ${Object.keys(data[0] || {}).slice(0, 15).join(",")}`;
+  }
+  if (data && typeof data === "object") {
+    const keys = Object.keys(data);
+    const arrKey = keys.find((k) => Array.isArray(data[k]));
+    if (arrKey) {
+      const arr = data[arrKey];
+      return `{${arrKey}: array(${arr.length})} fields: ${Object.keys(arr[0] || {}).slice(0, 15).join(",")}`;
+    }
+    return `object keys: ${keys.slice(0, 20).join(",")}`;
+  }
+  return typeof data;
+}
+
 /*
  * The eight per-week datasets. The key is BOTH the URL suffix and the option
  * value, so adding one here is all that's needed to expose it.
@@ -339,6 +361,15 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
     if (i > 0 && CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
     try {
       const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
+      // Diagnostic only: confirmed live that a "defense" pull got classified
+      // as "rushing" by the destination even though this code unambiguously
+      // requests CareerMode_GetWeeklyDefensiveStatsExport for "defense" (no
+      // aliasing anywhere between the dataset key and the EA export type) --
+      // so the mismatch happens either in EA's own response or in the
+      // destination's payload-type detection, neither of which is visible
+      // from here. Logging what EA actually sent back, right before it's
+      // posted, settles which side it's on without guessing.
+      console.log(`[EA] week ${weekIndex + 1} ${key} fetched -> ${summarizeFetchedShape(data)}`);
       await post(`${base}/${key}`, data, 3, cancelSignal);
     } catch (err) {
       if (err instanceof ExportCancelledError) throw err;
