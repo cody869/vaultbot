@@ -86,6 +86,38 @@ const CATEGORY_DELAY_MS = Math.max(0, Number(process.env.EA_CATEGORY_DELAY_MS ||
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Thrown when a caller cancels an in-progress export (see cancelSignal below).
+// A distinct type so callers can show "cancelled" rather than "failed".
+class ExportCancelledError extends Error {
+  constructor() {
+    super("Export cancelled.");
+    this.name = "ExportCancelledError";
+  }
+}
+
+function checkCancelled(cancelSignal) {
+  if (cancelSignal?.aborted) throw new ExportCancelledError();
+}
+
+// Merges an arbitrary number of AbortSignals into one. Node's built-in
+// AbortSignal.any() would do this directly, but it's Node 20+ only and
+// production runs Node 18 (confirmed from a live crash log) — this is the
+// Node 18-safe equivalent. Falsy entries (an omitted cancelSignal) are
+// dropped rather than erroring.
+function combineSignals(signals) {
+  const valid = signals.filter(Boolean);
+  if (valid.length <= 1) return valid[0];
+  const controller = new AbortController();
+  for (const s of valid) {
+    if (s.aborted) {
+      controller.abort();
+      break;
+    }
+    s.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+}
+
 /*
  * The eight per-week datasets. The key is BOTH the URL suffix and the option
  * value, so adding one here is all that's needed to expose it.
@@ -146,7 +178,8 @@ function postExtras(data) {
   return Promise.all(EXTRA_EXPORT_URLS.map((url) => postToUrl(url, data)));
 }
 
-async function post(pathname, data, retries = 3) {
+async function post(pathname, data, retries = 3, cancelSignal) {
+  checkCancelled(cancelSignal);
   const body = JSON.stringify(data);
   // In direct mode the path is dropped from the request but kept for logs and
   // error messages, so failures still say WHICH payload broke.
@@ -164,7 +197,9 @@ async function post(pathname, data, retries = 3) {
         headers: { "Content-Type": "application/json" },
         // Roster payloads are large; without a timeout a stalled connection
         // hangs the whole export until Discord's interaction window expires.
-        signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+        // Combined with cancelSignal so a manual cancel interrupts an
+        // in-flight request too, not just requests that haven't started yet.
+        signal: combineSignals([AbortSignal.timeout(POST_TIMEOUT_MS), cancelSignal]),
       });
 
       if (res.ok) {
@@ -182,6 +217,12 @@ async function post(pathname, data, retries = 3) {
       }
       console.warn(`[EA] ${pathname} -> ${detail}, retrying`);
     } catch (e) {
+      // A cancel can be what actually aborted the fetch above (surfacing as
+      // some flavor of AbortError) or can have fired while an unrelated
+      // error was already in flight — either way, once cancelSignal itself
+      // is aborted this is a cancellation, not a retryable failure.
+      if (cancelSignal?.aborted) throw new ExportCancelledError();
+      if (e instanceof ExportCancelledError) throw e;
       if (e.message?.startsWith("Export POST")) throw e;
       if (attempt === retries - 1) {
         await extras;
@@ -265,7 +306,7 @@ function resolveWeeks(mode, leagueInfo, weekNumber) {
   return weekIndexes.filter(inRange).map((weekIndex) => ({ weekIndex, stage }));
 }
 
-async function exportWeek(client, leagueId, platform, { weekIndex, stage }, datasets) {
+async function exportWeek(client, leagueId, platform, { weekIndex, stage }, datasets, cancelSignal) {
   // Madden's weekIndex is 0-based; the export path is 1-based.
   const base = `/${platform}/${leagueId}/week/${stagePrefix(stage)}/${weekIndex + 1}`;
   // SEQUENTIAL, not Promise.all: passing/rushing/receiving/defense for the
@@ -290,6 +331,7 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
   // caller still learns something needs a retry.
   const failures = [];
   for (let i = 0; i < datasets.length; i++) {
+    checkCancelled(cancelSignal);
     const key = datasets[i];
     // Pace category posts for the receiving webhook, same reasoning as
     // ROSTER_DELAY_MS below — no pause before the first one, since there's
@@ -297,8 +339,9 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
     if (i > 0 && CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
     try {
       const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
-      await post(`${base}/${key}`, data);
+      await post(`${base}/${key}`, data, 3, cancelSignal);
     } catch (err) {
+      if (err instanceof ExportCancelledError) throw err;
       console.error(`[EA] week ${weekIndex + 1} ${key} failed: ${err.message}`);
       failures.push(key);
     }
@@ -308,12 +351,18 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
   }
 }
 
-async function exportRosters(client, leagueId, platform, teamList, onProgress) {
+// `tick` fires once per completed unit of work (one call = one team, or one
+// free-agent pool) — see runExport's overall done/total progress tracking,
+// which this feeds into rather than tracking its own separate count.
+async function exportRosters(client, leagueId, platform, teamList, tick, cancelSignal) {
+  checkCancelled(cancelSignal);
   const freeAgents = await client.getFreeAgents(leagueId);
-  await post(`/${platform}/${leagueId}/freeagents/roster`, freeAgents);
+  await post(`/${platform}/${leagueId}/freeagents/roster`, freeAgents, 3, cancelSignal);
+  if (tick) await tick("Free agents");
   if (CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
 
   for (let i = 0; i < teamList.length; i += TEAM_BATCH) {
+    checkCancelled(cancelSignal);
     // Pace the batches. The failure this prevents is silent: a relay or
     // serverless endpoint accepts the POST (200) but drops the work behind it
     // when several 250KB bodies land at once.
@@ -323,10 +372,10 @@ async function exportRosters(client, leagueId, platform, teamList, onProgress) {
     await Promise.all(
       batch.map(async (team, offset) => {
         const roster = await client.getTeamRoster(leagueId, team.teamId, i + offset);
-        await post(`/${platform}/${leagueId}/team/${team.teamId}/roster`, roster);
+        await post(`/${platform}/${leagueId}/team/${team.teamId}/roster`, roster, 3, cancelSignal);
+        if (tick) await tick(`Team ${team.teamId}`);
       })
     );
-    if (onProgress) await onProgress(`Rosters ${Math.min(i + TEAM_BATCH, teamList.length)}/${teamList.length}`);
   }
 }
 
@@ -340,7 +389,13 @@ async function exportRosters(client, leagueId, platform, teamList, onProgress) {
  * @param {boolean}  opts.rosters      also pull all 32 rosters + free agents
  * @param {boolean}  opts.leagueInfo   also pull teams + standings
  * @param {string[]} opts.datasets     which per-week datasets (default: all 8)
- * @param {Function} opts.onProgress   async (text) => void, for editReply
+ * @param {Function} opts.onProgress   async ({done, total, label}) => void, for editReply.
+ *                                     `total` is 0 before it's known yet (still connecting).
+ * @param {AbortSignal} [opts.cancelSignal]  abort to stop the export early — in-flight
+ *                                     destination POSTs are cancelled too, not just future
+ *                                     ones. Only wired into the destination side; EA's own
+ *                                     reads (getConnectedClient/getLeagueInfo/getExportData)
+ *                                     aren't the slow part in practice and finish quickly.
  */
 async function runExport({
   mode = "current",
@@ -349,6 +404,7 @@ async function runExport({
   leagueInfo: wantLeagueInfo = true,
   datasets = ALL_DATASETS,
   onProgress,
+  cancelSignal,
 } = {}) {
   requireUrl();
   const progress = onProgress || (async () => {});
@@ -364,17 +420,31 @@ async function runExport({
   if (unknown.length) throw new Error(`Unknown dataset(s): ${unknown.join(", ")}`);
   if (!datasets.length) throw new Error("No datasets selected — nothing to export.");
 
-  await progress("Connecting to EA…");
+  checkCancelled(cancelSignal);
+  await progress({ done: 0, total: 0, label: "Connecting to EA…" });
   const { client, leagueId } = await getConnectedClient();
   const platform = client.getSystemConsole();
 
   const info = await client.getLeagueInfo(leagueId);
   const weeks = resolveWeeks(mode, info, week);
+  const teamList = info.teamIdInfoList || [];
   const summary = {
     weeks: weeks.length,
     datasets: datasets.length,
     rosters: 0,
     leagueInfo: false,
+  };
+
+  // Every week counts as one unit regardless of how many datasets it pulls,
+  // and every roster team (plus free agents) counts as one unit — a coarser
+  // measure than "requests sent," but one that's known upfront and moves at
+  // a steady, predictable pace as the export actually runs.
+  const willExportLeagueInfo = wantLeagueInfo && LEAGUE_INFO_SUPPORTED;
+  const total = weeks.length + (willExportLeagueInfo ? 1 : 0) + (rosters ? 1 + teamList.length : 0);
+  let done = 0;
+  const tick = async (label) => {
+    done = Math.min(total, done + 1);
+    await progress({ done, total, label });
   };
 
   if (wantLeagueInfo && !LEAGUE_INFO_SUPPORTED) {
@@ -385,15 +455,16 @@ async function runExport({
     console.log("[EA] skipping teams/standings — destination has no handler for them");
     summary.leagueInfo = "skipped (unsupported)";
   } else if (wantLeagueInfo) {
-    await progress("Exporting teams and standings…");
+    checkCancelled(cancelSignal);
     const [teams, standings] = await Promise.all([
       client.getTeams(leagueId),
       client.getStandings(leagueId),
     ]);
-    await post(`/${platform}/${leagueId}/leagueteams`, teams);
+    await post(`/${platform}/${leagueId}/leagueteams`, teams, 3, cancelSignal);
     if (CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
-    await post(`/${platform}/${leagueId}/standings`, standings);
+    await post(`/${platform}/${leagueId}/standings`, standings, 3, cancelSignal);
     summary.leagueInfo = true;
+    await tick("Teams + standings");
   }
 
   // Used to widen this to 6 for a narrow (<=2 dataset) pull, on the theory
@@ -410,21 +481,21 @@ async function runExport({
   const weekBatch = WEEK_BATCH;
 
   for (let i = 0; i < weeks.length; i += weekBatch) {
+    checkCancelled(cancelSignal);
     const batch = weeks.slice(i, i + weekBatch);
-    await progress(
-      `Exporting weeks ${i + 1}-${Math.min(i + weekBatch, weeks.length)} of ${weeks.length}…`
-    );
     // Sequential per batch, parallel within it — mirrors snallabot's memory
     // guard for the "all weeks" case, which is otherwise a huge payload.
     await Promise.all(
-      batch.map((w) => exportWeek(client, leagueId, platform, w, datasets))
+      batch.map(async (w) => {
+        await exportWeek(client, leagueId, platform, w, datasets, cancelSignal);
+        await tick(`Week ${w.weekIndex + 1}`);
+      })
     );
   }
 
   if (rosters) {
-    await progress("Exporting rosters…");
-    const teamList = info.teamIdInfoList || [];
-    await exportRosters(client, leagueId, platform, teamList, progress);
+    checkCancelled(cancelSignal);
+    await exportRosters(client, leagueId, platform, teamList, tick, cancelSignal);
     summary.rosters = teamList.length;
   }
 
@@ -439,19 +510,26 @@ async function runExport({
  * on their own schedule (trades, signings, cuts) rather than when a game is
  * played, so they get their own cadence.
  */
-async function runRosterExport({ onProgress } = {}) {
+async function runRosterExport({ onProgress, cancelSignal } = {}) {
   requireUrl();
   const progress = onProgress || (async () => {});
 
-  await progress("Connecting to EA…");
+  checkCancelled(cancelSignal);
+  await progress({ done: 0, total: 0, label: "Connecting to EA…" });
   const { client, leagueId } = await getConnectedClient();
   const platform = client.getSystemConsole();
 
   const info = await client.getLeagueInfo(leagueId);
   const teamList = info.teamIdInfoList || [];
 
-  await progress("Exporting rosters…");
-  await exportRosters(client, leagueId, platform, teamList, progress);
+  const total = 1 + teamList.length;
+  let done = 0;
+  const tick = async (label) => {
+    done = Math.min(total, done + 1);
+    await progress({ done, total, label });
+  };
+
+  await exportRosters(client, leagueId, platform, teamList, tick, cancelSignal);
 
   return { rosters: teamList.length };
 }
@@ -478,4 +556,5 @@ export {
   resolveWeeks,
   getLeagueFingerprint,
   ALL_DATASETS,
+  ExportCancelledError,
 };

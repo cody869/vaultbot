@@ -10,13 +10,33 @@ import {
   ButtonBuilder,
   ButtonStyle,
 } from "discord.js";
-import { runExport, ALL_DATASETS } from "./eaExport.js";
+import { runExport, ALL_DATASETS, ExportCancelledError } from "./eaExport.js";
 import { getConnection } from "./eaTokenStore.js";
 import { getWatcherStatus } from "./eaWatcher.js";
 
 // Exports are heavy and EA rate-limits, so only one runs at a time no matter
 // who fires the command.
 let inFlight = null;
+// Controller for whichever export `inFlight` currently points to — cleared
+// together with it. Lets the Cancel button on the progress message abort a
+// run that's already in progress, not just block a second one from starting.
+let exportController = null;
+
+// Text progress bar for the export message. `total` is 0 in the brief window
+// before runExport has connected and worked out how much there is to do —
+// rendered as an unfilled bar rather than a misleading 0%.
+function progressBar(done, total, width = 16) {
+  if (!total) return `${"░".repeat(width)}  starting…`;
+  const pct = Math.max(0, Math.min(1, done / total));
+  const filled = Math.round(pct * width);
+  return `${"█".repeat(filled)}${"░".repeat(width - filled)}  ${Math.round(pct * 100)}% (${done}/${total})`;
+}
+
+function cancelRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("export:cancel").setLabel("Cancel export").setStyle(ButtonStyle.Danger)
+  );
+}
 
 /*
  * Who may run these.
@@ -216,13 +236,23 @@ export async function handleExportComponent(interaction) {
     return true;
   }
 
+  const parts = id.split(":");
+
+  // Handled ahead of the session check below: the wizard session is ended
+  // the moment the export actually starts (see the "data" branch), which is
+  // exactly when the Cancel button appears — by then getExportSession()
+  // would always report "expired" even though the export is very much live.
+  if (parts[1] === "cancel") {
+    await interaction.deferUpdate();
+    if (exportController) exportController.abort();
+    return true;
+  }
+
   const session = getExportSession(interaction.user.id);
   if (!session) {
     await interaction.reply({ content: "This export session expired. Run `/admin export` again.", ephemeral: true });
     return true;
   }
-
-  const parts = id.split(":");
 
   if (parts[1] === "week") {
     const values = interaction.values; // multi-select: any mix of "recent" | "current" | "1".."23" (minus 22) | "all"
@@ -259,7 +289,7 @@ export async function handleExportComponent(interaction) {
     const rosters = parts[2] === "rosters";
     const { mode, week, datasets } = session;
     endExportSession(interaction.user.id);
-    await interaction.update({ content: "# Madden Export\nStarting…", embeds: [], components: [] });
+    await interaction.update({ content: "# Madden Export\nStarting…", embeds: [], components: [cancelRow()] });
     await runExportFlow(interaction, mode, week, rosters, datasets);
     return true;
   }
@@ -283,17 +313,23 @@ async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DA
   // roster pull can approach that. Throttle progress edits, and never let a
   // failed edit abort the export itself.
   let lastEdit = 0;
-  const onProgress = async (text) => {
+  const onProgress = async ({ done, total, label }) => {
     if (Date.now() - lastEdit < 3000) return;
     lastEdit = Date.now();
     try {
-      await interaction.editReply({ content: `# Madden Export\n${text}`, components: [] });
+      await interaction.editReply({
+        content: ["# Madden Export", progressBar(done, total), label].join("\n"),
+        components: [cancelRow()],
+      });
     } catch {
       /* interaction expired — keep exporting */
     }
   };
 
-  inFlight = runExport({ mode, week, rosters, datasets, leagueInfo: true, onProgress });
+  const controller = new AbortController();
+  exportController = controller;
+
+  inFlight = runExport({ mode, week, rosters, datasets, leagueInfo: true, onProgress, cancelSignal: controller.signal });
   try {
     const summary = await inFlight;
     const secs = Math.round((Date.now() - started) / 1000);
@@ -322,14 +358,20 @@ async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DA
       components: [],
     });
   } catch (err) {
-    console.error("[EA] export failed:", err);
-    const hint = err.troubleshoot ? `\n> ${err.troubleshoot}` : "";
-    await interaction.editReply({
-      content: `# Madden Export failed\n> ${err.message || "Unknown error"}${hint}`,
-      components: [],
-    });
+    if (err instanceof ExportCancelledError) {
+      console.log(`[EA] export cancelled by ${interaction.user.tag}`);
+      await interaction.editReply({ content: "# Madden Export\nCancelled.", components: [] });
+    } else {
+      console.error("[EA] export failed:", err);
+      const hint = err.troubleshoot ? `\n> ${err.troubleshoot}` : "";
+      await interaction.editReply({
+        content: `# Madden Export failed\n> ${err.message || "Unknown error"}${hint}`,
+        components: [],
+      });
+    }
   } finally {
     inFlight = null;
+    exportController = null;
   }
 }
 
