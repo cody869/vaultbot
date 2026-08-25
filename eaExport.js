@@ -56,33 +56,16 @@ const EXTRA_EXPORT_URLS = [
 const LEAGUE_INFO_SUPPORTED =
   process.env.MADDEN_EXPORT_LEAGUE_INFO === "true" || !DIRECT;
 
-// EA rate-limits and this bot shares a Railway container with the gateway
-// connection — keep concurrency low so a big export can't starve Discord.
-const WEEK_BATCH = 2;
-
-/*
- * Roster pacing. Rosters are the heavy part: 33 POSTs of 250KB+ each.
- * Relays and serverless endpoints drop these when they arrive in bursts, and
- * the drop is silent — the POST returns 200 from the relay while the forward
- * behind it never lands. Lower the batch and add a delay if that happens.
- *
- *   EA_TEAM_BATCH=1     fully sequential, slowest and safest
- *   EA_ROSTER_DELAY_MS  pause between batches, e.g. 1000
- */
-const TEAM_BATCH = Math.max(1, Number(process.env.EA_TEAM_BATCH || 2));
-const ROSTER_DELAY_MS = Math.max(0, Number(process.env.EA_ROSTER_DELAY_MS || 750));
+// Every payload — one week/dataset pair, one roster team, teams, standings,
+// free agents — is sent strictly one at a time, in a fixed order, with no
+// artificial pause between them. Nothing here runs concurrently: previous
+// batching (multiple weeks or roster teams in flight together) turned out to
+// be exactly what overwhelmed the destination in the first place — confirmed
+// live, picking several weeks with a narrow dataset once sent that many
+// simultaneous POSTs and the destination couldn't keep up. Fully sequential
+// posting is also what makes a truthful, one-item-at-a-time live status
+// display possible in the first place.
 const POST_TIMEOUT_MS = Math.max(5000, Number(process.env.EA_POST_TIMEOUT_MS || 180000));
-
-/*
- * Pause between distinct payload categories sent back-to-back for the same
- * week or export step — e.g. passing then rushing then receiving, or
- * leagueteams then standings, or free agents then the first roster batch.
- * These are sequential by design already (see exportWeek's comment on why),
- * so adding a pause here doesn't slow anything that could otherwise run
- * concurrently — it just gives the receiving webhook breathing room between
- * requests instead of hitting it back-to-back.
- */
-const CATEGORY_DELAY_MS = Math.max(0, Number(process.env.EA_CATEGORY_DELAY_MS || 2000));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -328,39 +311,68 @@ function resolveWeeks(mode, leagueInfo, weekNumber) {
   return weekIndexes.filter(inRange).map((weekIndex) => ({ weekIndex, stage }));
 }
 
-async function exportWeek(client, leagueId, platform, { weekIndex, stage }, datasets, cancelSignal) {
-  // Madden's weekIndex is 0-based; the export path is 1-based.
-  const base = `/${platform}/${leagueId}/week/${stagePrefix(stage)}/${weekIndex + 1}`;
-  // SEQUENTIAL, not Promise.all: passing/rushing/receiving/defense for the
-  // same game all touch the same WeeklyStats rows (a RB shows up in both
-  // rushing and receiving; a DE who forces a fumble shows up in defense and
-  // maybe fumbles). maddenWebhook snapshots "what already exists" once per
-  // invocation before deciding create-vs-update -- if two category calls for
-  // this week land within milliseconds of each other (which Promise.all
-  // guarantees), neither sees the other's still-in-flight write, and both
-  // independently create a row for the same player+game. That's what caused
-  // the Week 1 AND Week 2 duplicate-row bugs. Posting one dataset at a time
-  // means each call's snapshot already includes everything the previous call
-  // committed, so there's nothing left to race.
-  //
-  // Each dataset is isolated in its own try/catch. Confirmed live: a game's
-  // final score and passing stats posted successfully, but nothing else did
-  // -- because the old code let one dataset's failure (an EA hiccup, a bad
-  // payload) abort every dataset still queued after it for that week,
-  // silently. Failures are collected and thrown as a single error only
-  // AFTER every dataset has been attempted, so a week ends up as complete
-  // as it can be instead of stopping at the first failure, while the
-  // caller still learns something needs a retry.
-  const failures = [];
-  for (let i = 0; i < datasets.length; i++) {
-    checkCancelled(cancelSignal);
-    const key = datasets[i];
-    // Pace category posts for the receiving webhook, same reasoning as
-    // ROSTER_DELAY_MS below — no pause before the first one, since there's
-    // nothing to space it from.
-    if (i > 0 && CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
-    try {
-      const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
+/*
+ * An export is a flat, ordered list of independent payloads ("items") — one
+ * week/dataset pair, one roster team, teams, standings, free agents. Building
+ * the whole plan upfront (rather than discovering work as we go) is what lets
+ * the caller show a real "here's everything, here's what's done" status
+ * display instead of vague phase names.
+ *
+ * Order: league info first (cheap, and useful context even if stats fail),
+ * then every week/dataset pair in the order weeks and datasets were given,
+ * then rosters last (free agents, then each team). Weeks are NOT interleaved
+ * by dataset — datasets are still grouped by week (all of week 3's payloads
+ * before week 4's) since maddenWebhook snapshots existing rows once per
+ * invocation before deciding create-vs-update; two payloads for the SAME
+ * week landing close together risked each missing the other's still-in-
+ * flight write and both creating a duplicate row for the same player+game
+ * (confirmed live). Fully sequential processing already prevents that, but
+ * keeping weeks un-interleaved keeps the plan's order intuitive too.
+ */
+function buildPlan({ weeks, datasets, willExportLeagueInfo, rosters, teamList }) {
+  const items = [];
+  if (willExportLeagueInfo) {
+    items.push({ type: "teams", label: "Teams" });
+    items.push({ type: "standings", label: "Standings" });
+  }
+  for (const w of weeks) {
+    for (const key of datasets) {
+      items.push({
+        type: "stat",
+        weekIndex: w.weekIndex,
+        stage: w.stage,
+        dataset: key,
+        week: w.weekIndex + 1,
+        label: `Week ${w.weekIndex + 1} — ${key}`,
+      });
+    }
+  }
+  if (rosters) {
+    items.push({ type: "freeagents", label: "Free agents" });
+    teamList.forEach((team, teamIndex) => {
+      items.push({ type: "roster", teamId: team.teamId, teamIndex, label: `Roster: team ${team.teamId}` });
+    });
+  }
+  return items;
+}
+
+// Fetches and posts exactly one plan item. Every item is independent — a
+// failure here never touches any other item, since runExport's loop below
+// isolates each one in its own try/catch and keeps going regardless.
+async function processItem(client, leagueId, platform, item, cancelSignal) {
+  switch (item.type) {
+    case "teams": {
+      const teams = await client.getTeams(leagueId);
+      await post(`/${platform}/${leagueId}/leagueteams`, teams, 3, cancelSignal);
+      return;
+    }
+    case "standings": {
+      const standings = await client.getStandings(leagueId);
+      await post(`/${platform}/${leagueId}/standings`, standings, 3, cancelSignal);
+      return;
+    }
+    case "stat": {
+      const data = await WEEK_DATASETS[item.dataset](client)(leagueId, item.stage, item.weekIndex);
       // Diagnostic only: confirmed live that a "defense" pull got classified
       // as "rushing" by the destination even though this code unambiguously
       // requests CareerMode_GetWeeklyDefensiveStatsExport for "defense" (no
@@ -369,45 +381,48 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
       // destination's payload-type detection, neither of which is visible
       // from here. Logging what EA actually sent back, right before it's
       // posted, settles which side it's on without guessing.
-      console.log(`[EA] week ${weekIndex + 1} ${key} fetched -> ${summarizeFetchedShape(data)}`);
-      await post(`${base}/${key}`, data, 3, cancelSignal);
-    } catch (err) {
-      if (err instanceof ExportCancelledError) throw err;
-      console.error(`[EA] week ${weekIndex + 1} ${key} failed: ${err.message}`);
-      failures.push(key);
+      console.log(`[EA] ${item.label} fetched -> ${summarizeFetchedShape(data)}`);
+      const base = `/${platform}/${leagueId}/week/${stagePrefix(item.stage)}/${item.weekIndex + 1}`;
+      await post(`${base}/${item.dataset}`, data, 3, cancelSignal);
+      return;
     }
-  }
-  if (failures.length) {
-    throw new Error(`week ${weekIndex + 1}: ${failures.join(", ")} failed (see logs)`);
+    case "freeagents": {
+      const freeAgents = await client.getFreeAgents(leagueId);
+      await post(`/${platform}/${leagueId}/freeagents/roster`, freeAgents, 3, cancelSignal);
+      return;
+    }
+    case "roster": {
+      const roster = await client.getTeamRoster(leagueId, item.teamId, item.teamIndex);
+      await post(`/${platform}/${leagueId}/team/${item.teamId}/roster`, roster, 3, cancelSignal);
+      return;
+    }
+    default:
+      throw new Error(`Unknown export item type: ${item.type}`);
   }
 }
 
-// `tick` fires once per completed unit of work (one call = one team, or one
-// free-agent pool) — see runExport's overall done/total progress tracking,
-// which this feeds into rather than tracking its own separate count.
-async function exportRosters(client, leagueId, platform, teamList, tick, cancelSignal) {
-  checkCancelled(cancelSignal);
-  const freeAgents = await client.getFreeAgents(leagueId);
-  await post(`/${platform}/${leagueId}/freeagents/roster`, freeAgents, 3, cancelSignal);
-  if (tick) await tick("Free agents");
-  if (CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
-
-  for (let i = 0; i < teamList.length; i += TEAM_BATCH) {
+// Runs every item in `items` strictly one at a time, in order, with no delay
+// between them. Each item's failure is isolated — logged and recorded, but
+// never stops the remaining items from being attempted — except a
+// cancellation, which stops everything immediately. `emitItem(index, status)`
+// fires "sending" right before an item starts and "sent"/"failed" right
+// after, so a caller can render a live per-item status.
+async function runPlan(client, leagueId, platform, items, emitItem, cancelSignal) {
+  const failures = [];
+  for (let i = 0; i < items.length; i++) {
     checkCancelled(cancelSignal);
-    // Pace the batches. The failure this prevents is silent: a relay or
-    // serverless endpoint accepts the POST (200) but drops the work behind it
-    // when several 250KB bodies land at once.
-    if (i > 0 && ROSTER_DELAY_MS) await sleep(ROSTER_DELAY_MS);
-
-    const batch = teamList.slice(i, i + TEAM_BATCH);
-    await Promise.all(
-      batch.map(async (team, offset) => {
-        const roster = await client.getTeamRoster(leagueId, team.teamId, i + offset);
-        await post(`/${platform}/${leagueId}/team/${team.teamId}/roster`, roster, 3, cancelSignal);
-        if (tick) await tick(`Team ${team.teamId}`);
-      })
-    );
+    await emitItem(i, "sending");
+    try {
+      await processItem(client, leagueId, platform, items[i], cancelSignal);
+      await emitItem(i, "sent");
+    } catch (err) {
+      if (err instanceof ExportCancelledError) throw err;
+      console.error(`[EA] ${items[i].label} failed: ${err.message}`);
+      await emitItem(i, "failed");
+      failures.push(items[i].label);
+    }
   }
+  return failures;
 }
 
 /**
@@ -420,13 +435,18 @@ async function exportRosters(client, leagueId, platform, teamList, tick, cancelS
  * @param {boolean}  opts.rosters      also pull all 32 rosters + free agents
  * @param {boolean}  opts.leagueInfo   also pull teams + standings
  * @param {string[]} opts.datasets     which per-week datasets (default: all 8)
- * @param {Function} opts.onProgress   async ({done, total, label}) => void, for editReply.
- *                                     `total` is 0 before it's known yet (still connecting).
+ * @param {Function} [opts.onPlan]     async (items) => void — called once, right after the
+ *                                     full ordered list of payloads is known. Each item is
+ *                                     {type, label, ...}; see buildPlan().
+ * @param {Function} [opts.onItem]     async (index, "sending"|"sent"|"failed") => void — called
+ *                                     for every item as it starts and finishes, in plan order.
  * @param {AbortSignal} [opts.cancelSignal]  abort to stop the export early — in-flight
  *                                     destination POSTs are cancelled too, not just future
  *                                     ones. Only wired into the destination side; EA's own
  *                                     reads (getConnectedClient/getLeagueInfo/getExportData)
  *                                     aren't the slow part in practice and finish quickly.
+ * @returns {Promise<{weeks:number, datasets:number, rosters:number, leagueInfo:boolean|string,
+ *                    items:number, failures:string[]}>}
  */
 async function runExport({
   mode = "current",
@@ -434,11 +454,13 @@ async function runExport({
   rosters = false,
   leagueInfo: wantLeagueInfo = true,
   datasets = ALL_DATASETS,
-  onProgress,
+  onPlan,
+  onItem,
   cancelSignal,
 } = {}) {
   requireUrl();
-  const progress = onProgress || (async () => {});
+  const emitPlan = onPlan || (async () => {});
+  const emitItem = onItem || (async () => {});
 
   if (mode === "week" && (week == null || !Number.isFinite(Number(week)))) {
     throw new Error('scope "week" requires a week number.');
@@ -452,85 +474,35 @@ async function runExport({
   if (!datasets.length) throw new Error("No datasets selected — nothing to export.");
 
   checkCancelled(cancelSignal);
-  await progress({ done: 0, total: 0, label: "Connecting to EA…" });
   const { client, leagueId } = await getConnectedClient();
   const platform = client.getSystemConsole();
 
   const info = await client.getLeagueInfo(leagueId);
   const weeks = resolveWeeks(mode, info, week);
   const teamList = info.teamIdInfoList || [];
-  const summary = {
-    weeks: weeks.length,
-    datasets: datasets.length,
-    rosters: 0,
-    leagueInfo: false,
-  };
 
-  // Every week counts as one unit regardless of how many datasets it pulls,
-  // and every roster team (plus free agents) counts as one unit — a coarser
-  // measure than "requests sent," but one that's known upfront and moves at
-  // a steady, predictable pace as the export actually runs.
   const willExportLeagueInfo = wantLeagueInfo && LEAGUE_INFO_SUPPORTED;
-  const total = weeks.length + (willExportLeagueInfo ? 1 : 0) + (rosters ? 1 + teamList.length : 0);
-  let done = 0;
-  const tick = async (label) => {
-    done = Math.min(total, done + 1);
-    await progress({ done, total, label });
-  };
-
   if (wantLeagueInfo && !LEAGUE_INFO_SUPPORTED) {
     // maddenWebhook's detectPayloadType only recognizes weekly stats, rosters,
     // and game schedules. Teams/standings payloads fall through to 'unknown'
     // and come back 400, which would abort the whole export. Skip them rather
     // than fail. Set MADDEN_EXPORT_LEAGUE_INFO=true once a handler exists.
     console.log("[EA] skipping teams/standings — destination has no handler for them");
-    summary.leagueInfo = "skipped (unsupported)";
-  } else if (wantLeagueInfo) {
-    checkCancelled(cancelSignal);
-    const [teams, standings] = await Promise.all([
-      client.getTeams(leagueId),
-      client.getStandings(leagueId),
-    ]);
-    await post(`/${platform}/${leagueId}/leagueteams`, teams, 3, cancelSignal);
-    if (CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
-    await post(`/${platform}/${leagueId}/standings`, standings, 3, cancelSignal);
-    summary.leagueInfo = true;
-    await tick("Teams + standings");
   }
 
-  // Used to widen this to 6 for a narrow (<=2 dataset) pull, on the theory
-  // that fewer requests per week meant more weeks could run concurrently
-  // without hitting EA any harder than a full export already does. That
-  // reasoning only ever considered EA's own rate limit — before "weeks" mode
-  // existed, a narrow pull was always exactly one week anyway, so the wider
-  // batch was never actually exercised. Confirmed live once multi-week
-  // selection made it reachable: picking several weeks with a narrow dataset
-  // (e.g. 6 weeks of just "defense") sent 6 simultaneous POSTs and the
-  // destination — not EA — couldn't keep up, timing every one of them out
-  // and failing the whole export. Concurrency is capped uniformly at
-  // WEEK_BATCH regardless of dataset width now that this is reachable.
-  const weekBatch = WEEK_BATCH;
+  const items = buildPlan({ weeks, datasets, willExportLeagueInfo, rosters, teamList });
+  await emitPlan(items);
 
-  for (let i = 0; i < weeks.length; i += weekBatch) {
-    checkCancelled(cancelSignal);
-    const batch = weeks.slice(i, i + weekBatch);
-    // Sequential per batch, parallel within it — mirrors snallabot's memory
-    // guard for the "all weeks" case, which is otherwise a huge payload.
-    await Promise.all(
-      batch.map(async (w) => {
-        await exportWeek(client, leagueId, platform, w, datasets, cancelSignal);
-        await tick(`Week ${w.weekIndex + 1}`);
-      })
-    );
-  }
+  const failures = await runPlan(client, leagueId, platform, items, emitItem, cancelSignal);
 
-  if (rosters) {
-    checkCancelled(cancelSignal);
-    await exportRosters(client, leagueId, platform, teamList, tick, cancelSignal);
-    summary.rosters = teamList.length;
-  }
-
-  return summary;
+  return {
+    weeks: weeks.length,
+    datasets: datasets.length,
+    rosters: rosters ? teamList.length : 0,
+    leagueInfo: willExportLeagueInfo ? true : wantLeagueInfo ? "skipped (unsupported)" : false,
+    items: items.length,
+    failures,
+  };
 }
 
 /**
@@ -541,28 +513,24 @@ async function runExport({
  * on their own schedule (trades, signings, cuts) rather than when a game is
  * played, so they get their own cadence.
  */
-async function runRosterExport({ onProgress, cancelSignal } = {}) {
+async function runRosterExport({ onPlan, onItem, cancelSignal } = {}) {
   requireUrl();
-  const progress = onProgress || (async () => {});
+  const emitPlan = onPlan || (async () => {});
+  const emitItem = onItem || (async () => {});
 
   checkCancelled(cancelSignal);
-  await progress({ done: 0, total: 0, label: "Connecting to EA…" });
   const { client, leagueId } = await getConnectedClient();
   const platform = client.getSystemConsole();
 
   const info = await client.getLeagueInfo(leagueId);
   const teamList = info.teamIdInfoList || [];
 
-  const total = 1 + teamList.length;
-  let done = 0;
-  const tick = async (label) => {
-    done = Math.min(total, done + 1);
-    await progress({ done, total, label });
-  };
+  const items = buildPlan({ weeks: [], datasets: [], willExportLeagueInfo: false, rosters: true, teamList });
+  await emitPlan(items);
 
-  await exportRosters(client, leagueId, platform, teamList, tick, cancelSignal);
+  const failures = await runPlan(client, leagueId, platform, items, emitItem, cancelSignal);
 
-  return { rosters: teamList.length };
+  return { rosters: teamList.length, failures };
 }
 
 /**

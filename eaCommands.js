@@ -32,6 +32,67 @@ function progressBar(done, total, width = 16) {
   return `${"█".repeat(filled)}${"░".repeat(width - filled)}  ${Math.round(pct * 100)}% (${done}/${total})`;
 }
 
+const STATUS_ICON = { pending: "⬜", sending: "⏳", sent: "✅", failed: "❌" };
+
+// One line per "section" of the plan — league info, one line per week
+// (icons for each dataset in that week, in the order they were requested),
+// and a single roster summary line rather than one per team (a 32-team
+// league would otherwise blow well past Discord's message length limit).
+// Grouping this way, instead of listing all ~200 items a big "all weeks, all
+// datasets" pull could produce, keeps the live view readable at any scope.
+function buildStatusLines(items, statuses) {
+  const icon = (i) => STATUS_ICON[statuses[i]] || STATUS_ICON.pending;
+  const lines = [];
+
+  const leagueInfoIdx = items.map((it, i) => i).filter((i) => items[i].type === "teams" || items[i].type === "standings");
+  if (leagueInfoIdx.length) {
+    lines.push(leagueInfoIdx.map((i) => `${icon(i)} ${items[i].label}`).join("  "));
+  }
+
+  const weekOrder = [];
+  const byWeek = new Map();
+  items.forEach((it, i) => {
+    if (it.type !== "stat") return;
+    if (!byWeek.has(it.week)) {
+      byWeek.set(it.week, []);
+      weekOrder.push(it.week);
+    }
+    byWeek.get(it.week).push(i);
+  });
+  for (const wk of weekOrder) {
+    const parts = byWeek.get(wk).map((i) => `${icon(i)} ${DATASET_LABELS[items[i].dataset] || items[i].dataset}`);
+    lines.push(`**Week ${wk}:** ${parts.join(" ")}`);
+  }
+
+  const rosterIdx = items.map((it, i) => i).filter((i) => items[i].type === "freeagents" || items[i].type === "roster");
+  if (rosterIdx.length) {
+    const sent = rosterIdx.filter((i) => statuses[i] === "sent").length;
+    const failed = rosterIdx.filter((i) => statuses[i] === "failed").length;
+    const sendingIdx = rosterIdx.find((i) => statuses[i] === "sending");
+    const failedNote = failed ? `, ${failed} failed` : "";
+    const currentNote = sendingIdx != null ? ` — sending ${items[sendingIdx].label}` : "";
+    lines.push(`**Rosters:** ${sent}/${rosterIdx.length} sent${failedNote}${currentNote}`);
+  }
+
+  return lines;
+}
+
+// Discord caps plain message content at 2000 chars. A big "all weeks, all
+// datasets" pull could in principle produce ~26 week-lines; each is short,
+// but this truncates defensively rather than ever risking editReply erroring
+// out mid-export over message length.
+function renderExportMessage(items, statuses, footer = "") {
+  const total = items.length;
+  const done = statuses.filter((s) => s === "sent" || s === "failed").length;
+  const header = `# Madden Export\n${progressBar(done, total)}\n\n`;
+  let body = buildStatusLines(items, statuses).join("\n");
+  const budget = 1900 - header.length - footer.length;
+  if (body.length > budget) {
+    body = `${body.slice(0, Math.max(0, budget - 20))}\n… (truncated)`;
+  }
+  return header + body + footer;
+}
+
 function cancelRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("export:cancel").setLabel("Cancel export").setStyle(ButtonStyle.Danger)
@@ -309,58 +370,52 @@ async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DA
     `[EA] /admin export mode=${mode}${weekArg} datasets=${datasets.join(",")} rosters=${rosters} by ${interaction.user.tag}`
   );
 
+  // Local mirror of the plan runExport builds, kept in sync via onPlan/onItem
+  // below so every edit can re-render the full live status grid.
+  let items = [];
+  let statuses = [];
+
   // Discord only lets an interaction be edited for 15 minutes, and a full
-  // roster pull can approach that. Throttle progress edits, and never let a
-  // failed edit abort the export itself.
+  // roster pull can approach that. Throttle edits, and never let a failed
+  // edit abort the export itself. `force` bypasses the throttle for the plan
+  // arriving and the final state, which should always render immediately.
   let lastEdit = 0;
-  const onProgress = async ({ done, total, label }) => {
-    if (Date.now() - lastEdit < 3000) return;
+  const render = async (footer = "", force = false, components = [cancelRow()]) => {
+    if (!force && Date.now() - lastEdit < 2000) return;
     lastEdit = Date.now();
     try {
-      await interaction.editReply({
-        content: ["# Madden Export", progressBar(done, total), label].join("\n"),
-        components: [cancelRow()],
-      });
+      await interaction.editReply({ content: renderExportMessage(items, statuses, footer), components });
     } catch {
       /* interaction expired — keep exporting */
     }
   };
 
+  const onPlan = async (plan) => {
+    items = plan;
+    statuses = plan.map(() => "pending");
+    await render("", true);
+  };
+  const onItem = async (index, status) => {
+    statuses[index] = status;
+    await render();
+  };
+
   const controller = new AbortController();
   exportController = controller;
 
-  inFlight = runExport({ mode, week, rosters, datasets, leagueInfo: true, onProgress, cancelSignal: controller.signal });
+  inFlight = runExport({ mode, week, rosters, datasets, leagueInfo: true, onPlan, onItem, cancelSignal: controller.signal });
   try {
     const summary = await inFlight;
     const secs = Math.round((Date.now() - started) / 1000);
     console.log(`[EA] export complete in ${secs}s`, summary);
-    const weekNote =
-      mode === "week"
-        ? ` (${weekOptionLabel(week)})`
-        : mode === "weeks"
-        ? ` (${week.map(weekOptionLabel).join(", ")})`
-        : mode === "recent"
-        ? " (previous + current)"
-        : "";
-    const datasetNote =
-      datasets.length === ALL_DATASETS.length
-        ? "all 8 datasets"
-        : datasets.map((d) => DATASET_LABELS[d] || d).join(", ");
-    await interaction.editReply({
-      content: [
-        "# Madden Export complete",
-        `> Weeks: ${summary.weeks}${weekNote}`,
-        `> Per week: ${datasetNote}`,
-        `> League info: ${summary.leagueInfo ? "teams + standings" : "skipped"}`,
-        `> Rosters: ${summary.rosters ? `${summary.rosters} teams + free agents` : "skipped"}`,
-        `> Took ${secs}s`,
-      ].join("\n"),
-      components: [],
-    });
+    const failureNote = summary.failures?.length
+      ? `\n\n> ${summary.failures.length} failed: ${summary.failures.slice(0, 5).join(", ")}${summary.failures.length > 5 ? "…" : ""}`
+      : "";
+    await render(`\n\n> Took ${secs}s${failureNote}`, true, []);
   } catch (err) {
     if (err instanceof ExportCancelledError) {
       console.log(`[EA] export cancelled by ${interaction.user.tag}`);
-      await interaction.editReply({ content: "# Madden Export\nCancelled.", components: [] });
+      await render("\n\n> Cancelled.", true, []);
     } else {
       console.error("[EA] export failed:", err);
       const hint = err.troubleshoot ? `\n> ${err.troubleshoot}` : "";
