@@ -141,28 +141,29 @@ const WEEK_DATASETS = {
 const ALL_DATASETS = Object.keys(WEEK_DATASETS);
 
 /*
- * The four per-week player-stat datasets all describe the same players in
+ * The six per-week player-stat datasets all describe the same players in
  * the same games for the same week, just split by category. Confirmed live
  * (via summarizeFetchedShape's diagnostic log) that each comes back under
  * its own non-colliding top-level key -- playerPassingStatInfoList,
  * playerRushingStatInfoList, playerReceivingStatInfoList,
- * playerDefensiveStatInfoList -- so a shallow merge of any subset is safe
- * and lossless on EA's side.
+ * playerDefensiveStatInfoList, playerKickingStatInfoList,
+ * playerPuntingStatInfoList -- so a shallow merge of any subset is safe and
+ * lossless on EA's side.
  *
- * What's NOT verified is how the destination (maddenWebhook's
- * detectPayloadType, outside this repo) handles a body carrying more than
- * one of those keys at once -- it's already been observed misclassifying a
- * single-category "defense" pull as "rushing" once, which suggests its
- * detection is not simple/robust. OFF by default for that reason: set
- * EA_COMBINE_STATS=true only after confirming the destination actually
- * imports every combined category correctly (the [EA] ... fetched -> log
- * line for a combined item lists every list key + row count it merged, so a
- * mismatch between what was sent and what landed downstream is easy to
- * spot). Trivial to roll back -- unset the var, next export goes back to
- * one POST per category.
+ * ON by default, and covers all six (not just the original four) because
+ * this is now a confirmed fix for real data loss, not a speculative
+ * optimization: the destination (maddenWebhook, outside this repo)
+ * classifies every one of these six as the same payload type and does NOT
+ * merge across separate POSTs for the same week -- it replaces. Posting
+ * kicking/punting as follow-up POSTs after a combined passing+rushing+
+ * receiving+defense payload was silently overwriting that merged capture
+ * with just the last category sent (confirmed live). Combining all six into
+ * one POST is what makes them coexist in the destination at all. Set
+ * EA_COMBINE_STATS=false to go back to one POST per category if a
+ * destination-side issue ever needs isolating again.
  */
-const PLAYER_STAT_DATASETS = ["passing", "rushing", "receiving", "defense"];
-const COMBINE_STATS = process.env.EA_COMBINE_STATS === "true";
+const PLAYER_STAT_DATASETS = ["passing", "rushing", "receiving", "defense", "kicking", "punting"];
+const COMBINE_STATS = process.env.EA_COMBINE_STATS !== "false";
 
 function requireUrl() {
   if (!EXPORT_URL) {
