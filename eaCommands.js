@@ -132,10 +132,17 @@ function weekStepRow() {
       .map((n) => ({ label: weekOptionLabel(n), value: String(n) })),
     { label: "All weeks (slow)", value: "all" },
   ];
+  // Multi-select: picking several specific weeks (e.g. 3 and 7) exports just
+  // those, no need to run the wizard twice. Picking "All weeks" together with
+  // anything else still means "all" — see the priority order in
+  // handleExportComponent's "week" branch below. Picking more than one preset
+  // (recent/current) with no specific weeks falls back to "recent".
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId("export:week")
-      .setPlaceholder("Select a week — Previous + current week is recommended")
+      .setPlaceholder("Select one or more weeks — Previous + current is recommended")
+      .setMinValues(1)
+      .setMaxValues(options.length)
       .addOptions(options)
   );
 }
@@ -144,7 +151,8 @@ function weekLabel(session) {
   if (session.mode === "current") return "Current week only";
   if (session.mode === "recent") return "Previous + current week";
   if (session.mode === "all") return "All weeks";
-  return weekOptionLabel(session.week);
+  if (session.mode === "weeks") return session.week.map(weekOptionLabel).join(", ");
+  return weekOptionLabel(session.week); // legacy single-week "week" mode
 }
 
 function dataStepPayload(session) {
@@ -217,13 +225,24 @@ export async function handleExportComponent(interaction) {
   const parts = id.split(":");
 
   if (parts[1] === "week") {
-    const value = interaction.values[0]; // "recent" | "current" | "1".."23" (minus 22) | "all"
-    if (value === "recent" || value === "current" || value === "all") {
-      session.mode = value;
+    const values = interaction.values; // multi-select: any mix of "recent" | "current" | "1".."23" (minus 22) | "all"
+    // Priority: "all" is the broadest, so it wins outright. Otherwise any
+    // specific week number(s) picked win over the presets — "weeks" mode
+    // covers both a single week and several. Only presets with no specific
+    // weeks falls back to "recent"/"current".
+    const weekNumbers = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+    if (values.includes("all")) {
+      session.mode = "all";
+      session.week = undefined;
+    } else if (weekNumbers.length) {
+      session.mode = "weeks";
+      session.week = weekNumbers;
+    } else if (values.includes("recent")) {
+      session.mode = "recent";
       session.week = undefined;
     } else {
-      session.mode = "week";
-      session.week = Number(value);
+      session.mode = "current";
+      session.week = undefined;
     }
     session.datasets = ALL_DATASETS.slice();
     await interaction.update(dataStepPayload(session));
@@ -255,8 +274,9 @@ async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DA
   }
 
   const started = Date.now();
+  const weekArg = mode === "week" || mode === "weeks" ? ` week=${[].concat(week).join(",")}` : "";
   console.log(
-    `[EA] /admin export mode=${mode}${mode === "week" ? ` week=${week}` : ""} datasets=${datasets.join(",")} rosters=${rosters} by ${interaction.user.tag}`
+    `[EA] /admin export mode=${mode}${weekArg} datasets=${datasets.join(",")} rosters=${rosters} by ${interaction.user.tag}`
   );
 
   // Discord only lets an interaction be edited for 15 minutes, and a full
@@ -278,7 +298,14 @@ async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DA
     const summary = await inFlight;
     const secs = Math.round((Date.now() - started) / 1000);
     console.log(`[EA] export complete in ${secs}s`, summary);
-    const weekNote = mode === "week" ? ` (${weekOptionLabel(week)})` : mode === "recent" ? " (previous + current)" : "";
+    const weekNote =
+      mode === "week"
+        ? ` (${weekOptionLabel(week)})`
+        : mode === "weeks"
+        ? ` (${week.map(weekOptionLabel).join(", ")})`
+        : mode === "recent"
+        ? " (previous + current)"
+        : "";
     const datasetNote =
       datasets.length === ALL_DATASETS.length
         ? "all 8 datasets"

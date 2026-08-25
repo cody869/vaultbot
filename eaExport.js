@@ -204,22 +204,35 @@ const stagePrefix = (stage) => (stage === Stage.SEASON ? "reg" : "pre");
  *  surrounding — previous, current, next (what snallabot uses on advance)
  *  all         — every preseason + regular/playoff week
  *  week        — one specific regular-season/playoff week, given as a
- *                1-based number (what the app and Discord show). Preseason
- *                isn't reachable this way since the app drops preseason
- *                games on import anyway (see maddenWebhook) — "current" /
- *                "recent" / "surrounding" still work fine during preseason
- *                since they read the league's actual live stage.
+ *                1-based number (what the app and Discord show).
+ *  weeks       — an arbitrary set of specific regular-season/playoff weeks,
+ *                given as an array of 1-based numbers (same validation as
+ *                "week", applied to each). Preseason isn't reachable via
+ *                "week"/"weeks" since the app drops preseason games on
+ *                import anyway (see maddenWebhook) — "current" / "recent" /
+ *                "surrounding" still work fine during preseason since they
+ *                read the league's actual live stage.
  */
+function weekNumberToIndex(weekNumber) {
+  const weekIndex = Math.round(weekNumber) - 1;
+  if (!Number.isFinite(weekIndex) || weekIndex < 0 || weekIndex > 22 || weekIndex === 21) {
+    throw new Error(`Invalid week number: ${weekNumber}. Regular season is weeks 1-23, excluding 22 (Pro Bowl).`);
+  }
+  return weekIndex;
+}
+
 function resolveWeeks(mode, leagueInfo, weekNumber) {
   const { seasonWeek, seasonWeekType } = leagueInfo.careerHubInfo.seasonInfo;
   const stage = seasonWeekType === 0 ? Stage.PRESEASON : Stage.SEASON;
 
   if (mode === "week") {
-    const weekIndex = Math.round(weekNumber) - 1;
-    if (!Number.isFinite(weekIndex) || weekIndex < 0 || weekIndex > 22 || weekIndex === 21) {
-      throw new Error(`Invalid week number: ${weekNumber}. Regular season is weeks 1-23, excluding 22 (Pro Bowl).`);
-    }
-    return [{ weekIndex, stage: Stage.SEASON }];
+    return [{ weekIndex: weekNumberToIndex(weekNumber), stage: Stage.SEASON }];
+  }
+
+  if (mode === "weeks") {
+    const numbers = Array.isArray(weekNumber) ? weekNumber : [weekNumber];
+    if (!numbers.length) throw new Error('scope "weeks" requires at least one week number.');
+    return numbers.map((n) => ({ weekIndex: weekNumberToIndex(n), stage: Stage.SEASON }));
   }
 
   if (mode === "all") {
@@ -321,8 +334,9 @@ async function exportRosters(client, leagueId, platform, teamList, onProgress) {
  * Run an export.
  *
  * @param {object}   opts
- * @param {"current"|"recent"|"surrounding"|"all"|"week"} opts.mode   which weeks to pull
- * @param {number}   [opts.week]       1-based week number, required when mode is "week"
+ * @param {"current"|"recent"|"surrounding"|"all"|"week"|"weeks"} opts.mode   which weeks to pull
+ * @param {number|number[]} [opts.week]  1-based week number ("week") or array of
+ *                                       1-based week numbers ("weeks") — required for either mode
  * @param {boolean}  opts.rosters      also pull all 32 rosters + free agents
  * @param {boolean}  opts.leagueInfo   also pull teams + standings
  * @param {string[]} opts.datasets     which per-week datasets (default: all 8)
@@ -341,6 +355,9 @@ async function runExport({
 
   if (mode === "week" && (week == null || !Number.isFinite(Number(week)))) {
     throw new Error('scope "week" requires a week number.');
+  }
+  if (mode === "weeks" && (!Array.isArray(week) || !week.length)) {
+    throw new Error('scope "weeks" requires an array of week numbers.');
   }
 
   const unknown = datasets.filter((d) => !WEEK_DATASETS[d]);
