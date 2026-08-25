@@ -272,7 +272,7 @@ async function fetchArticles(limit = 500) {
   // Backs both the 60s watcher tick and /news — neither needs sub-minute
   // freshness, and re-reading the whole collection every tick with no
   // caching was part of what tripped Base44's read-rate limit.
-  return pollCached(`news:${limit}`, 15_000, () => list(ENTITY, {}, { sort: "-published_at", limit }));
+  return pollCached(`news:${limit}`, 55_000, () => list(ENTITY, {}, { sort: "-published_at", limit }));
 }
 
 function isDue(a) {

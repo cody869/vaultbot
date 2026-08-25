@@ -253,7 +253,7 @@ async function tick(client) {
     // verify a write actually stuck) -- this is just "scan for anything
     // newly due," which doesn't need sub-minute freshness on a 60s poll.
     const [all, members] = await Promise.all([
-      pollCached('suspension:all', 15_000, () => list('Suspension', {}, { sort: '-created_date', limit: 5000 })),
+      pollCached('suspension:all', 55_000, () => list('Suspension', {}, { sort: '-created_date', limit: 5000 })),
       getLeagueMembers(),
     ]);
 

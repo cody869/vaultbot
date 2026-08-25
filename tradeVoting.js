@@ -13,7 +13,6 @@ import {
 } from "discord.js";
 import { teamEmojiByName, devEmoji } from "./emoji.js";
 import {
-  getPendingTrades,
   getAllTrades,
   getTradeById,
   getPlayersByNames,
@@ -634,14 +633,21 @@ export function startTradeWatcher(client) {
 
   const tick = async () => {
     try {
-      // Both cached -- getPendingTrades/getAllTrades are only ever used by
-      // this watcher's own seed/tick, so re-reading the whole
-      // TradeSubmission collection every 60s with no caching was pure
-      // waste, and part of what tripped Base44's read-rate limit.
-      // handleTradeVote's own getTradeById() (a live, per-vote lookup) is
-      // untouched and stays fully fresh.
+      // Cached -- getPendingTrades/getAllTrades are only ever used by this
+      // watcher's own seed/tick, so re-reading the whole TradeSubmission
+      // collection every 60s with no caching was pure waste, and part of
+      // what tripped Base44's read-rate limit. One read now serves both the
+      // pending list (derived in memory, same filter getPendingTrades()
+      // uses) and the full list, instead of two separate live reads per
+      // tick. TTL is just under the 60s tick interval so the watcher's own
+      // scheduled tick always finds it expired, while anything landing in
+      // the same window is served from cache. handleTradeVote's own
+      // getTradeById() (a live, per-vote lookup) is untouched and stays
+      // fully fresh.
+      const all = await pollCached('trades:all', 55_000, () => getAllTrades(300));
+
       // 1) Post newly submitted trades for review.
-      const pending = await pollCached('trades:pending', 15_000, getPendingTrades);
+      const pending = all.filter((t) => (t.status ?? 'pending') === 'pending');
       const unposted = pending.filter((t) => !t.discord_message_id);
       if (unposted.length) {
         console.log(`[TRADE VOTE] ${unposted.length} trade(s) to post.`);
@@ -653,7 +659,6 @@ export function startTradeWatcher(client) {
 
       // 2) Announce approvals — including ones decided in the app rather than
       //    through the Discord buttons. Rejections stay silent.
-      const all = await pollCached('trades:all', 15_000, getAllTrades);
       for (const t of all) {
         if (t.status === "approved" && !announced.has(t.id)) {
           await announceApproval(client, t);

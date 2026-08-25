@@ -3,6 +3,7 @@
 // bearer token (needed once the app requires login). Otherwise it falls back to
 // anonymous reads (works only while the app is public).
 import { abbrFromName } from "./emoji.js";
+import { pace } from "./base44Pacer.js";
 
 const APP_ID = process.env.BASE44_APP_ID;
 const SERVER = process.env.BASE44_SERVER_URL || "https://base44.app";
@@ -169,6 +170,7 @@ export async function list(entity, filter = {}, opts = {}) {
 
   let res;
   try {
+    await pace(); // bot-wide minimum spacing -- see base44Pacer.js
     res = await doFetch();
     // Token expired or app now requires auth — re-login once and retry.
     if ((res.status === 401 || res.status === 403) && (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
@@ -825,9 +827,12 @@ export function playerTradeValue(player) {
   }
 }
 
-// League members, cached — small table, read often.
+// League members, cached — small table, read often. This is the canonical
+// LeagueMember cache; fantasyStore.js's getLeagueMembers() delegates here
+// instead of keeping its own separate cache, since membership changes on the
+// order of days, not minutes.
 let _memberCache = { at: 0, rows: [] };
-const MEMBER_TTL_MS = 300_000;
+const MEMBER_TTL_MS = 600_000;
 
 export async function getLeagueMembers() {
   if (Date.now() - _memberCache.at < MEMBER_TTL_MS && _memberCache.rows.length) {

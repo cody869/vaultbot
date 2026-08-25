@@ -5,6 +5,8 @@
 // rest of vaultbot. Query-param filters on Base44 REST are unreliable from the
 // bot, so every read pulls the collection and filters in memory.
 
+import { pace } from './base44Pacer.js';
+
 const BASE = process.env.BASE44_BASE || 'https://app.base44.com';
 const APP_ID = process.env.BASE44_APP_ID || '69d09944c8636f39abaa7ef0';
 
@@ -94,6 +96,7 @@ function parseRetryAfterMs(body) {
 }
 
 async function request(method, url, body, { retryAuth = true, retry429 = true } = {}) {
+  await pace(); // bot-wide minimum spacing -- see base44Pacer.js
   const res = await fetch(url, {
     method,
     headers: await authHeaders(),
@@ -353,8 +356,14 @@ export async function getMatchups(leagueId, week = null) {
   return rows.filter((m) => m.league_id === leagueId && (week == null || m.week === week));
 }
 
+// Cached -- previously an uncached listEntity() call, hit twice per scored
+// week by fantasyLeague.js's runScoringPass() alone. scoreWeek() already
+// calls invalidate(ENTITIES.weekScore) on write, so a freshly-scored week is
+// visible immediately regardless of TTL; the cache only bounds staleness
+// between scoring events, which is fine at this TTL since it's well under
+// the 10-minute scoring-watcher interval.
 export async function getWeekScores(leagueId, week = null) {
-  const rows = await listEntity(ENTITIES.weekScore);
+  const rows = await cachedList(ENTITIES.weekScore, 180_000);
   return rows.filter((s) => s.league_id === leagueId && (week == null || s.week === week));
 }
 
@@ -386,8 +395,14 @@ export async function getWeeklyStats(season = null) {
   });
 }
 
+// Delegates to vault.js's own LeagueMember cache (its own separate
+// cachedList('LeagueMember', ...) entry used to fetch the same collection on
+// an independent schedule -- two unrelated fetch schedules for one table).
+// Lazy import, same pattern as borrowVaultToken() above, to avoid a static
+// circular import between the two modules.
 export async function getLeagueMembers() {
-  return cachedList('LeagueMember', 30 * 60 * 1000);
+  const vault = await import('./vault.js');
+  return vault.getLeagueMembers();
 }
 
 export async function getAppConfig() {

@@ -88,9 +88,13 @@ client.once(Events.ClientReady, async (c) => {
   // only 3 seconds, which a cold 10k-row fetch cannot meet.
   await warmPlayerCache();
   // Keep it warm so a refresh never lands in the middle of a keystroke.
+  // Matches vault.js's own PLAYER_TTL_MS (300s) -- warmPlayerCache() calls
+  // loadPlayers() unconditionally, so an interval shorter than the cache's
+  // own TTL was forcing a full 10k-row Player fetch every cycle regardless
+  // of whether the cache had actually gone stale yet.
   setInterval(() => {
     warmPlayerCache().catch(() => {});
-  }, 240_000);
+  }, 300_000);
   // Same 3-second autocomplete deadline applies to /fantasy pick and
   // /fantasy queue — warm the draft pool too (no-ops when no draft is live).
   await warmDraftPool().catch((err) => console.error('[fantasy] pool warm-up failed:', err.message));
