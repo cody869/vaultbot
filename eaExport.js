@@ -396,9 +396,18 @@ async function runExport({
     summary.leagueInfo = true;
   }
 
-  // A narrow pull is 1-2 requests per week instead of 8, so more weeks can go
-  // in parallel without hitting EA any harder than a full export already does.
-  const weekBatch = datasets.length > 2 ? WEEK_BATCH : 6;
+  // Used to widen this to 6 for a narrow (<=2 dataset) pull, on the theory
+  // that fewer requests per week meant more weeks could run concurrently
+  // without hitting EA any harder than a full export already does. That
+  // reasoning only ever considered EA's own rate limit — before "weeks" mode
+  // existed, a narrow pull was always exactly one week anyway, so the wider
+  // batch was never actually exercised. Confirmed live once multi-week
+  // selection made it reachable: picking several weeks with a narrow dataset
+  // (e.g. 6 weeks of just "defense") sent 6 simultaneous POSTs and the
+  // destination — not EA — couldn't keep up, timing every one of them out
+  // and failing the whole export. Concurrency is capped uniformly at
+  // WEEK_BATCH regardless of dataset width now that this is reachable.
+  const weekBatch = WEEK_BATCH;
 
   for (let i = 0; i < weeks.length; i += weekBatch) {
     const batch = weeks.slice(i, i + weekBatch);
