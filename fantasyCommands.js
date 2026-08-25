@@ -1133,7 +1133,36 @@ export function startDraftWatcher(client, { intervalMs = 60 * 1000, idleInterval
       if (isRateLimited()) return;
 
       const league = await getLeague();
-      if (!league || league.draft_status !== 'in_progress') return; // stays at idleIntervalMs
+      if (!league) return; // stays at idleIntervalMs
+
+      // Self-heal: schedule generation normally happens further down, when
+      // this watcher's own autopick loop is the one that sees the draft
+      // finish. If the final pick is made manually instead, makePick()
+      // flips draft_status to 'complete' directly and the in_progress gate
+      // right below would return early every tick from then on without ever
+      // reaching that code -- leaving a finished league with no matchups,
+      // permanently. generateSchedule() is idempotent (it checks for
+      // existing matchups before creating any), so checking this on every
+      // tick is safe -- it only ever does real work the one time it's needed.
+      if (league.draft_status === 'complete' && !league.schedule_generated) {
+        const teams = await getTeams(league.id);
+        const result = await generateSchedule(league, teams);
+        if (result.created > 0) {
+          console.log(`[fantasy] backfilled schedule: ${result.created} matchups`);
+          invalidate(ENTITIES.league);
+          const ch = league.channel_id || process.env.FANTASY_CHANNEL_ID;
+          const channel = ch ? await client.channels.fetch(ch).catch(() => null) : null;
+          if (channel) {
+            await channel.send({
+              content: `# Schedule posted\n${result.created} matchups, weeks ${league.scoring_start_week}–${league.regular_season_end_week}.`,
+              ...PLAIN,
+            });
+          }
+        }
+        return; // stays at idleIntervalMs -- nothing time-sensitive about this
+      }
+
+      if (league.draft_status !== 'in_progress') return; // stays at idleIntervalMs
       delay = intervalMs; // draft is live -- resume the tight cadence autopick deadlines need
       // Paused: no autopicks, no "on the clock" pings. Everything resumes
       // where it left off when the commissioner runs /fantasy resume.
