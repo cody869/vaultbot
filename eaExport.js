@@ -73,6 +73,17 @@ const TEAM_BATCH = Math.max(1, Number(process.env.EA_TEAM_BATCH || 2));
 const ROSTER_DELAY_MS = Math.max(0, Number(process.env.EA_ROSTER_DELAY_MS || 750));
 const POST_TIMEOUT_MS = Math.max(5000, Number(process.env.EA_POST_TIMEOUT_MS || 180000));
 
+/*
+ * Pause between distinct payload categories sent back-to-back for the same
+ * week or export step — e.g. passing then rushing then receiving, or
+ * leagueteams then standings, or free agents then the first roster batch.
+ * These are sequential by design already (see exportWeek's comment on why),
+ * so adding a pause here doesn't slow anything that could otherwise run
+ * concurrently — it just gives the receiving webhook breathing room between
+ * requests instead of hitting it back-to-back.
+ */
+const CATEGORY_DELAY_MS = Math.max(0, Number(process.env.EA_CATEGORY_DELAY_MS || 500));
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /*
@@ -265,7 +276,12 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
   // as it can be instead of stopping at the first failure, while the
   // caller still learns something needs a retry.
   const failures = [];
-  for (const key of datasets) {
+  for (let i = 0; i < datasets.length; i++) {
+    const key = datasets[i];
+    // Pace category posts for the receiving webhook, same reasoning as
+    // ROSTER_DELAY_MS below — no pause before the first one, since there's
+    // nothing to space it from.
+    if (i > 0 && CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
     try {
       const data = await WEEK_DATASETS[key](client)(leagueId, stage, weekIndex);
       await post(`${base}/${key}`, data);
@@ -282,6 +298,7 @@ async function exportWeek(client, leagueId, platform, { weekIndex, stage }, data
 async function exportRosters(client, leagueId, platform, teamList, onProgress) {
   const freeAgents = await client.getFreeAgents(leagueId);
   await post(`/${platform}/${leagueId}/freeagents/roster`, freeAgents);
+  if (CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
 
   for (let i = 0; i < teamList.length; i += TEAM_BATCH) {
     // Pace the batches. The failure this prevents is silent: a relay or
@@ -357,6 +374,7 @@ async function runExport({
       client.getStandings(leagueId),
     ]);
     await post(`/${platform}/${leagueId}/leagueteams`, teams);
+    if (CATEGORY_DELAY_MS) await sleep(CATEGORY_DELAY_MS);
     await post(`/${platform}/${leagueId}/standings`, standings);
     summary.leagueInfo = true;
   }
