@@ -23,18 +23,21 @@
 // touched by the Madden import pipeline and isn't lost on redeploy.
 //
 // Environment:
-//   SCOREBUG_CHANNEL_ID     channel to post cards to (default below)
-//   SCOREBUG_POLL_SECONDS   optional — default 60
-//   SCOREBUG_SEED_HOURS     optional — default 24 (first-boot backlog grace window)
-//   SCOREBUG_DELAY_MINUTES  optional — default 5 (wait after final before
-//                           posting, so WeeklyStats has time to sync — see
-//                           the "pending" state below)
+//   SCOREBUG_CHANNEL_ID          channel to post cards to (default below)
+//   SCOREBUG_POLL_SECONDS        optional — default 60
+//   SCOREBUG_SEED_HOURS          optional — default 24 (first-boot backlog grace window)
+//   SCOREBUG_DELAY_MINUTES       optional — default 5 (wait after final before
+//                                 posting, so WeeklyStats has time to sync — see
+//                                 the "pending" state below)
+//   SCOREBUG_STATS_MAX_WAIT_MINUTES  optional — default 30 (cap on how long to
+//                                 keep waiting on incomplete passing/rushing/
+//                                 receiving/defense stats before posting anyway)
 
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
 import { list, getStandings, getCurrentCycle, createEntity, pollCached } from "./vault.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
-import { isGameFinal, getGameContributors } from "./scorebugHelper.js";
+import { isGameFinal, getGameContributors, getGameStatsCompleteness } from "./scorebugHelper.js";
 
 const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 
@@ -42,6 +45,7 @@ const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
 const POLL_MS = Number(process.env.SCOREBUG_POLL_SECONDS || 60) * 1000;
 const SEED_HOURS = Number(process.env.SCOREBUG_SEED_HOURS || 24);
 const DELAY_MS = Number(process.env.SCOREBUG_DELAY_MINUTES || 5) * 60 * 1000;
+const STATS_MAX_WAIT_MS = Number(process.env.SCOREBUG_STATS_MAX_WAIT_MINUTES || 30) * 60 * 1000;
 const POST_TIMEOUT_MS = Number(process.env.SCOREBUG_POST_TIMEOUT_MS || 30_000);
 
 // NOTE: `handled` is created fresh INSIDE tick() (below), not here at
@@ -269,7 +273,29 @@ async function tick(client, { seed = false } = {}) {
     }
 
     const pendingSince = entry.pending.created_date ? new Date(entry.pending.created_date).getTime() : 0;
-    if (Date.now() - pendingSince < DELAY_MS) continue; // still waiting for stats to sync
+    const waitedMs = Date.now() - pendingSince;
+    if (waitedMs < DELAY_MS) continue; // still waiting for stats to sync
+
+    // The base delay is a floor, not a guarantee -- confirmed live: cards
+    // posted before passing/rushing/receiving/defense had all landed,
+    // showing an incomplete stat strip. Re-check every tick past DELAY_MS
+    // and keep waiting rather than post early, up to STATS_MAX_WAIT_MS so a
+    // game whose stats genuinely never fully sync doesn't wait forever.
+    if (waitedMs < STATS_MAX_WAIT_MS) {
+      let completeness;
+      try {
+        completeness = await getGameStatsCompleteness(g.scheduleId, g.cycle);
+      } catch (err) {
+        console.error(`[SCOREBUG] stats completeness check failed for ${key}: ${err.message}`);
+        continue; // treat an unconfirmed check the same as "not ready yet"
+      }
+      if (!completeness.complete) {
+        console.log(`[SCOREBUG] ${key} stats incomplete (missing ${completeness.missing.join(", ")}) — waiting`);
+        continue;
+      }
+    } else {
+      console.warn(`[SCOREBUG] ${key} still missing some stats after ${STATS_MAX_WAIT_MS / 60000}m — posting anyway`);
+    }
 
     handled.add(key); // fast in-process guard against a double-fire mid-render
     try {

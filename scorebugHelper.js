@@ -35,7 +35,6 @@ function recordFor(standingsRows, teamAbbr) {
   return ties ? `${wins}-${losses}-${ties}` : `${wins}-${losses}`;
 }
 
-// Top passer/rusher/receiver for one game, read from WeeklyStats.
 // Game.scheduleId links to WeeklyStats.schedule_id -- confirmed against the
 // live entity schemas, not guessed. team_abbrName lives directly on each
 // WeeklyStats row (no roster join needed).
@@ -43,8 +42,9 @@ function recordFor(standingsRows, teamAbbr) {
 // Server-side filters aren't always honored (same caveat vault.js's other
 // readers work around), so this tries a narrow request first and re-checks
 // every row in memory regardless -- a false-positive from an ignored filter
-// never slips through.
-export async function getGameContributors(scheduleId, cycle) {
+// never slips through. Shared by getGameContributors() and
+// getGameStatsCompleteness() so a caller checking both only fetches once.
+async function fetchGameStatsRows(scheduleId, cycle) {
   if (scheduleId == null) return [];
 
   let rows;
@@ -67,6 +67,40 @@ export async function getGameContributors(scheduleId, cycle) {
       return [];
     }
   }
+  return rows;
+}
+
+// The four categories a game's stat sync needs before a scorebug is safe to
+// post, and the field that proves each one actually landed. One qualifying
+// row is enough per category -- a real NFL game always has SOME player with
+// a pass attempt, a rush attempt, a catch, and a tackle, so an empty
+// category here means the export sync hasn't finished, not that the
+// category was legitimately empty. Field names match fantasyConfig.js's
+// STAT_FIELDS primary keys (verified against the live WeeklyStats schema).
+const COMPLETENESS_FIELDS = {
+  passing: "pass_att",
+  rushing: "rush_att",
+  receiving: "rec_catches",
+  defense: "def_total_tackles",
+};
+
+/**
+ * Whether every one of passing/rushing/receiving/defense has synced into
+ * WeeklyStats for this game yet. Used to hold a scorebug post back rather
+ * than send it with an incomplete stat strip -- confirmed live: cards were
+ * going out before all four categories had landed.
+ */
+export async function getGameStatsCompleteness(scheduleId, cycle) {
+  const rows = await fetchGameStatsRows(scheduleId, cycle);
+  const missing = Object.entries(COMPLETENESS_FIELDS)
+    .filter(([, field]) => !rows.some((r) => (r[field] ?? 0) > 0))
+    .map(([name]) => name);
+  return { complete: missing.length === 0, missing };
+}
+
+// Top passer/rusher/receiver for one game, read from WeeklyStats.
+export async function getGameContributors(scheduleId, cycle) {
+  const rows = await fetchGameStatsRows(scheduleId, cycle);
   if (!rows.length) return [];
 
   const topBy = (field, qualifyField) => {
