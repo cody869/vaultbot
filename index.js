@@ -10,6 +10,7 @@ import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { startScheduleWatcher } from "./scheduleWatcher.js";
 import { startSuspensionWatcher } from "./suspensionWatcher.js";
+import { startWeeklyDigestWatcher } from "./weeklyDigestWatcher.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams, handleForceWinButton } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
 import { handleExportComponent } from "./eaCommands.js";
@@ -126,6 +127,10 @@ client.once(Events.ClientReady, async (c) => {
   // Posts approved 70/30 Rule suspensions to SUSPENSIONS_CHANNEL_ID once each,
   // tagging the affected owner. No-ops if that env var is unset.
   setTimeout(() => startSuspensionWatcher(c), 15_000);
+  // Posts a stylized recap card + write-up to #content when an admin
+  // publishes a WeeklyDigest in the app. Polls slowly (default 5 min) --
+  // published rarely, by a human, no live event to track.
+  setTimeout(() => startWeeklyDigestWatcher(c), 20_000);
   // Keeps the EA tokens alive (the refresh chain dies after ~10 days idle)
   // and, if EA_AUTO_EXPORT=true, exports when the league actually changes.
   startEAWatcher();
