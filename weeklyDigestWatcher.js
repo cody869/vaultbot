@@ -1,5 +1,5 @@
-// weeklyDigestWatcher.js — posts a WeeklyDigest recap card to #content once
-// an admin publishes it in the app.
+// weeklyDigestWatcher.js — posts a WeeklyDigest recap card to the scorebug
+// channel once an admin publishes it in the app.
 //
 // Mirrors news.js's poll/claim pattern: the RECORD is the lock (stamp
 // discord_message_id with a claim token, re-read to confirm ownership before
@@ -10,7 +10,7 @@
 // discord_message_id/posted_to_discord directly onto the record is safe.
 //
 // Environment:
-//   CONTENT_CHANNEL_ID          same #content channel news.js posts to (shared)
+//   SCOREBUG_CHANNEL_ID         same channel scorebugWatcher.js posts to (shared)
 //   WEEKLYDIGEST_POLL_SECONDS   optional — default 300 (5 min; published rarely,
 //                                by a human, no need to poll fast)
 //   WEEKLYDIGEST_SEED_HOURS     optional — default 24 (first-boot backlog grace window)
@@ -29,7 +29,7 @@ import { renderWeeklyDigestCard } from "./weeklyDigestCard.js";
 import { routeUrl, ROUTES } from "./embeds.js";
 
 const ENTITY = "WeeklyDigest";
-const CONTENT_CHANNEL_ID = process.env.CONTENT_CHANNEL_ID || "654425873004625929";
+const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
 const POLL_MS = Number(process.env.WEEKLYDIGEST_POLL_SECONDS || 300) * 1000;
 const SEED_HOURS = Number(process.env.WEEKLYDIGEST_SEED_HOURS || 24);
 
@@ -101,9 +101,9 @@ async function claim(d) {
 }
 
 async function postDigest(client, d) {
-  const channel = await client.channels.fetch(CONTENT_CHANNEL_ID);
+  const channel = await client.channels.fetch(CHANNEL_ID);
   if (!channel?.isTextBased?.()) {
-    throw new Error(`CONTENT_CHANNEL_ID ${CONTENT_CHANNEL_ID} is not a text channel`);
+    throw new Error(`SCOREBUG_CHANNEL_ID ${CHANNEL_ID} is not a text channel`);
   }
 
   // Take the lock BEFORE rendering/sending. If we don't win it, do nothing.
@@ -244,11 +244,11 @@ async function tick(client, { seed = false } = {}) {
 }
 
 export function startWeeklyDigestWatcher(client) {
-  if (!CONTENT_CHANNEL_ID) {
-    console.log("[DIGEST] watcher disabled — no CONTENT_CHANNEL_ID set.");
+  if (!CHANNEL_ID) {
+    console.log("[DIGEST] watcher disabled — no CHANNEL_ID set.");
     return;
   }
-  console.log(`[DIGEST] watcher starting — channel ${CONTENT_CHANNEL_ID}, every ${POLL_MS / 1000}s`);
+  console.log(`[DIGEST] watcher starting — channel ${CHANNEL_ID}, every ${POLL_MS / 1000}s`);
 
   tick(client, { seed: true })
     .catch((err) => console.error(`[DIGEST] seed pass failed: ${err.message}`))
