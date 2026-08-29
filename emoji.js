@@ -2,7 +2,7 @@
 // Populated at startup from the bot's cached guild emoji, so shortcodes like
 // "ari" or "xfactor_dev" render as real custom emoji instead of plain text.
 
-const cache = new Map(); // name (lowercase) -> "<:name:id>"
+const cache = new Map(); // name (lowercase) -> { id, animated, markup: "<:name:id>" }
 
 // Unicode fallbacks used only when a custom emoji isn't found on the server.
 const TEAM_FALLBACK = {
@@ -47,7 +47,7 @@ export async function loadEmoji(client) {
         if (!emoji.name) continue;
         const key = emoji.name.toLowerCase();
         if (!cache.has(key)) {
-          cache.set(key, emoji.toString()); // -> "<:name:id>" / "<a:name:id>"
+          cache.set(key, { id: emoji.id, animated: !!emoji.animated, markup: emoji.toString() });
           count++;
         }
       }
@@ -62,7 +62,20 @@ export async function loadEmoji(client) {
 // Generic resolver: returns the custom emoji code if found, else the fallback.
 function resolve(name, fallback) {
   const key = (name ?? "").toLowerCase();
-  return cache.get(key) ?? fallback ?? "";
+  return cache.get(key)?.markup ?? fallback ?? "";
+}
+
+// CDN image URL for a cached custom emoji, for contexts that render onto an
+// actual image (Satori cards) rather than Discord message text -- the
+// <:name:id> markup resolve() returns is meaningless baked into a PNG.
+// Returns null when the name isn't a cached custom emoji (unicode
+// fallbacks like DEV_FALLBACK/TEAM_FALLBACK have no CDN asset); callers
+// should have their own visual fallback for that case.
+export function emojiImageUrl(name) {
+  const key = (name ?? "").toLowerCase();
+  const hit = cache.get(key);
+  if (!hit) return null;
+  return `https://cdn.discordapp.com/emojis/${hit.id}.${hit.animated ? "gif" : "png"}`;
 }
 
 // Team helmet by abbreviation (e.g. "CLE" -> :cle:).
@@ -103,15 +116,26 @@ export function teamEmojiByName(teamName) {
   return teamEmoji(abbr || teamName);
 }
 
-// Dev-trait gem by trait value. Madden stores this as a numeric code
-// (0=Normal, 1=Star, 2=Superstar, 3=X-Factor) but it may also arrive as a
-// word ("X-Factor"). Handle both.
-export function devEmoji(trait) {
+// Madden stores dev trait as a numeric code (0=Normal, 1=Star, 2=Superstar,
+// 3=X-Factor) but it may also arrive as a word ("X-Factor"). Handle both.
+function devTraitName(trait) {
   const raw = String(trait ?? "").toLowerCase().trim();
-  let name = "normal_dev";
-  if (raw === "3" || raw.includes("x-factor") || raw.includes("xfactor")) name = "xfactor_dev";
-  else if (raw === "2" || raw.includes("superstar")) name = "superstar_dev";
-  else if (raw === "1" || raw === "star" || (raw.includes("star") && !raw.includes("super"))) name = "star_dev";
-  else name = "normal_dev"; // "0", "normal", or anything else
+  if (raw === "3" || raw.includes("x-factor") || raw.includes("xfactor")) return "xfactor_dev";
+  if (raw === "2" || raw.includes("superstar")) return "superstar_dev";
+  if (raw === "1" || raw === "star" || (raw.includes("star") && !raw.includes("super"))) return "star_dev";
+  return "normal_dev"; // "0", "normal", or anything else
+}
+
+// Dev-trait gem by trait value, as Discord message text (<:name:id> or a
+// unicode fallback).
+export function devEmoji(trait) {
+  const name = devTraitName(trait);
   return resolve(name, DEV_FALLBACK[name]);
+}
+
+// Dev-trait gem as a CDN image URL, for cards (Satori) rather than Discord
+// message text. Null when the server has no custom emoji cached under that
+// name -- callers draw their own fallback badge in that case.
+export function devEmojiImageUrl(trait) {
+  return emojiImageUrl(devTraitName(trait));
 }

@@ -14,6 +14,13 @@
 //   WEEKLYDIGEST_POLL_SECONDS   optional — default 300 (5 min; published rarely,
 //                                by a human, no need to poll fast)
 //   WEEKLYDIGEST_SEED_HOURS     optional — default 24 (first-boot backlog grace window)
+//
+// Two card sections read fields that don't exist on the WeeklyDigest schema
+// yet -- both read defensively (empty/absent = section just doesn't render),
+// so no code change is needed here once the app adds them, only a schema
+// update on the Base44 side matching these exact names:
+//   player_dev_upgrades  array of {player_fullName, team_name, from_trait, to_trait}
+//   next_game_of_week    {home_team, away_team, blurb}
 
 import { MessageFlags, AttachmentBuilder } from "discord.js";
 import { list, updateEntity, pollCached } from "./vault.js";
@@ -48,10 +55,10 @@ function weeklyDigestMessage(d) {
 
   const tail = [
     ...bulletBlock("Storylines", d.storylines),
-    // player_dev_upgrades doesn't exist on the schema yet -- read defensively
-    // so this section just doesn't render until the app adds it, no code
-    // change needed here when it does.
-    ...bulletBlock("Dev trait upgrades", d.player_dev_upgrades),
+    // Real in-game dev-trait upgrades (player_dev_upgrades) are rendered on
+    // the card image itself now, not repeated here as text. dev_upgrades/
+    // speed_upgrades are a different, unrelated field -- the Vault app's own
+    // changelog -- and stay as text.
     ...bulletBlock("Also shipped", [...(d.dev_upgrades || []), ...(d.speed_upgrades || [])]),
   ];
 
@@ -124,6 +131,20 @@ async function postDigest(client, d) {
         teamName: s.team_name,
         statLine: s.stat_line,
       })),
+      // Neither field exists on the schema yet -- read defensively (||  [])
+      // so these sections just don't render until the app adds them, no
+      // further code change needed here when it does.
+      devUpgrades: (d.player_dev_upgrades || []).map((u) => ({
+        playerFullName: u.player_fullName,
+        teamName: u.team_name,
+        fromTrait: u.from_trait,
+        toTrait: u.to_trait,
+      })),
+      nextGame: d.next_game_of_week && {
+        homeTeam: d.next_game_of_week.home_team,
+        awayTeam: d.next_game_of_week.away_team,
+        blurb: d.next_game_of_week.blurb,
+      },
     });
     const filename = `weekly-digest-${d.season_number ?? "x"}-wk${d.week ?? "x"}.png`;
     const file = new AttachmentBuilder(png, { name: filename });
