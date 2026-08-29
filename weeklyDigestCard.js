@@ -189,7 +189,10 @@ function buildHeader({ week, seasonNumber, headline, summary, topGame, homeTeam,
   return { node, height: H };
 }
 
-const STRIP_H = 100;
+// Tall enough for the player name/team line to wrap to 2 lines (e.g. "Joe
+// Burrow — Cincinnati Bengals" in the narrowest, 4-column layout) without
+// clipping the stat line below it -- confirmed live that 100 was too tight.
+const STRIP_H = 132;
 
 function buildStatLeadersStrip(statLeaders) {
   const shown = statLeaders.slice(0, 4);
@@ -199,7 +202,7 @@ function buildStatLeadersStrip(statLeaders) {
     props: {
       style: {
         position: 'absolute', display: 'flex', flexDirection: 'column',
-        top: 18, left: MARGIN + i * colWidth, width: colWidth - 16,
+        top: 20, left: MARGIN + i * colWidth, width: colWidth - 16,
       },
       children: [
         {
