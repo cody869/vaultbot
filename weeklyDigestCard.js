@@ -243,6 +243,73 @@ function buildStatLeadersStrip(statLeaders) {
   return { node, height: STRIP_H };
 }
 
+const STORY_LABEL_H = 30;
+const STORY_FONT = 17;
+const STORY_LH = 22;
+const STORY_GAP = 10;
+const STORY_MAX_SHOWN = 6;
+const STORY_MAX_LINES_PER = 2;
+const STORY_BULLET_INDENT = 22;
+
+function buildStorylinesSection(storylines) {
+  const shown = storylines.slice(0, STORY_MAX_SHOWN);
+  const overflow = storylines.length - shown.length;
+  const bulletMaxWidth = USABLE_W - STORY_BULLET_INDENT;
+  const wrapped = shown.map((s) =>
+    wrapLines(s, { fontSize: STORY_FONT, charWidthRatio: BARLOW_CHAR_WIDTH_RATIO, maxWidth: bulletMaxWidth, maxLines: STORY_MAX_LINES_PER })
+  );
+
+  let y = 20 + STORY_LABEL_H;
+  const items = wrapped.map((lines) => {
+    const top = y;
+    y += lines.length * STORY_LH + STORY_GAP;
+    return {
+      type: 'div',
+      props: {
+        style: { position: 'absolute', display: 'flex', top, left: MARGIN },
+        children: [
+          { type: 'div', props: { style: { display: 'flex', width: STORY_BULLET_INDENT, color: GOLD, fontFamily: 'Barlow', fontSize: STORY_FONT }, children: '•' } },
+          {
+            type: 'div',
+            props: {
+              style: { display: 'flex', flexDirection: 'column' },
+              children: textBlock(lines, { fontSize: STORY_FONT, lineHeight: STORY_LH, fontFamily: 'Barlow', color: 'rgba(255,255,255,0.85)' }),
+            },
+          },
+        ],
+      },
+    };
+  });
+
+  const H = y - STORY_GAP + (overflow > 0 ? 22 : 0) + 14;
+
+  const node = {
+    type: 'div',
+    props: {
+      style: { width: W, height: H, display: 'flex', position: 'relative', background: '#12161C' },
+      children: [
+        { type: 'div', props: { style: { position: 'absolute', top: 0, left: 0, width: W, height: 1, display: 'flex', background: 'rgba(212,168,67,0.4)' } } },
+        {
+          type: 'div',
+          props: {
+            style: { position: 'absolute', display: 'flex', top: 16, left: MARGIN, color: GOLD, fontFamily: 'Barlow', fontSize: 13, letterSpacing: 1 },
+            children: 'STORYLINES',
+          },
+        },
+        ...items,
+        overflow > 0 && {
+          type: 'div',
+          props: {
+            style: { position: 'absolute', display: 'flex', top: y, left: MARGIN + STORY_BULLET_INDENT, color: 'rgba(255,255,255,0.5)', fontFamily: 'Barlow', fontSize: 14 },
+            children: `+${overflow} more`,
+          },
+        },
+      ].filter(Boolean),
+    },
+  };
+  return { node, height: H };
+}
+
 const DEV_ROW_H = 56;
 const DEV_PER_ROW = 3;
 const DEV_MAX_SHOWN = 9;
@@ -379,14 +446,16 @@ function buildNextGameSection(nextGame, awayLogo, homeLogo) {
  * @param {string} [d.summary]
  * @param {object} [d.topGame] - {awayTeam, homeTeam, awayScore, homeScore, awayOwner, homeOwner}
  * @param {{category: string, playerFullName: string, teamName?: string, statLine?: string}[]} [d.statLeaders]
+ * @param {string[]} [d.storylines]
  * @param {{playerFullName: string, teamName?: string, fromTrait: string|number, toTrait: string|number}[]} [d.devUpgrades]
  * @param {object} [d.nextGame] - {awayTeam, homeTeam, blurb}
  * @returns {Promise<Buffer>} PNG bytes
  */
 async function renderWeeklyDigestCard(d) {
-  const { week, seasonNumber, headline, summary, topGame, statLeaders, devUpgrades, nextGame } = d;
+  const { week, seasonNumber, headline, summary, topGame, statLeaders, storylines, devUpgrades, nextGame } = d;
   const hasTopGame = !!(topGame && topGame.homeTeam && topGame.awayTeam);
   const hasStrip = Array.isArray(statLeaders) && statLeaders.length > 0;
+  const hasStorylines = Array.isArray(storylines) && storylines.length > 0;
   const hasDev = Array.isArray(devUpgrades) && devUpgrades.length > 0;
   const hasNextGame = !!(nextGame && nextGame.homeTeam && nextGame.awayTeam);
 
@@ -419,6 +488,7 @@ async function renderWeeklyDigestCard(d) {
   if (hasStrip) sections.push(buildStatLeadersStrip(statLeaders.map((s) => ({
     category: s.category, playerFullName: s.playerFullName, teamName: s.teamName, statLine: s.statLine,
   }))));
+  if (hasStorylines) sections.push(buildStorylinesSection(storylines));
   // Pass the FULL list, not devShown -- buildDevUpgradesSection does its own
   // slicing and needs the true count to compute the "+N more" overflow note.
   // devShown above is a separate, narrower slice used only to decide which

@@ -22,11 +22,10 @@
 //   player_dev_upgrades  array of {player_fullName, team_name, from_trait, to_trait}
 //   next_game_of_week    {home_team, away_team, blurb}
 
-import { MessageFlags, AttachmentBuilder } from "discord.js";
+import { AttachmentBuilder } from "discord.js";
 import { list, updateEntity, pollCached } from "./vault.js";
 import { isRateLimited } from "./base44Pacer.js";
 import { renderWeeklyDigestCard } from "./weeklyDigestCard.js";
-import { routeUrl, ROUTES } from "./embeds.js";
 
 const ENTITY = "WeeklyDigest";
 const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
@@ -36,53 +35,6 @@ const SEED_HOURS = Number(process.env.WEEKLYDIGEST_SEED_HOURS || 24);
 // Articles we've already handled this process, so a slow post can't be
 // picked up twice by the next tick.
 const handled = new Set();
-
-// --- message content -------------------------------------------------------
-
-function bulletBlock(title, lines) {
-  if (!lines || !lines.length) return [];
-  return ["", `**${title}**`, ...lines.map((l) => `> ${l}`)];
-}
-
-function weeklyDigestMessage(d) {
-  const meta = [d.season_number != null && `Season ${d.season_number}`, d.week != null && `Week ${d.week}`]
-    .filter(Boolean)
-    .join(" · ");
-
-  const head = [`# ${d.headline}`];
-  if (meta) head.push(`-# ${meta}`);
-  head.push("");
-
-  const tail = [
-    ...bulletBlock("Storylines", d.storylines),
-    // Real in-game dev-trait upgrades (player_dev_upgrades) are rendered on
-    // the card image itself now, not repeated here as text. dev_upgrades/
-    // speed_upgrades are a different, unrelated field -- the Vault app's own
-    // changelog -- and stay as text.
-    ...bulletBlock("Also shipped", [...(d.dev_upgrades || []), ...(d.speed_upgrades || [])]),
-  ];
-
-  const counts = [
-    d.trades_count ? `${d.trades_count} trade${d.trades_count === 1 ? "" : "s"} approved` : null,
-    d.suspensions_count ? `${d.suspensions_count} suspension${d.suspensions_count === 1 ? "" : "s"} this week` : null,
-  ].filter(Boolean);
-  if (counts.length) tail.push("", `-# ${counts.join(" · ")}`);
-
-  tail.push("", `-# [View on XCFL Vault](<${routeUrl(ROUTES.home)}>)`);
-
-  const headText = head.join("\n");
-  const tailText = tail.join("\n");
-  // narrative is the one field with no natural length cap -- budget the rest
-  // of the message first and truncate narrative to whatever's left, rather
-  // than risk editReply/send erroring on Discord's 2000-char content limit.
-  const budget = 1950 - headText.length - tailText.length - 2; // -2 for the blank lines joining them
-  let narrative = String(d.narrative || "");
-  if (narrative.length > budget) {
-    narrative = `${narrative.slice(0, Math.max(0, budget - 1))}…`;
-  }
-
-  return [headText, narrative, tailText].filter(Boolean).join("\n");
-}
 
 // --- posting -----------------------------------------------------------
 
@@ -131,6 +83,7 @@ async function postDigest(client, d) {
         teamName: s.team_name,
         statLine: s.stat_line,
       })),
+      storylines: d.storylines || [],
       // Neither field exists on the schema yet -- read defensively (||  [])
       // so these sections just don't render until the app adds them, no
       // further code change needed here when it does.
@@ -149,12 +102,9 @@ async function postDigest(client, d) {
     const filename = `weekly-digest-${d.season_number ?? "x"}-wk${d.week ?? "x"}.png`;
     const file = new AttachmentBuilder(png, { name: filename });
 
-    msg = await channel.send({
-      content: weeklyDigestMessage(d),
-      files: [file],
-      allowedMentions: { parse: [] },
-      flags: MessageFlags.SuppressEmbeds,
-    });
+    // Card only, no accompanying text -- narrative/dev_upgrades/speed_upgrades/
+    // trades_count/suspensions_count are not shown anywhere in this post.
+    msg = await channel.send({ files: [file] });
   } catch (err) {
     // Send failed after we claimed — release the claim so a later tick retries.
     await updateEntity(ENTITY, d.id, { discord_message_id: "" }).catch(() => {});
