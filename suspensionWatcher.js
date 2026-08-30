@@ -7,7 +7,12 @@
 //   - the RECORD is the lock, not an in-memory Set. An in-memory guard empties
 //     on every Railway restart/deploy-overlap, which is what caused the news
 //     reposting bug. claim() stamps discord_message_id with a unique token and
-//     re-reads to confirm ownership BEFORE sending.
+//     re-reads to confirm ownership BEFORE sending -- and, since that
+//     write-then-reread alone isn't a real mutual exclusion primitive (confirmed
+//     live: the same suspension posted 4 times when several containers
+//     overlapped during a redeploy), the whole thing runs inside
+//     fileLock.js's withFileLock() so only one container can be attempting a
+//     claim at a time.
 //   - the final message-id write-back retries; if it can't persist it leaves
 //     the claim token in place (never clears to empty) so the record stays
 //     locked rather than reposting forever.
@@ -27,6 +32,7 @@
 import { MessageFlags, AttachmentBuilder, EmbedBuilder } from 'discord.js';
 import { list, getLeagueMembers, memberDisplayName, updateEntity, pollCached } from './vault.js';
 import { isRateLimited } from './base44Pacer.js';
+import { withFileLock } from './fileLock.js';
 import { renderSuspensionCard } from './suspensionCard.js';
 import { abbrFromName } from './emoji.js';
 
@@ -101,33 +107,48 @@ function isDue(s) {
 
 /**
  * Stake a claim on this record before sending anything.
- * Returns true only if OUR token is the one that stuck — if two containers race,
- * exactly one wins the re-read and the loser backs off.
+ * Returns true only if OUR token is the one that stuck.
+ *
+ * The write-then-reread below is only an OPTIMISTIC check on its own --
+ * confirmed live, it let the same suspension post 4 times at once. Each of
+ * several overlapping containers (a Railway redeploy doesn't guarantee the
+ * old container is gone before the new one starts, and this repo pushes to
+ * main often) can independently write its own token and then read back ITS
+ * OWN write before any of the others' writes arrive, so every one of them
+ * sees "yes, my token is there" and proceeds. A Base44 record update has no
+ * compare-and-swap to fix this with. withFileLock does: it's a real,
+ * cross-process mutex (atomic file creation, same primitive
+ * eaTokenStore.js already relies on for this exact class of Railway
+ * deploy-overlap problem), so only one container is ever inside this
+ * function's body at a time -- the write-then-reread inside it now
+ * actually means what it always claimed to.
  */
 async function claim(suspension) {
-  const token = `posting:${PID}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-  try {
-    await updateEntity('Suspension', suspension.id, { discord_message_id: token });
-  } catch (err) {
-    console.error(`[SUSPENSION] claim write failed for ${suspension.id}:`, err.message);
-    return false;
-  }
-
-  // Re-read to confirm ownership — last-write-wins means our write may have
-  // been clobbered by another instance between the write and this read.
-  try {
-    const fresh = await list('Suspension', {}, { sort: '-created_date', limit: 5000 });
-    const row = fresh.find((r) => r.id === suspension.id);
-    if (!row || row.discord_message_id !== token) {
-      console.log(`[SUSPENSION] lost claim race on ${suspension.id}, skipping`);
+  return withFileLock('suspension-claim', async () => {
+    const token = `posting:${PID}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      await updateEntity('Suspension', suspension.id, { discord_message_id: token });
+    } catch (err) {
+      console.error(`[SUSPENSION] claim write failed for ${suspension.id}:`, err.message);
       return false;
     }
-  } catch (err) {
-    console.error(`[SUSPENSION] claim verify failed for ${suspension.id}:`, err.message);
-    return false;
-  }
 
-  return true;
+    // Re-read to confirm ownership — last-write-wins means our write may have
+    // been clobbered by another instance between the write and this read.
+    try {
+      const fresh = await list('Suspension', {}, { sort: '-created_date', limit: 5000 });
+      const row = fresh.find((r) => r.id === suspension.id);
+      if (!row || row.discord_message_id !== token) {
+        console.log(`[SUSPENSION] lost claim race on ${suspension.id}, skipping`);
+        return false;
+      }
+    } catch (err) {
+      console.error(`[SUSPENSION] claim verify failed for ${suspension.id}:`, err.message);
+      return false;
+    }
+
+    return true;
+  });
 }
 
 /** Persist the real message id, retrying a few times. Never clears back to empty. */

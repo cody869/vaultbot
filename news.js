@@ -19,6 +19,7 @@ import crypto from "node:crypto";
 import { SlashCommandBuilder, MessageFlags } from "discord.js";
 import { list, updateEntity, pollCached } from "./vault.js";
 import { isRateLimited } from "./base44Pacer.js";
+import { withFileLock } from "./fileLock.js";
 import { playerUrl, teamUrl, routeUrl } from "./embeds.js";
 import { teamEmojiByName } from "./emoji.js";
 
@@ -168,18 +169,30 @@ export function newsMessage(a) {
 // second container (deploy overlap) or a restart raced us, the re-read shows a
 // different token and we back off — so the article posts exactly once even
 // though the in-memory `handled` Set was empty after a restart.
+//
+// That write-then-reread alone is only an optimistic check, not real mutual
+// exclusion -- confirmed live on suspensionWatcher.js's identical pattern,
+// several overlapping containers (a Railway redeploy doesn't guarantee the
+// old container is gone before the new one starts) can each see their OWN
+// write on their OWN reread before any other's write lands, so all of them
+// think they won. withFileLock makes only one container able to run this
+// function at a time (same primitive eaTokenStore.js already relies on for
+// this exact class of problem), so the reread here now actually verifies
+// what it always claimed to.
 async function claim(a) {
-  const token = `posting:${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-  await updateEntity(ENTITY, a.id, { discord_message_id: token });
+  return withFileLock('news-claim', async () => {
+    const token = `posting:${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    await updateEntity(ENTITY, a.id, { discord_message_id: token });
 
-  // Confirm the claim stuck and nobody overwrote it between write and read.
-  const [fresh] = (await list(ENTITY, { id: a.id }, { limit: 1 })) || [];
-  const current = fresh?.discord_message_id;
-  if (current !== token) {
-    console.log(`[NEWS] claim lost for ${a.id} (now ${current}) — another instance has it`);
-    return null;
-  }
-  return token;
+    // Confirm the claim stuck and nobody overwrote it between write and read.
+    const [fresh] = (await list(ENTITY, { id: a.id }, { limit: 1 })) || [];
+    const current = fresh?.discord_message_id;
+    if (current !== token) {
+      console.log(`[NEWS] claim lost for ${a.id} (now ${current}) — another instance has it`);
+      return null;
+    }
+    return token;
+  });
 }
 
 async function postArticle(client, a) {

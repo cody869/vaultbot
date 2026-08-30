@@ -9,6 +9,15 @@
 // is only ever written by an admin publishing one, so writing
 // discord_message_id/posted_to_discord directly onto the record is safe.
 //
+// That write-then-reread alone isn't real mutual exclusion though -- it's
+// only an optimistic check, and can't tell "I won" from "I raced other
+// containers and each of us independently saw our own write before the
+// others' arrived," which is exactly what let the same suspension get
+// posted 4 times at once from suspensionWatcher.js's identical pattern
+// (confirmed live). So the whole claim runs inside fileLock.js's
+// withFileLock() too, so only one container can be attempting a claim at
+// a time.
+//
 // Environment:
 //   SCOREBUG_CHANNEL_ID         same channel scorebugWatcher.js posts to (shared)
 //   WEEKLYDIGEST_POLL_SECONDS   optional — default 300 (5 min; published rarely,
@@ -26,6 +35,7 @@ import { AttachmentBuilder } from "discord.js";
 import { list, updateEntity, pollCached } from "./vault.js";
 import { isRateLimited } from "./base44Pacer.js";
 import { renderWeeklyDigestCard } from "./weeklyDigestCard.js";
+import { withFileLock } from "./fileLock.js";
 
 const ENTITY = "WeeklyDigest";
 const CHANNEL_ID = process.env.SCOREBUG_CHANNEL_ID || "478919775163252736";
@@ -38,18 +48,21 @@ const handled = new Set();
 
 // --- posting -----------------------------------------------------------
 
-// Same "record is the lock" pattern as news.js's claim().
+// Same "record is the lock" pattern as news.js's claim(), wrapped in a real
+// cross-process mutex -- see the file-level comment above for why.
 async function claim(d) {
-  const token = `posting:${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-  await updateEntity(ENTITY, d.id, { discord_message_id: token });
+  return withFileLock("weeklydigest-claim", async () => {
+    const token = `posting:${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    await updateEntity(ENTITY, d.id, { discord_message_id: token });
 
-  const [fresh] = (await list(ENTITY, { id: d.id }, { limit: 1 })) || [];
-  const current = fresh?.discord_message_id;
-  if (current !== token) {
-    console.log(`[DIGEST] claim lost for ${d.id} (now ${current}) — another instance has it`);
-    return null;
-  }
-  return token;
+    const [fresh] = (await list(ENTITY, { id: d.id }, { limit: 1 })) || [];
+    const current = fresh?.discord_message_id;
+    if (current !== token) {
+      console.log(`[DIGEST] claim lost for ${d.id} (now ${current}) — another instance has it`);
+      return null;
+    }
+    return token;
+  });
 }
 
 async function postDigest(client, d) {
