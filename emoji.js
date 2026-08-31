@@ -78,9 +78,28 @@ export function emojiImageUrl(name) {
   return `https://cdn.discordapp.com/emojis/${hit.id}.${hit.animated ? "gif" : "png"}`;
 }
 
+// Madden's own export sometimes disagrees with the abbreviation this
+// codebase treats as canonical elsewhere (teamLogos.js, TEAM_FALLBACK,
+// NAME_TO_ABBR below) -- confirmed live: Arizona's Roster/stat rows come
+// back with "AZ", not "ARI", which broke both the Cardinals' emoji lookup
+// (no "az" custom emoji exists) and scorebug record matching (which
+// compares against the canonical "ARI" from abbrFromName()).
+const ABBR_ALIAS = {
+  az: "ari",
+};
+
+// Normalize a raw team_abbrName from Base44/EA data to this codebase's
+// canonical abbreviation (uppercase, alias-corrected). Idempotent -- safe
+// to call on an abbreviation that's already canonical.
+export function normalizeAbbr(abbr) {
+  const key = (abbr ?? "").toLowerCase().trim();
+  if (!key) return "";
+  return (ABBR_ALIAS[key] || key).toUpperCase();
+}
+
 // Team helmet by abbreviation (e.g. "CLE" -> :cle:).
 export function teamEmoji(abbr) {
-  const key = (abbr ?? "").toLowerCase();
+  const key = (ABBR_ALIAS[(abbr ?? "").toLowerCase()] || abbr || "").toLowerCase();
   return resolve(key, TEAM_FALLBACK[key] || "🏈");
 }
 

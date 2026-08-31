@@ -2,7 +2,7 @@
 // If BOT_EMAIL/BOT_PASSWORD are set, the bot logs in as that user and sends a
 // bearer token (needed once the app requires login). Otherwise it falls back to
 // anonymous reads (works only while the app is public).
-import { abbrFromName } from "./emoji.js";
+import { abbrFromName, normalizeAbbr } from "./emoji.js";
 import { pace, recordRetryAfter } from "./base44Pacer.js";
 
 const APP_ID = process.env.BASE44_APP_ID;
@@ -185,9 +185,23 @@ export async function list(entity, filter = {}, opts = {}) {
 
   const data = await res.json().catch(() => null);
   // Endpoint may return an array directly or {entities:[...]} — handle both.
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.entities)) return data.entities;
-  return [];
+  const rows = Array.isArray(data)
+    ? data
+    : data && Array.isArray(data.entities)
+    ? data.entities
+    : [];
+
+  // Normalize team_abbrName once here (Madden's raw export disagrees with
+  // this codebase's canonical abbreviation for some teams, e.g. "AZ" vs
+  // "ARI") so every consumer -- emoji lookup, display text, scorebug record
+  // matching -- sees the same corrected value without its own fix.
+  for (const row of rows) {
+    if (row && typeof row.team_abbrName === "string" && row.team_abbrName) {
+      row.team_abbrName = normalizeAbbr(row.team_abbrName);
+    }
+  }
+
+  return rows;
 }
 
 // Server-side filters aren't always honored, so every read that matters is
