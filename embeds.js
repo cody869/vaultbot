@@ -189,9 +189,23 @@ export function powerRankingsEmbed({ week, rows }) {
     const logo = r.team_name ? `${teamEmojiByName(r.team_name)} ` : "";
     // PowerRanking carries a denormalized display_name; username may be an email.
     const who = safeName(r.display_name, r.username, r.team_name && `${r.team_name} owner`);
-    return `\`${String(r.rank).padStart(2)}\` ${logo}**${who}**${move}`;
+    const record = r.record ? ` · ${r.record}` : "";
+    // XCFL Power Index, 0-100 (src/lib/powerIndex.js on the app side).
+    const index = typeof r.power_index === "number" ? ` · ${r.power_index.toFixed(1)}` : "";
+    const form = r.hot_cold === "hot" ? " \u{1F525}" : r.hot_cold === "cold" ? " \u{1F9CA}" : "";
+    return `\`${String(r.rank).padStart(2)}\` ${logo}**${who}**${record}${index}${move}${form}`;
   });
-  return e.setDescription(lines.join("\n"));
+  const e2 = e.setDescription(lines.join("\n"));
+
+  // Headline the top team's narrative when the new snapshot format provides
+  // one (older/preseason-style rows don't) -- a nice hook without bloating
+  // every one of the 32 lines above with a full sentence each.
+  const top = rows[0];
+  if (top?.narrative) {
+    e2.addFields({ name: `#1 — ${safeName(top.display_name, top.username)}`, value: top.narrative });
+  }
+
+  return e2;
 }
 
 // Trade block — plain markdown message matching the /player card style.

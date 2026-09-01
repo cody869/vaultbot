@@ -478,38 +478,25 @@ export async function getStatLeaders(category, limit = 10, seasonNumber) {
   return { ...cfg, season, leaders };
 }
 
-// Power rankings for the most recent week present. Enriches each row with the
-// member's current team (from the latest SeasonRecord) so the embed can show a
-// helmet, since PowerRanking itself only stores a username.
+// Power rankings for the most recent week present. The current PowerRanking
+// schema (src/lib/powerIndex.js on the app side) denormalizes team_name,
+// display_name, record, power_index, hot_cold, and narrative directly onto
+// each snapshot row -- specifically so rendering never depends on a
+// cross-reference lookup (its own schema description calls out that S84+
+// Game rows carry placeholder usernames, making a username->team join
+// unreliable). So trust the row's own fields as-is; no SeasonRecord join.
+//
+// "Latest week" is whichever `week` value the most-recently-created row
+// carries -- rows are written in one bulk snapshot per week, so the newest
+// row's week is the current batch regardless of read order.
 export async function getPowerRankings() {
-  const all = await list("PowerRanking");
+  const all = await list("PowerRanking", {}, { sort: "-created_date", limit: 2000 });
   if (!all.length) return { week: null, rows: [] };
 
-  // Build username -> team_name from the latest season's records.
-  let teamByUser = {};
-  try {
-    const cycle = await getCurrentCycle();
-    const allRecs = await list("SeasonRecord", { cycle }, { limit: 5000 });
-    const recs = allRecs.filter((r) => !r.cycle || r.cycle === cycle);
-    if (recs.length) {
-      const latest = Math.max(...recs.map((r) => r.season_number ?? 0));
-      for (const r of recs) {
-        if (r.season_number === latest && r.username && r.team_name) {
-          teamByUser[r.username] = r.team_name;
-        }
-      }
-    }
-  } catch {
-    // Non-fatal — rankings just won't have helmets.
-  }
-
-  const weeks = [...new Set(all.map((r) => r.week))];
-  const week = weeks[weeks.length - 1];
-
+  const week = all[0].week;
   const rows = all
     .filter((r) => r.week === week)
-    .sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999))
-    .map((r) => ({ ...r, team_name: teamByUser[r.username] ?? null }));
+    .sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999));
 
   return { week, rows };
 }
