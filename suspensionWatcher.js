@@ -4,15 +4,25 @@
 // to the suspensions channel, tagging the affected team owner.
 //
 // Mirrors newsWatcher.js:
-//   - the RECORD is the lock, not an in-memory Set. An in-memory guard empties
-//     on every Railway restart/deploy-overlap, which is what caused the news
-//     reposting bug. claim() stamps discord_message_id with a unique token and
-//     re-reads to confirm ownership BEFORE sending -- and, since that
-//     write-then-reread alone isn't a real mutual exclusion primitive (confirmed
-//     live: the same suspension posted 4 times when several containers
-//     overlapped during a redeploy), the whole thing runs inside
-//     fileLock.js's withFileLock() so only one container can be attempting a
-//     claim at a time.
+//   - the RECORD is the durable, cross-restart lock: claim() stamps
+//     discord_message_id with a unique token and re-reads to confirm
+//     ownership BEFORE sending. On its own that write-then-reread is only an
+//     optimistic check (confirmed live: it let the same suspension post
+//     several times at once when containers overlapped during a redeploy),
+//     so the whole thing also runs inside fileLock.js's withFileLock() so
+//     only one container can be attempting a claim at a time.
+//   - `handled` (a plain in-process Set) is layered on top as a fast guard
+//     against re-offering a suspension THIS process has already claimed.
+//     This one was missing here (unlike news.js/weeklyDigestWatcher.js,
+//     which both already had it) -- confirmed live as the actual cause of
+//     a suspension posting 3-4 times, once per tick, with no other
+//     container involved: the due-list read below is cached for up to
+//     715s, which can outlive several ticks when SUSPENSION_POLL_SECONDS is
+//     shorter than that, and without `handled` every one of those ticks
+//     re-evaluated the same stale snapshot, saw the suspension still
+//     looking due, and claim() -- with nothing else in-process racing it --
+//     blindly overwrote discord_message_id with a fresh token and "won"
+//     every single time.
 //   - the final message-id write-back retries; if it can't persist it leaves
 //     the claim token in place (never clears to empty) so the record stays
 //     locked rather than reposting forever.
@@ -44,6 +54,12 @@ const POLL_MS = (Number(process.env.SUSPENSION_POLL_SECONDS) || 720) * 1000;
 const SEED_HOURS = Number(process.env.SUSPENSION_SEED_HOURS) || 24;
 
 const PID = process.pid;
+
+// Suspensions we've already picked up this process, so a stale cached scan
+// (see fetchDue()'s pollCached call below) can't hand the same due
+// suspension to a later tick a second time -- same guard news.js and
+// weeklyDigestWatcher.js already use for the identical reason.
+const handled = new Set();
 
 const isWarning = (s) => (s.suspension_games ?? 0) === 0;
 
@@ -281,17 +297,27 @@ async function tick(client) {
     // Cached (not claim()'s own re-read above, which must stay live to
     // verify a write actually stuck) -- this is just "scan for anything
     // newly due," which doesn't need sub-minute freshness on this poll.
+    // This cache can outlive several ticks whenever SUSPENSION_POLL_SECONDS
+    // is shorter than its own TTL -- which is exactly why `handled` below
+    // is required, not optional: without it, every tick that reuses this
+    // same stale snapshot would see an already-claimed-and-posted
+    // suspension as still "due" and repost it, since claim() has nothing
+    // else in-process stopping it from re-claiming (confirmed live: the
+    // same suspension posted 3-4 times, once per tick, until this cache
+    // finally refreshed).
     const [all, members] = await Promise.all([
       pollCached('suspension:all', 715_000, () => list('Suspension', {}, { sort: '-created_date', limit: 5000 })),
       getLeagueMembers(),
     ]);
 
-    const due = all.filter(isDue);
+    const due = all.filter((s) => isDue(s) && !handled.has(s.id));
     for (const s of due) {
+      handled.add(s.id); // fast in-process guard; the record claim is the real lock
       try {
         await postOne(client, s, members);
       } catch (err) {
         console.error(`[SUSPENSION] post failed for ${s.id}:`, err.message);
+        handled.delete(s.id); // let a later tick retry
       }
     }
   } catch (err) {
