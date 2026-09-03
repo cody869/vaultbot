@@ -40,8 +40,9 @@ const violationLabel = (n) => VIOLATION_LABELS[n] || `${n}th`;
  * @param {string} [s.teamName] - full team name, used if abbr lookup fails
  * @param {number} [s.season]
  * @param {number} [s.week] - violation week
- * @param {number} [s.passRatio] - violation_pass_ratio (%)
- * @param {number} [s.violationNumber]
+ * @param {number} [s.passRatio] - violation_pass_ratio (%), 70/30-type only
+ * @param {number} [s.violationNumber] - 70/30-type only
+ * @param {string} [s.ruleBroken] - rule_broken, custom-type only
  * @param {number} s.games - suspension_games; 0 means warning-only
  * @param {string[]} [s.positions]
  * @param {string[]} [s.players]
@@ -157,6 +158,7 @@ async function renderSuspensionCard(s) {
             children: [
               s.passRatio != null && `${s.passRatio}% pass rate`,
               s.violationNumber != null && `${violationLabel(s.violationNumber)} violation this season`,
+              s.ruleBroken,
               s.appliesToWeek != null && !isWarning && `applies to week ${s.appliesToWeek}`,
             ].filter(Boolean).join(' · '),
           },

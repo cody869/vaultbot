@@ -90,19 +90,51 @@ function resolveOwnerMention(suspension, members) {
   return suspension.team_name ? `${suspension.team_name} owner` : 'Team owner';
 }
 
-/** Plain-markdown post body. Mirrors buildDiscordEmbed() in the app's PendingSuspensions.jsx. */
+const isCustom = (s) => s.suspension_type === 'custom';
+
+/**
+ * Plain-markdown post body. Mirrors buildDiscordEmbed() in the app's
+ * PendingSuspensions.jsx.
+ *
+ * suspension_type: 'custom' entries (hand-entered on the Suspensions page for
+ * any rule break other than the 70/30 pass-ratio rule) carry none of
+ * violation_game_id/violation_week/violation_pass_ratio/violation_number --
+ * those are '70_30'-only per the schema. Unconditionally formatting them in
+ * (the original bug here) produced "Week undefined -- **undefined%** pass
+ * rate (undefined violation this season)". Branch on suspension_type instead
+ * and use rule_broken/violation_description, which are custom-only.
+ */
 function buildMessage(s, ownerMention) {
+  const custom = isCustom(s);
+  const title = custom
+    ? `# 🚨 ${s.rule_broken || 'Suspension'} — ${s.team_name || 'Unknown Team'}`
+    : `# 🚨 70/30 Rule Violation — ${s.team_name || 'Unknown Team'}`;
+
   const lines = [
-    `# 🚨 70/30 Rule Violation — ${s.team_name || 'Unknown Team'}`,
+    title,
     `Owner: ${ownerMention}`,
-    `Season ${s.season_number} · Week ${s.violation_week} — **${s.violation_pass_ratio}%** pass rate (${violationLabel(s.violation_number)} violation this season)`,
+    custom
+      ? `Season ${s.season_number}`
+      : `Season ${s.season_number} · Week ${s.violation_week} — **${s.violation_pass_ratio}%** pass rate (${violationLabel(s.violation_number)} violation this season)`,
     '',
   ];
 
+  if (custom && s.violation_description) {
+    lines.push(`> ${s.violation_description}`);
+    lines.push('');
+  }
+
   if (isWarning(s)) {
-    lines.push('**Penalty:** ⚠️ Warning — no suspension. Next violation this season triggers a suspension.');
+    lines.push(
+      custom
+        ? '**Penalty:** ⚠️ Warning — no suspension.'
+        // The "next violation" followup is specifically about the 70/30
+        // progressive-violation tally, which custom suspensions never affect.
+        : '**Penalty:** ⚠️ Warning — no suspension. Next violation this season triggers a suspension.'
+    );
   } else {
-    lines.push(`**Penalty:** ${s.suspension_games}-game suspension · ${(s.suspended_positions || []).join(' + ')}`);
+    const positions = (s.suspended_positions || []).join(' + ');
+    lines.push(`**Penalty:** ${s.suspension_games}-game suspension${positions ? ` · ${positions}` : ''}`);
     if ((s.suspended_player_names || []).length > 0) {
       lines.push(`> Suspended: ${s.suspended_player_names.join(', ')}`);
     }
@@ -210,6 +242,7 @@ async function buildCard(s) {
       week: s.violation_week,
       passRatio: s.violation_pass_ratio,
       violationNumber: s.violation_number,
+      ruleBroken: s.rule_broken,
       games: s.suspension_games ?? 0,
       positions: s.suspended_positions,
       players: s.suspended_player_names,
@@ -242,11 +275,18 @@ async function postOne(client, suspension, members) {
   const ownerMention = resolveOwnerMention(suspension, members);
   const card = await buildCard(suspension);
 
-  // Mention pings and the admin-notes aside need to be real message content,
-  // not baked into the image, so they still render/ping normally. The full
-  // plain-text layout is only used as a fallback when the card can't render.
+  // Mention pings and the admin-notes/violation-description asides need to be
+  // real message content, not baked into the image, so they still
+  // render/ping normally. The full plain-text layout is only used as a
+  // fallback when the card can't render. violation_description is
+  // custom-suspension-only -- the card's own bottom line shows rule_broken,
+  // but the fuller free-text description belongs here, not squeezed onto it.
   const content = card
-    ? [`Owner: ${ownerMention}`, suspension.admin_notes ? `> Note: ${suspension.admin_notes}` : null].filter(Boolean).join('\n')
+    ? [
+        `Owner: ${ownerMention}`,
+        isCustom(suspension) && suspension.violation_description ? `> ${suspension.violation_description}` : null,
+        suspension.admin_notes ? `> Note: ${suspension.admin_notes}` : null,
+      ].filter(Boolean).join('\n')
     : buildMessage(suspension, ownerMention);
 
   const message = await channel.send({
