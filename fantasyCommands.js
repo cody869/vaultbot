@@ -837,8 +837,12 @@ async function cmdScoreWeek(interaction) {
 
   const result = await scoreWeek(league, week, { force });
   if (!result.ok) {
+    const detail =
+      result.reason === 'incomplete' || result.reason === 'not_started'
+        ? `only ${result.played}/${result.total} games are final. Re-run with \`force: true\` to score anyway.`
+        : result.reason;
     return interaction.editReply({
-      content: `Week ${week} not scored — ${result.reason === 'incomplete' ? `only ${result.played}/${result.total} games are final. Re-run with \`force: true\` to score anyway.` : result.reason}`,
+      content: `Week ${week} not scored — ${detail}`,
       ...PLAIN,
     });
   }

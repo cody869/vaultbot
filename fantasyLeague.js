@@ -111,16 +111,24 @@ export async function generateSchedule(league, teams) {
 // ---------------------------------------------------------------------------
 
 /**
- * Score a single week: computes every team's best-ball lineup, writes
- * FantasyWeekScore rows, and finalizes that week's matchups.
- * Idempotent — re-running overwrites the same rows rather than duplicating.
+ * Score a week.
+ *
+ * `live` scores a week that is still in progress: totals reflect whatever has
+ * been played so far, rows are marked games_complete:false, and matchups are
+ * written as 'in_progress' rather than final. Nothing is decided until every
+ * game is in — standings only ever count final matchups — so a live pass is
+ * purely informational and is recomputed from scratch on the next tick.
  */
-export async function scoreWeek(league, week, { force = false } = {}) {
+export async function scoreWeek(league, week, { force = false, live = false } = {}) {
   const season = league.season_number ?? LEAGUE_DEFAULTS.season_number;
   const games = await getGames(season);
   const completion = weekIsComplete(games, { season, week });
 
-  if (!completion.complete && !force) {
+  // Nothing has kicked off yet — there is nothing to show.
+  if (completion.played === 0 && !force) {
+    return { ok: false, reason: 'not_started', ...completion };
+  }
+  if (!completion.complete && !force && !live) {
     return { ok: false, reason: 'incomplete', ...completion };
   }
 
@@ -136,6 +144,7 @@ export async function scoreWeek(league, week, { force = false } = {}) {
   const scoreByTeam = new Map(existingScores.map((s) => [s.fantasy_team_id, s]));
 
   const results = [];
+  let written = 0;
   for (const team of teams) {
     const roster = Array.isArray(team.roster) ? team.roster : [];
     const { starters, bench, total } = scoreRosterWeek(roster, { byName, byNameTeam, defenseByTeam, paByTeam }, scoring);
@@ -158,21 +167,50 @@ export async function scoreWeek(league, week, { force = false } = {}) {
     };
 
     const existing = scoreByTeam.get(team.id);
-    if (existing) await updateEntity(ENTITIES.weekScore, existing.id, payload);
-    else await createEntity(ENTITIES.weekScore, payload);
+    if (!existing) {
+      await createEntity(ENTITIES.weekScore, payload);
+      written += 1;
+    } else if (
+      // A live pass repeats every few minutes; only write when something
+      // actually moved. Base44's rate limit is app-wide and shared with the
+      // whole Vault, so silent no-op writes are the expensive kind.
+      Number(existing.total_points) !== total ||
+      Boolean(existing.games_complete) !== completion.complete
+    ) {
+      await updateEntity(ENTITIES.weekScore, existing.id, payload);
+      written += 1;
+    }
 
     results.push({ team, total });
   }
 
   invalidate(ENTITIES.weekScore);
-  const finalized = await finalizeMatchups(league, week, new Map(results.map((r) => [r.team.id, r.total])));
-  await recalcStandings(league);
 
-  return { ok: true, week, results, finalized, ...completion };
+  // Finalization is best-effort and deliberately NOT allowed to fail the whole
+  // pass. The scores above are already written; if finalizing throws here the
+  // reconcile step in runScoringPass picks the week up on the next tick rather
+  // than leaving it stranded forever.
+  let finalized = [];
+  try {
+    finalized = await finalizeMatchups(
+      league,
+      week,
+      new Map(results.map((r) => [r.team.id, r.total])),
+      { complete: completion.complete }
+    );
+    // Standings only ever count final matchups, so a live pass cannot move a
+    // record. Skip the recalc entirely while a week is still running.
+    if (completion.complete) await recalcStandings(league);
+  } catch (err) {
+    console.error(`[fantasy] week ${week} scored but finalize failed (will reconcile next pass):`, err.message);
+    return { ok: true, week, results, finalized: [], written, live: !completion.complete, finalizeError: err.message, ...completion };
+  }
+
+  return { ok: true, week, results, finalized, written, live: !completion.complete, ...completion };
 }
 
 /** Write weekly totals onto the matchups and decide winners. */
-async function finalizeMatchups(league, week, totalsByTeam) {
+async function finalizeMatchups(league, week, totalsByTeam, { complete = true } = {}) {
   const matchups = await getMatchups(league.id, week);
   const finalized = [];
 
@@ -186,16 +224,28 @@ async function finalizeMatchups(league, week, totalsByTeam) {
     const away = round2(priorAway + (totalsByTeam.get(m.away_team_id) || 0));
 
     // Leg 1 of the final stays "in_progress" so it isn't treated as decided.
-    const stillRunning = m.round === 'FINAL' && week === (league.final_week_start ?? LEAGUE_DEFAULTS.final_week_start);
+    // A live (partial) week is in_progress for the same reason: the points so
+    // far are real, but nothing is settled until every game is in.
+    const stillRunning =
+      !complete ||
+      (m.round === 'FINAL' && week === (league.final_week_start ?? LEAGUE_DEFAULTS.final_week_start));
     const winner = home === away ? null : (home > away ? m.home_team_id : m.away_team_id);
+    const nextStatus = stillRunning ? 'in_progress' : 'final';
+
+    // Skip untouched rows. The live pass revisits every matchup on every tick,
+    // and the read/write budget is shared with the rest of the Vault.
+    if (Number(m.home_points) === home && Number(m.away_points) === away && m.status === nextStatus) {
+      finalized.push(m);
+      continue;
+    }
 
     await updateEntity(ENTITIES.matchup, m.id, {
       home_points: home,
       away_points: away,
-      status: stillRunning ? 'in_progress' : 'final',
+      status: nextStatus,
       winner_team_id: stillRunning ? null : winner,
     });
-    finalized.push({ ...m, home_points: home, away_points: away, winner_team_id: winner });
+    finalized.push({ ...m, home_points: home, away_points: away, winner_team_id: stillRunning ? null : winner });
   }
 
   invalidate(ENTITIES.matchup);
@@ -409,31 +459,92 @@ export async function runScoringPass({ onWeekScored } = {}) {
   const end = league.final_week_end ?? LEAGUE_DEFAULTS.final_week_end;
   const scored = [];
 
+  // Read every week's scores ONCE and group them, rather than calling
+  // getWeekScores per week — that was 13 full reads of FantasyWeekScore on
+  // every pass, even when there was nothing to score.
+  const allScores = await getWeekScores(league.id);
+  const scoresByWeek = new Map();
+  for (const row of allScores) {
+    if (!scoresByWeek.has(row.week)) scoresByWeek.set(row.week, []);
+    scoresByWeek.get(row.week).push(row);
+  }
+
+  // RECONCILE FIRST.
+  //
+  // Scoring and finalization used to be one indivisible step: scoreWeek wrote
+  // FantasyWeekScore, then finalized matchups and recalculated standings. If
+  // anything failed after the scores were written — a 403, a 429, a timeout —
+  // the week was left permanently half-done, because the loop below SKIPS any
+  // week whose scores already exist. Weeks 5 and 6 both landed in that state:
+  // scored correctly, matchups stuck at 0-0 forever.
+  //
+  // So before scoring anything new, walk every week that already has complete
+  // scores and make sure its matchups actually reflect them. This is cheap
+  // (it no-ops when they already match) and self-heals any week that got
+  // stranded, including ones stranded before this code existed.
+  const reconciled = [];
+  for (const [week, rows] of scoresByWeek) {
+    if (!rows.length || !rows.every((s) => s.games_complete)) continue;
+    const matchups = await getMatchups(league.id, week);
+    const pending = matchups.filter((m) => m.status !== 'final');
+    if (!pending.length) continue;
+
+    const totals = new Map(rows.map((r) => [r.fantasy_team_id, Number(r.total_points) || 0]));
+    // Only finalize when every team in the matchup actually has a score.
+    const ready = pending.filter((m) => totals.has(m.home_team_id) && totals.has(m.away_team_id));
+    if (!ready.length) continue;
+
+    await finalizeMatchups(league, week, totals);
+    reconciled.push({ week, finalized: ready.length });
+    console.log(`[fantasy] reconciled week ${week}: finalized ${ready.length} matchup(s) from existing scores`);
+  }
+  if (reconciled.length) await recalcStandings(league);
+
   for (let week = start; week <= end; week += 1) {
-    const existing = await getWeekScores(league.id, week);
+    const existing = scoresByWeek.get(week) || [];
     const alreadyFinal = existing.length > 0 && existing.every((s) => s.games_complete);
     if (alreadyFinal) continue;
 
-    const result = await scoreWeek(league, week);
-    if (result.ok) {
-      scored.push(result);
-      await advanceLeague(league);
-      if (onWeekScored) await onWeekScored(league, week, result);
-    } else {
-      // First incomplete week blocks everything after it.
+    // Score the week live. A week still in progress gets provisional totals
+    // and in_progress matchups; a completed week is finalized as before.
+    const result = await scoreWeek(league, week, { live: true });
+
+    if (!result.ok) {
+      // Nothing has kicked off in this week yet, so nothing after it has
+      // either. Stop here rather than scanning the rest of the season.
       break;
     }
+
+    scored.push(result);
+
+    if (result.live) {
+      // Provisional. Do not advance the bracket or announce anything — just
+      // leave the running totals visible and come back next tick.
+      if (result.written) {
+        console.log(`[fantasy] week ${week} live: ${result.played}/${result.total} games, ${result.written} row(s) updated`);
+      }
+      break;
+    }
+
+    // The week just went final.
+    await advanceLeague(league);
+    if (onWeekScored) await onWeekScored(league, week, result);
   }
 
-  return { skipped: false, scored };
+  return { skipped: false, scored, reconciled };
 }
 
-export function startFantasyWatcher(client, { intervalMs = 10 * 60 * 1000, onWeekScored } = {}) {
+export function startFantasyWatcher(client, {
+  // Live scoring updates during the week, so this runs more often than the
+  // old finalize-only pass. Writes are suppressed when nothing moved, so an
+  // idle tick costs a couple of reads.
+  intervalMs = Number(process.env.FANTASY_SCORE_INTERVAL_MIN || 5) * 60 * 1000,
+  onWeekScored,
+} = {}) {
   const tick = async () => {
     try {
-      // Scoring is never urgent -- a week that just finished can wait for
-      // the next pass rather than competing with an export for read
-      // budget. See base44Pacer.js.
+      // Scoring is never urgent — a week that just finished can wait for the
+      // next pass rather than competing with an export for read budget.
       if (isRateLimited()) return;
 
       const result = await runScoringPass({ onWeekScored });
