@@ -694,7 +694,8 @@ export function scoresEmbed({ season, week, games, upcoming = [] }) {
     const twoWon = g.awayScore > g.homeScore;
     const s1 = oneWon ? `**${g.homeScore}**` : `${g.homeScore}`;
     const s2 = twoWon ? `**${g.awayScore}**` : `${g.awayScore}`;
-    return `${e1} ${s1}  vs  ${s2} ${e2}`;
+    const tie = !oneWon && !twoWon ? " *(TIE)*" : "";
+    return `${e1} ${s1}  vs  ${s2} ${e2}${tie}`;
   });
 
   let description = finalLines.length ? finalLines.join("\n") : "_No completed games yet this week._";

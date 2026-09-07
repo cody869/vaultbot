@@ -67,8 +67,11 @@ function extractTeamEmoji(content) {
   return found;
 }
 
+// Same fix as vault.js's isPlayedGame() -- status 4 is a tie (every status-4
+// Game row on record has equal home/away scores), not "unplayed". Missing it
+// here left tied games stuck matching as "unplayed" against #schedule posts.
 function isPlayedGame(g) {
-  return g.status === 2 || g.status === 3; // 2=regular, 3=playoff (per export)
+  return g.status === 2 || g.status === 3 || g.status === 4;
 }
 
 function buildGameKey(season, week, teamAName, teamBName) {

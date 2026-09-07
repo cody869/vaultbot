@@ -336,11 +336,19 @@ export async function getPlayoffPicture(seasonNumber) {
   return { season, conferences, unresolved };
 }
 
-// A Game row counts as played once it has a completed status (2=regular,
-// 3=playoff per the export convention) — status 1 means the matchup exists
-// (Game holds the whole season's schedule up front) but hasn't been played.
+// A Game row counts as played once it has a completed status. Game holds the
+// whole season's schedule up front, so status 1 means the matchup exists but
+// hasn't been played yet (0-0 placeholder score), and status 0 is an
+// unpopulated future-round slot (no real teams assigned). Confirmed live
+// against every season's Game data: status 2/3 are decisive final results
+// (some split that isn't strictly "2=regular, 3=playoff" -- both appear
+// within the same regular-season week), and status 4 is a TIE (every
+// status-4 row on record has equal home/away scores). Omitting 4 here made
+// every tied game vanish from /scores instead of showing as final -- it
+// landed in the "unplayed" bucket and either didn't render at all or showed
+// up mislabeled as upcoming.
 function isPlayedGame(g) {
-  return g.status === 2 || g.status === 3;
+  return g.status === 2 || g.status === 3 || g.status === 4;
 }
 
 // Unplayed Game rows for a season+week, enriched with whatever the schedule
@@ -435,7 +443,7 @@ export async function getScores(week, seasonNumber) {
       away: g.awayTeam ?? "",
       homeScore: g.user1_score ?? 0,
       awayScore: g.user2_score ?? 0,
-      status: g.status, // 2=regular, 3=playoff (per export)
+      status: g.status, // 2/3=decisive final, 4=tie (see isPlayedGame() above)
       scheduleId: g.scheduleId ?? null,
       cycle: g.cycle ?? null,
     }))
