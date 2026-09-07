@@ -14,6 +14,13 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("playoffs")
+    .setDescription("Current playoff picture, by conference")
+    .addIntegerOption((o) =>
+      o.setName("season").setDescription("Season number (defaults to latest)")
+    ),
+
+  new SlashCommandBuilder()
     .setName("leaders")
     .setDescription("Show stat leaders")
     .addStringOption((o) =>

@@ -77,6 +77,24 @@ export function standingsEmbed({ season, rows }) {
   return e.setDescription(lines.join("\n"));
 }
 
+export function playoffPictureEmbed({ season, conferences }) {
+  const e = base(`Playoff Picture — Season ${season ?? "?"}`, ROUTES.standings);
+  if (!conferences?.length) return e.setDescription("No standings data found.");
+
+  const blocks = conferences.map(({ name, teams, cutoff }) => {
+    if (!teams.length) return `**${name}**\n_no data_`;
+    const lines = teams.map((t, i) => {
+      const cut = i === cutoff ? "\n— — — — — — — — — —\n" : "";
+      const rec = `${t.wins ?? 0}-${t.losses ?? 0}${t.ties ? "-" + t.ties : ""}`;
+      const logo = t.team_name ? `${teamEmojiByName(t.team_name)} ` : "";
+      return `${cut}\`${String(t.seed ?? i + 1).padStart(2)}\` ${logo}**${t.team_name || "Unknown"}** ${rec}`;
+    });
+    return `**${name}**\n${lines.join("\n")}`;
+  });
+
+  return e.setDescription(blocks.join("\n\n"));
+}
+
 // Category groups for the leaders dropdown. Values must match STAT_CONFIG
 // keys in vault.js.
 export const LEADER_CATEGORIES = {

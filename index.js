@@ -25,6 +25,7 @@ import { warmDraftPool } from "./fantasyDraft.js";
 import { isRateLimited } from "./base44Pacer.js";
 import {
   getStandings,
+  getPlayoffPicture,
   getStatLeaders,
   getPowerRankings,
   getTradeBlock,
@@ -50,6 +51,7 @@ import {
 } from "./vault.js";
 import {
   standingsEmbed,
+  playoffPictureEmbed,
   statLeadersView,
   powerRankingsEmbed,
   tradeBlockEmbed,
@@ -440,6 +442,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const season = interaction.options.getInteger("season") ?? undefined;
         const data = await getStandings(season);
         await interaction.editReply({ embeds: [standingsEmbed(data)] });
+        break;
+      }
+      case "playoffs": {
+        const season = interaction.options.getInteger("season") ?? undefined;
+        const data = await getPlayoffPicture(season);
+        await interaction.editReply({ embeds: [playoffPictureEmbed(data)] });
         break;
       }
       case "leaders": {

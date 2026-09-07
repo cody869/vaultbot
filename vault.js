@@ -3,6 +3,7 @@
 // bearer token (needed once the app requires login). Otherwise it falls back to
 // anonymous reads (works only while the app is public).
 import { abbrFromName, normalizeAbbr } from "./emoji.js";
+import { TEAMS as TEAM_META } from "./teamLogos.js";
 import { pace, recordRetryAfter } from "./base44Pacer.js";
 
 const APP_ID = process.env.BASE44_APP_ID;
@@ -297,6 +298,42 @@ export async function getStandings(seasonNumber) {
     );
 
   return { season, rows };
+}
+
+// Playoff picture, split by conference. TeamStat's own `seed` is already
+// computed per-conference by Madden/the export -- confirmed live: two
+// different teams can carry the same seed number in the same week, which
+// only makes sense if seed resets per conference (real NFL: seeds 1-7 per
+// conference, 1-4 being the division winners). Neither TeamMap nor
+// TeamStat carries a conference field though, so conference/division comes
+// from the static real-NFL alignment table in teamLogos.js -- every team
+// in this league is a real NFL franchise, so that mapping is exact.
+export async function getPlayoffPicture(seasonNumber) {
+  const { season, rows } = await getStandings(seasonNumber);
+  if (!rows.length) return { season, conferences: [] };
+
+  const cutoff = Number(process.env.PLAYOFF_TEAMS_PER_CONFERENCE) || 7;
+  const byConf = { AFC: [], NFC: [] };
+  const unresolved = [];
+
+  for (const r of rows) {
+    const meta = TEAM_META[(r.team_abbrName || "").toUpperCase()];
+    if (!meta?.conf) {
+      unresolved.push(r);
+      continue;
+    }
+    byConf[meta.conf].push({ ...r, division: meta.div });
+  }
+
+  const conferences = ["AFC", "NFC"].map((name) => ({
+    name,
+    cutoff,
+    teams: byConf[name].sort(
+      (a, b) => (a.seed ?? 999) - (b.seed ?? 999) || (b.wins ?? 0) - (a.wins ?? 0)
+    ),
+  }));
+
+  return { season, conferences, unresolved };
 }
 
 // A Game row counts as played once it has a completed status (2=regular,
