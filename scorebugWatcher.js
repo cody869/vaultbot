@@ -59,7 +59,6 @@ const POLL_MS = Number(process.env.SCOREBUG_POLL_SECONDS || 60) * 1000;
 const SEED_HOURS = Number(process.env.SCOREBUG_SEED_HOURS || 24);
 const DELAY_MS = Number(process.env.SCOREBUG_DELAY_MINUTES || 5) * 60 * 1000;
 const STATS_MAX_WAIT_MS = Number(process.env.SCOREBUG_STATS_MAX_WAIT_MINUTES || 30) * 60 * 1000;
-const POST_TIMEOUT_MS = Number(process.env.SCOREBUG_POST_TIMEOUT_MS || 30_000);
 
 // NOTE: `handled` is created fresh INSIDE tick() (below), not here at
 // module scope. It used to live here, back when a game was claimed and
@@ -75,16 +74,23 @@ const POST_TIMEOUT_MS = Number(process.env.SCOREBUG_POST_TIMEOUT_MS || 30_000);
 // Set clean. A per-tick Set fixes that — it only needs to guard against
 // processing the same key twice within ONE tick's loop (finals shouldn't
 // contain duplicates, but this is cheap insurance), not across ticks.
-
-// Rejects instead of hanging forever if a Vault/Discord call inside
-// postCard() stalls -- a bare `await` on a stuck fetch would otherwise sit
-// unresolved indefinitely, with no error to catch and retry from.
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)),
-  ]);
-}
+//
+// There used to be a withTimeout() here that raced postCard() against a
+// 30s local timer and declared failure if the timer won. Confirmed live
+// (Sept 11 logs) that this itself caused duplicate posts, not prevented
+// them: Promise.race doesn't cancel the losing side, so when postCard()'s
+// Vault/Discord calls were just slow (queued behind an EA export sharing
+// the same app-wide Base44 pacer, not actually stuck), the "timed out"
+// branch logged a failure and skipped claim() while the real send kept
+// running in the background -- and later succeeded, posting for real, with
+// no claim() ever recorded for it. The next tick, seeing no posted row,
+// tried again. One game (JAX @ IND) posted three separate times in a
+// single container run this way, no second container involved. The
+// per-key withFileLock() around this step (added for the cross-process
+// race, see below) is what actually needs to own "give up and let another
+// attempt through" now: a genuinely stuck call just holds the lock, and
+// fileLock.js's own 2-minute staleness detection is the real backstop --
+// exactly the model eaTokenStore.js's original lock already used this for.
 
 // Stable key that survives Base44 re-imports regenerating row ids --
 // season+week+matchup is what actually identifies "this game" to a human.
@@ -353,18 +359,12 @@ async function tick(client, { seed = false } = {}) {
           return;
         }
 
-        // A stuck fetch inside rowsFor()/postCard() (Vault or Discord) could
-        // in principle hang without ever resolving or rejecting. (An earlier
-        // incident that looked exactly like this -- a game silently stuck
-        // for 10+ minutes, then posted instantly on restart -- turned out to
-        // actually be the module-level `handled` Set bug described above,
-        // not a real hang. This timeout is still worth keeping as genuine
-        // insurance against a real one.)
-        const message = await withTimeout(
-          (async () => postCard(client, g, await rowsFor(g.season_number)))(),
-          POST_TIMEOUT_MS,
-          `[SCOREBUG] post for ${key}`
-        );
+        // No local timeout here on purpose -- see the file-header comment
+        // near the top for why racing postCard() against a timer caused
+        // duplicate posts rather than preventing them. A call that's
+        // genuinely stuck just holds this lock; fileLock.js's own 2-minute
+        // staleness detection is what lets a later attempt through.
+        const message = await postCard(client, g, await rowsFor(g.season_number));
         // Record the post as a NEW row rather than updating the pending one --
         // ScorebugPost cannot be updated for this Base44 app (confirmed live:
         // 403 Permission denied), the same create-only behavior FantasyPick
