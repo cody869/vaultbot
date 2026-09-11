@@ -22,6 +22,17 @@
 // ScorebugPost is a separate entity nothing else writes to, so it isn't
 // touched by the Madden import pipeline and isn't lost on redeploy.
 //
+// The actual "send the Discord message" step is additionally guarded by
+// fileLock.js's cross-process mutex (same fix already applied to
+// suspensionWatcher.js/news.js/weeklyDigestWatcher.js in commit 269c8cc,
+// missed here at the time) -- this is NOT the same "local file" approach
+// rejected above: that one used /tmp as a persisted dedup RECORD, wiped by
+// every ephemeral-filesystem redeploy. fileLock.js's lock file lives on
+// Railway's persistent volume and is only ever held momentarily (created,
+// checked, deleted within one post), not relied on to survive anything --
+// losing it on a restart is fine, since ScorebugPost is still the actual
+// source of truth for "was this posted."
+//
 // Environment:
 //   SCOREBUG_CHANNEL_ID          channel to post cards to (default below)
 //   SCOREBUG_POLL_SECONDS        optional — default 60
@@ -36,6 +47,7 @@
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
 import { list, getStandings, getCurrentCycle, createEntity, pollCached } from "./vault.js";
 import { isRateLimited } from "./base44Pacer.js";
+import { withFileLock } from "./fileLock.js";
 import { renderScorebugCard } from "./scorebugCard.js";
 import { abbrFromName } from "./emoji.js";
 import { isGameFinal, getGameContributors, getGameStatsCompleteness } from "./scorebugHelper.js";
@@ -109,6 +121,22 @@ async function loadState() {
   }
 }
 
+// Re-reads ScorebugPost for exactly this key, uncached -- used right before
+// the "post the card" decision, inside withFileLock below, so the answer
+// reflects whatever the winning container (if any) just wrote, not the up-
+// to-55s-stale snapshot loadState() loaded at the top of this tick.
+async function freshEntry(key) {
+  const rows = await list("ScorebugPost", { game_key: key }, { limit: 50 });
+  const entry = { pending: null, posted: null };
+  for (const r of rows) {
+    if (r.discord_message_id) entry.posted = r;
+    else if (!entry.pending || new Date(r.created_date || 0) < new Date(entry.pending.created_date || 0)) {
+      entry.pending = r;
+    }
+  }
+  return entry;
+}
+
 // Creates a ScorebugPost row -- for a fresh final, before starting the
 // sync-delay wait (no discord_message_id yet); once actually posted, a
 // SECOND row for the same key carrying discord_message_id, rather than
@@ -120,11 +148,16 @@ async function loadState() {
 // for a key rather than assuming one row per key, so two rows here is by
 // design, not a bug.
 //
-// If two ticks somehow race on the same key, the loser just gets a create
-// that succeeds harmlessly (no uniqueness constraint at the DB level) --
-// the in-process `handled` Set is what actually prevents that within one
-// process, and a second process racing this is not a scenario this
-// league's single-instance Railway deploy hits in practice.
+// A duplicate "pending" row from two containers racing the initial claim is
+// harmless (loadState() just picks the earliest one as the sync-delay
+// clock, and both containers converge on the same clock). The "post the
+// card" claim is the one that actually sends a Discord message, and IS
+// guarded against a real cross-process race -- see the withFileLock use at
+// its call site in tick() below. Confirmed live: this watcher was the one
+// left out when suspensionWatcher.js/news.js/weeklyDigestWatcher.js got
+// that same fix (commit 269c8cc), on the assumption this league only ever
+// runs one container -- scorebugs then started posting multiple times,
+// consistent with that assumption no longer holding.
 async function claim(key, g, extra = {}) {
   return createEntity("ScorebugPost", {
     game_key: key,
@@ -304,30 +337,47 @@ async function tick(client, { seed = false } = {}) {
 
     handled.add(key); // fast in-process guard against a double-fire mid-render
     try {
-      // A stuck fetch inside rowsFor()/postCard() (Vault or Discord) could in
-      // principle hang without ever resolving or rejecting. (An earlier
-      // incident that looked exactly like this -- a game silently stuck for
-      // 10+ minutes, then posted instantly on restart -- turned out to
-      // actually be the module-level `handled` Set bug described above, not
-      // a real hang. This timeout is still worth keeping as genuine
-      // insurance against a real one.)
-      const message = await withTimeout(
-        (async () => postCard(client, g, await rowsFor(g.season_number)))(),
-        POST_TIMEOUT_MS,
-        `[SCOREBUG] post for ${key}`
-      );
-      // Record the post as a NEW row rather than updating the pending one --
-      // ScorebugPost cannot be updated for this Base44 app (confirmed live:
-      // 403 Permission denied), the same create-only behavior FantasyPick
-      // has. loadState() already reads across every row for a key, so a
-      // second row here is expected, not a leak.
-      await claim(key, g, {
-        posted_at: new Date().toISOString(),
-        // postCard() returns undefined (not a throw) when it can't resolve
-        // both team abbreviations -- a permanent, not transient, failure.
-        // Stamp a sentinel so that's treated as "handled" too, rather than
-        // retrying forever on a game that can never resolve.
-        discord_message_id: message?.id || `unresolved:${Date.now()}`,
+      // Cross-process guard around the ONE step that actually sends a
+      // Discord message -- same primitive (atomic file creation) already
+      // used by eaTokenStore.js/suspensionWatcher.js/news.js/
+      // weeklyDigestWatcher.js for this exact class of bug. Per-key so an
+      // unrelated game finishing in the same tick doesn't wait on this one.
+      await withFileLock(`scorebug-claim:${key}`, async () => {
+        // Another container may have posted this already -- either it won
+        // the race for this same tick, or loadState()'s cached snapshot
+        // (up to 55s old) simply predates its post. Re-check with a fresh,
+        // uncached read before sending anything.
+        const fresh = await freshEntry(key);
+        if (fresh.posted) {
+          console.log(`[SCOREBUG] ${key} already posted by another container, skipping`);
+          return;
+        }
+
+        // A stuck fetch inside rowsFor()/postCard() (Vault or Discord) could
+        // in principle hang without ever resolving or rejecting. (An earlier
+        // incident that looked exactly like this -- a game silently stuck
+        // for 10+ minutes, then posted instantly on restart -- turned out to
+        // actually be the module-level `handled` Set bug described above,
+        // not a real hang. This timeout is still worth keeping as genuine
+        // insurance against a real one.)
+        const message = await withTimeout(
+          (async () => postCard(client, g, await rowsFor(g.season_number)))(),
+          POST_TIMEOUT_MS,
+          `[SCOREBUG] post for ${key}`
+        );
+        // Record the post as a NEW row rather than updating the pending one --
+        // ScorebugPost cannot be updated for this Base44 app (confirmed live:
+        // 403 Permission denied), the same create-only behavior FantasyPick
+        // has. loadState() already reads across every row for a key, so a
+        // second row here is expected, not a leak.
+        await claim(key, g, {
+          posted_at: new Date().toISOString(),
+          // postCard() returns undefined (not a throw) when it can't resolve
+          // both team abbreviations -- a permanent, not transient, failure.
+          // Stamp a sentinel so that's treated as "handled" too, rather than
+          // retrying forever on a game that can never resolve.
+          discord_message_id: message?.id || `unresolved:${Date.now()}`,
+        });
       });
     } catch (err) {
       console.error(`[SCOREBUG] post failed for ${key}: ${err.message}`);
