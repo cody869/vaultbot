@@ -313,7 +313,21 @@ function resolveWeeks(mode, leagueInfo, weekNumber) {
     ];
   }
 
-  if (mode === "current") return [{ weekIndex: seasonWeek, stage }];
+  if (mode === "current") {
+    // Offseason: seasonWeek/stage here reflect whatever internal offseason
+    // sub-stage EA is tracking (free agency, draft prep, etc.), not a real
+    // week of the season -- "recent"/"surrounding" below already special-
+    // case seasonWeekType === 8 for exactly this reason, but "current" was
+    // missed. Confirmed live (Sept 2026 offseason): left unguarded, this
+    // asked EA for "stage=SEASON, week=4" during the offseason and got back
+    // the PREVIOUS season's actual week 4 results (apparently a Madden
+    // schedule-screen placeholder) tagged with the new season's index --
+    // eaWatcher.js's auto-export pulled it in as if it were real, current
+    // games, and scorebugWatcher.js correctly (if unknowingly) posted cards
+    // for a week that never happened.
+    if (seasonWeekType === 8) return [];
+    return [{ weekIndex: seasonWeek, stage }];
+  }
 
   // "recent" and "surrounding" below. seasonWeekType 8 means the
   // offseason/final week; index 21 is the Pro Bowl.
