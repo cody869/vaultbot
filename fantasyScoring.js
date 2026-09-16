@@ -93,42 +93,52 @@ export function scoreTeamDefense(defRows, pointsAllowed, scoring = SCORING) {
 
 /**
  * Given every rostered asset with its weekly points, pick the highest-scoring
- * legal lineup. Slots are strict (no FLEX), so this is just "take the top N of
- * each position" — no search needed.
+ * legal lineup. Most slots are strict, but a slot can list more than one
+ * eligible position (FLEX) — see the fill-order comment below for why a
+ * single greedy pass is still optimal even with that.
  *
  * entries: [{ key, name, position, points, played }]
  * returns { starters, bench, total }
  */
-export function optimalLineup(entries) {
-  const byPosition = new Map();
-  for (const e of entries) {
-    const pos = String(e.position || '').toUpperCase();
-    if (!byPosition.has(pos)) byPosition.set(pos, []);
-    byPosition.get(pos).push(e);
-  }
-  for (const list of byPosition.values()) {
-    list.sort((a, b) => (b.points || 0) - (a.points || 0));
-  }
-
-  const starters = [];
+export function optimalLineup(entries, slots = LINEUP_SLOTS) {
+  const sorted = [...entries].sort((a, b) => (b.points || 0) - (a.points || 0));
   const usedKeys = new Set();
+  const starters = [];
 
-  for (const { slot, position, count } of LINEUP_SLOTS) {
-    const pool = byPosition.get(position) || [];
+  // Fill single-position slots FIRST, then multi-position ones (FLEX).
+  //
+  // This ordering is what makes the greedy pass optimal. A strict slot can
+  // only be filled from its own position, so it must take the best available
+  // there; a FLEX is eligible for a superset of those positions, so whatever
+  // is left over is exactly what it should choose. Filling FLEX first could
+  // steal the only HB and leave a strict HB slot empty.
+  const ordered = [
+    ...slots.filter((s) => (s.positions || [s.position]).length === 1),
+    ...slots.filter((s) => (s.positions || [s.position]).length > 1),
+  ];
+
+  for (const slotDef of ordered) {
+    const eligible = slotDef.positions || [slotDef.position];
+    const label = slotDef.slot;
     let filled = 0;
-    for (const entry of pool) {
-      if (filled >= count) break;
+    for (const entry of sorted) {
+      if (filled >= slotDef.count) break;
       if (usedKeys.has(entry.key)) continue;
-      starters.push({ ...entry, slot });
+      if (!eligible.includes(String(entry.position || '').toUpperCase())) continue;
+      starters.push({ ...entry, slot: label });
       usedKeys.add(entry.key);
       filled += 1;
     }
     // Short-rostered slots stay empty and simply score 0.
-    while (filled < count) {
-      starters.push({ key: null, name: '—', position, points: 0, slot, empty: true });
+    while (filled < slotDef.count) {
+      starters.push({ key: null, name: '—', position: eligible[0], points: 0, slot: label, empty: true });
       filled += 1;
     }
   }
+
+  // Restore the configured display order (FLEX sits where it is defined).
+  const order = new Map(slots.map((s, i) => [s.slot, i]));
+  starters.sort((a, b) => (order.get(a.slot) ?? 99) - (order.get(b.slot) ?? 99));
 
   const bench = entries
     .filter((e) => !usedKeys.has(e.key))

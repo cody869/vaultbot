@@ -24,13 +24,15 @@ export const LEAGUE_DEFAULTS = {
   timezone_offset_hours: -7, // America/Los_Angeles (PDT). Used only for quiet hours.
 };
 
-// Starting lineup. Strict position matching, no FLEX.
+// Starting lineup. `positions` lists everything eligible for the slot, so a
+// FLEX is just a slot with more than one. Still 8 starters.
 export const LINEUP_SLOTS = [
-  { slot: 'QB', position: 'QB', count: 1 },
-  { slot: 'HB', position: 'HB', count: 2 },
-  { slot: 'WR', position: 'WR', count: 3 },
-  { slot: 'TE', position: 'TE', count: 1 },
-  { slot: 'DEF', position: 'DEF', count: 1 },
+  { slot: 'QB', positions: ['QB'], count: 1 },
+  { slot: 'HB', positions: ['HB'], count: 2 },
+  { slot: 'WR', positions: ['WR'], count: 2 },
+  { slot: 'TE', positions: ['TE'], count: 1 },
+  { slot: 'FLEX', positions: ['HB', 'WR', 'TE'], count: 1 },
+  { slot: 'DEF', positions: ['DEF'], count: 1 },
 ];
 
 export const STARTER_COUNT = LINEUP_SLOTS.reduce((n, s) => n + s.count, 0); // 8
@@ -59,7 +61,13 @@ export const ROSTER_MAX_DEF = 2;
 
 export const POSITION_ORDER = ['QB', 'HB', 'WR', 'TE', 'DEF'];
 
-/** Lineup slots for a league, falling back to the defaults. */
+/**
+ * Lineup slots for a league, falling back to the defaults.
+ * NOTE: a league's per-position override (lineup_qb/hb/wr/te/def) has no way
+ * to express a shared slot, so a customized lineup always comes back strict
+ * -- no FLEX. Nothing currently sets these fields (unreached in practice),
+ * but if that changes this is the gap to close first.
+ */
 export function resolveLineup(league) {
   if (!league) return LINEUP_SLOTS;
   const counts = {
@@ -72,7 +80,12 @@ export function resolveLineup(league) {
   // If the row carries no lineup at all, use the defaults untouched.
   if (Object.values(counts).every((v) => v == null)) return LINEUP_SLOTS;
 
-  const fallback = Object.fromEntries(LINEUP_SLOTS.map((l) => [l.position, l.count]));
+  // Only single-position slots have a natural per-position fallback count;
+  // FLEX is skipped here since it isn't itself a position.
+  const fallback = Object.fromEntries(
+    LINEUP_SLOTS.filter((l) => (l.positions || [l.position]).length === 1)
+      .map((l) => [l.positions[0], l.count])
+  );
   return POSITION_ORDER
     .map((pos) => ({
       slot: pos,
@@ -320,7 +333,7 @@ export function normalizeName(name) {
   return String(name || '')
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9 ]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
