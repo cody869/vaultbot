@@ -1,6 +1,6 @@
 // index.js — the XCFL Vault Discord bot.
 import "dotenv/config";
-import { Client, GatewayIntentBits, Events } from "discord.js";
+import { Client, GatewayIntentBits, Events, AttachmentBuilder, EmbedBuilder } from "discord.js";
 import { loadEmoji } from "./emoji.js";
 import { registerCommands } from "./deploy-commands.js";
 import { startScheduler } from "./scheduler.js";
@@ -49,6 +49,13 @@ import {
   warmPlayerCache,
   botLogin,
 } from "./vault.js";
+import {
+  suggestProspects,
+  getProspectById,
+  getGateLevel,
+  warmProspectCache,
+} from "./draftProspects.js";
+import { renderProspectCard } from "./prospectCard.js";
 import {
   standingsEmbed,
   playoffPictureEmbed,
@@ -101,6 +108,12 @@ client.once(Events.ClientReady, async (c) => {
     // this cycle out rather than piling onto it.
     if (isRateLimited()) return;
     warmPlayerCache().catch(() => {});
+  }, 300_000);
+  // Same 3-second autocomplete deadline applies to /prospect.
+  await warmProspectCache();
+  setInterval(() => {
+    if (isRateLimited()) return;
+    warmProspectCache().catch(() => {});
   }, 300_000);
   // Same 3-second autocomplete deadline applies to /fantasy pick and
   // /fantasy queue — warm the draft pool too (no-ops when no draft is live).
@@ -287,6 +300,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.respond(await suggestPlayers(focused, 25));
       } catch (err) {
         console.error("[AUTOCOMPLETE] compare failed:", err.message);
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
+    } else if (interaction.commandName === "prospect") {
+      try {
+        const focused = String(interaction.options.getFocused() ?? "");
+        await interaction.respond(await suggestProspects(focused, 25));
+      } catch (err) {
+        console.error("[AUTOCOMPLETE] prospect failed:", err.message);
         try {
           await interaction.respond([]);
         } catch {}
@@ -509,6 +532,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
         await interaction.editReply(await renderPlayerView(match, team, "overview"));
         console.log(`[PLAYER] reply sent for ${match.player_fullName}`);
+        break;
+      }
+      case "prospect": {
+        const id = interaction.options.getString("name");
+        console.log(`[PROSPECT] /prospect invoked with: ${id}`);
+
+        const prospect = await withTimeout(getProspectById(id), 25_000, "Prospect lookup");
+        if (!prospect) {
+          // Autocomplete normally prevents this -- only reachable via a
+          // stale dropdown pick (prospect deleted/renamed since the client
+          // cached the choice list).
+          await interaction.editReply(
+            `Couldn't find that prospect anymore — try typing the name again.`
+          );
+          break;
+        }
+
+        const gate = await withTimeout(
+          getGateLevel(prospect.draft_class_season),
+          15_000,
+          "Scouting gate lookup"
+        );
+        const png = await renderProspectCard(prospect, gate);
+        const filename = `prospect-${prospect.id}.png`;
+        await interaction.editReply({
+          files: [new AttachmentBuilder(png, { name: filename })],
+          embeds: [new EmbedBuilder().setColor(0xd4a843).setImage(`attachment://${filename}`)],
+        });
+        console.log(`[PROSPECT] reply sent for ${prospect.player_fullName}`);
         break;
       }
       case "compare": {

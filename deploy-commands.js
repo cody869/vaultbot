@@ -59,6 +59,17 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("prospect")
+    .setDescription("Look up a draft prospect's scouting card (gated to what's currently scoutable)")
+    .addStringOption((o) =>
+      o
+        .setName("name")
+        .setDescription("Start typing a prospect name, then pick from the list")
+        .setRequired(true)
+        .setAutocomplete(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName("compare")
     .setDescription("Compare two players side by side")
     .addStringOption((o) =>
