@@ -8,6 +8,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import sharp from 'sharp';
 import { stripWhiteBackground } from './logoTransparency.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -50,11 +51,19 @@ export async function loadLogoDataUri(url) {
     buf = fs.readFileSync(url);
   }
 
-  if (buf.length < 512 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    throw new Error(
-      `Logo at ${url} doesn't look like a real PNG (${buf.length} bytes) -- ` +
-      `request likely succeeded with a non-image response instead of failing outright.`
-    );
+  // Most sources here (team logos) are already PNG. But prospect headshots
+  // (CFB27-assigned portraits) come back as WebP -- resvg's embedded-image
+  // decoder doesn't support that, so it silently fails the render for that
+  // image. Anything that isn't already a real PNG gets normalized to one
+  // via sharp before it ever reaches Satori/resvg.
+  if (buf.length < 8 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    try {
+      buf = await sharp(buf).png().toBuffer();
+    } catch (err) {
+      throw new Error(
+        `Logo at ${url} isn't a PNG and couldn't be converted to one (${buf.length} bytes): ${err.message}`
+      );
+    }
   }
 
   // A few assets in the source repo (Dolphins confirmed) are flat opaque

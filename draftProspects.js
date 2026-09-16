@@ -50,25 +50,24 @@ async function getAllProspects() {
   return refreshProspectsInBackground();
 }
 
-function matchesFilters(p, season, position) {
-  if (season != null && p.draft_class_season !== season) return false;
-  if (position && p.player_position !== position) return false;
-  return true;
+function matchesSeason(p, season) {
+  return season == null || p.draft_class_season === season;
 }
 
 // Suggestions for autocomplete — same ranking convention as vault.js's
 // suggestPlayers: exact > starts-with > word-match > substring, tie-broken
-// by overall_rank (lower/better first). Bust-outs/transfers-out
-// (is_active:false) are excluded, same as the app's own Big Board query.
-// /prospect asks for season and position first, so by the time the user is
-// typing a name the list is already narrowed to that draft class + group.
-export async function suggestProspects(partial, limit = 25, { season, position } = {}) {
+// by overall_rank (lower/better first, i.e. draft rank when nothing's been
+// typed yet). Bust-outs/transfers-out (is_active:false) are excluded, same
+// as the app's own Big Board query. /prospect asks for season first, so by
+// the time the user is typing a name the list is already narrowed to that
+// draft class.
+export async function suggestProspects(partial, limit = 25, { season } = {}) {
   const all = await getAllProspects();
   const q = (partial ?? "").trim().toLowerCase();
 
   const scored = all
     .filter((p) => p.is_active !== false)
-    .filter((p) => matchesFilters(p, season, position))
+    .filter((p) => matchesSeason(p, season))
     .map((p) => {
       const n = (p.player_fullName ?? "").toLowerCase();
       const words = n.split(/\s+/);
@@ -112,17 +111,16 @@ export async function getProspectById(id) {
 // Fallback for when the name option was submitted as free text instead of
 // an autocomplete pick (still possible in Discord even with autocomplete
 // on) — same tiered exact/starts-with/word/substring match as
-// suggestProspects, narrowed by whatever season/position were already
-// chosen, so a plain name is enough as long as it's unambiguous within
-// that slice.
-export async function findProspect(nameInput, { season, position } = {}) {
+// suggestProspects, narrowed by whatever season was already chosen, so a
+// plain name is enough as long as it's unambiguous within that class.
+export async function findProspect(nameInput, { season } = {}) {
   const all = await getAllProspects();
   const q = (nameInput ?? "").trim().toLowerCase();
   if (!q) return { matches: [], unambiguous: false };
 
   const scored = all
     .filter((p) => p.is_active !== false)
-    .filter((p) => matchesFilters(p, season, position))
+    .filter((p) => matchesSeason(p, season))
     .map((p) => {
       const n = (p.player_fullName ?? "").toLowerCase();
       const words = n.split(/\s+/);

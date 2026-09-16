@@ -308,20 +308,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         } catch {}
       }
     } else if (interaction.commandName === "prospect") {
-      // Cascading options: season -> position -> name. Position is a fixed
-      // addChoices list (no autocomplete needed); season and name each
-      // narrow against whatever was already picked, same as admin's
-      // game/team routing by which option is currently focused.
+      // Cascading options: season -> name. Season narrows the name
+      // autocomplete, same as admin's game/team routing by which option is
+      // currently focused.
       try {
         const { name: focusedName, value } = interaction.options.getFocused(true);
         if (focusedName === "season") {
           await interaction.respond(await suggestDraftSeasons(value, 25));
         } else {
           const season = interaction.options.getInteger("season") ?? undefined;
-          const position = interaction.options.getString("position") ?? undefined;
-          await interaction.respond(
-            await suggestProspects(String(value ?? ""), 25, { season, position })
-          );
+          await interaction.respond(await suggestProspects(String(value ?? ""), 25, { season }));
         }
       } catch (err) {
         console.error("[AUTOCOMPLETE] prospect failed:", err.message);
@@ -551,28 +547,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       case "prospect": {
         const season = interaction.options.getInteger("season");
-        const position = interaction.options.getString("position");
         const input = interaction.options.getString("name");
-        console.log(`[PROSPECT] /prospect invoked with: season=${season} position=${position} name=${input}`);
+        console.log(`[PROSPECT] /prospect invoked with: season=${season} name=${input}`);
 
         // Autocomplete sends record ids; a plain typed name (still possible
         // even with autocomplete on) falls back to a filtered name search.
         let prospect = await withTimeout(getProspectById(input), 25_000, "Prospect lookup");
         if (!prospect) {
           const { matches, unambiguous } = await withTimeout(
-            findProspect(input, { season, position }),
+            findProspect(input, { season }),
             25_000,
             "Prospect search"
           );
           if (!matches.length) {
             await interaction.editReply(
-              `Couldn't find a **${position}** prospect from Season ${season} matching **${input}** — pick from the dropdown for an exact match.`
+              `Couldn't find a prospect from Season ${season} matching **${input}** — pick from the dropdown for an exact match.`
             );
             break;
           }
           if (!unambiguous) {
             await interaction.editReply(
-              `Multiple **${position}** prospects from Season ${season} match **${input}** — pick from the dropdown for an exact match.`
+              `Multiple prospects from Season ${season} match **${input}** — pick from the dropdown for an exact match.`
             );
             break;
           }
