@@ -48,13 +48,19 @@ const EXTRA_EXPORT_URLS = [
 ];
 
 /*
- * Teams/standings are only sent when the destination can parse them. A
- * snallabot-compatible relay routes on the URL path, so it can; maddenWebhook
- * sniffs the body and has no branch for those two shapes. Override with
- * MADDEN_EXPORT_LEAGUE_INFO=true if a handler gets added later.
+ * Teams/standings are only worth sending when the destination can parse them.
+ * A snallabot-compatible relay routes on the URL path, so it always can.
+ * maddenWebhook (Base44, direct mode) used to have no branch for these two
+ * shapes and just discarded them with an "acknowledged (not stored)" log --
+ * confirmed live, this is why TeamMap (the team_id -> name lookup every
+ * roster/free-agent import depends on) went stale after every EA reconnect
+ * and never recovered: the one payload that could have refreshed it was
+ * being silently skipped here before it even reached the destination. Its
+ * 'team_meta' handler now upserts TeamMap from leagueTeamInfoList, so direct
+ * mode needs this sent too. Override with MADDEN_EXPORT_LEAGUE_INFO=false to
+ * go back to skipping it.
  */
-const LEAGUE_INFO_SUPPORTED =
-  process.env.MADDEN_EXPORT_LEAGUE_INFO === "true" || !DIRECT;
+const LEAGUE_INFO_SUPPORTED = process.env.MADDEN_EXPORT_LEAGUE_INFO !== "false";
 
 // Every payload — one week/dataset pair, one roster team, teams, standings,
 // free agents — is sent strictly one at a time, in a fixed order, with no
