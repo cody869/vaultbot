@@ -55,6 +55,7 @@ import {
   getProspectById,
   findProspect,
   getGateLevel,
+  getProspectStories,
   warmProspectCache,
 } from "./draftProspects.js";
 import { renderProspectCard } from "./prospectCard.js";
@@ -578,12 +579,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           prospect = matches[0];
         }
 
-        const gate = await withTimeout(
-          getGateLevel(prospect.draft_class_season),
-          15_000,
-          "Scouting gate lookup"
-        );
-        const png = await renderProspectCard(prospect, gate);
+        const [gate, stories] = await Promise.all([
+          withTimeout(getGateLevel(prospect.draft_class_season), 15_000, "Scouting gate lookup"),
+          withTimeout(getProspectStories(prospect.id), 15_000, "Prospect stories lookup").catch(() => []),
+        ]);
+        const png = await renderProspectCard(prospect, gate, stories);
         const filename = `prospect-${prospect.id}.png`;
         await interaction.editReply({
           files: [new AttachmentBuilder(png, { name: filename })],

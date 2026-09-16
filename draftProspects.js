@@ -162,3 +162,53 @@ export async function getGateLevel(draftClassSeason) {
   if (!fresh || !_gateCache.byseason.size) await loadGates();
   return _gateCache.byseason.get(draftClassSeason)?.gate_level ?? 0;
 }
+
+// --- scouting news stories -----------------------------------------------
+
+let _storyCache = { at: 0, rows: [] };
+let _storyRefresh = null;
+const STORY_TTL_MS = 300_000;
+
+async function loadStories() {
+  const rows = await list(
+    "ScoutingNewsStory",
+    { is_published: true },
+    { sort: "-created_date", limit: 2000 }
+  );
+  _storyCache = { at: Date.now(), rows };
+  return rows;
+}
+
+function refreshStoriesInBackground() {
+  if (_storyRefresh) return _storyRefresh;
+  _storyRefresh = loadStories()
+    .catch((err) => {
+      console.error("[PROSPECT] story refresh failed:", err.message);
+      return _storyCache.rows;
+    })
+    .finally(() => {
+      _storyRefresh = null;
+    });
+  return _storyRefresh;
+}
+
+async function getAllStories() {
+  const fresh = Date.now() - _storyCache.at < STORY_TTL_MS;
+  if (_storyCache.rows.length) {
+    if (!fresh) refreshStoriesInBackground();
+    return _storyCache.rows;
+  }
+  return refreshStoriesInBackground();
+}
+
+// Stories tied to a prospect, newest first -- mirrors ProspectPage.jsx's own
+// filter exactly: a story counts as related if the prospect is either the
+// primary subject (prospect_id) or one of the additional tagged prospects
+// (additional_prospect_ids), which a simple {prospect_id: id} server-side
+// filter alone would miss.
+export async function getProspectStories(prospectId, limit = 4) {
+  const all = await getAllStories();
+  return all
+    .filter((s) => s.prospect_id === prospectId || s.additional_prospect_ids?.includes(prospectId))
+    .slice(0, limit);
+}

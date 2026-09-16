@@ -12,17 +12,17 @@
 // level) or a value-independent label (a letter grade, a round projection,
 // a bust-risk tier). Section VISIBILITY is also gated exactly like the
 // app's ProspectPage.jsx: gate 0 shows almost nothing, gate 1+ reveals
-// physical/narrative/attribute-ranges, gate 2+ adds archetype + college
-// stats, gate 3+ adds grade/round/bust-risk/ranks/strengths.
+// physical/attribute-ranges/articles, gate 2+ adds archetype, gate 3+ adds
+// grade/round/bust-risk/ranks/strengths.
 //
 // Two things the reference Franchise Hub card has that a prospect
 // fundamentally can't: a precise OVR badge (replaced with the letter
 // `overall_grade`, gate 3+) and Madden abilities/X-Factor (replaced with a
 // Scouting Report panel: archetype, round projection, bust risk, ranks --
 // the actual DraftProspect equivalent of "here's the evaluation"). The
-// four-gauge "Signature Ratings" row is also an adaptation: there's no
-// prospect equivalent, so it shows the position's four defining attributes
-// as gated ranges instead of the app's own ranked stat.
+// gauge row is also an adaptation -- there's no prospect equivalent of a
+// ranked stat, so it lists the prospect's related ScoutingNewsStory
+// headlines instead.
 
 import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
@@ -31,8 +31,8 @@ import { getCollegeLogoUrl, getCollegeColor } from './d1Teams.js';
 import { attrDisplay, attrBarWidth } from './prospectGateDisplay.js';
 
 const W = 900;
-const H_FULL = 1080;
-const H_LOCKED = 460; // gate 0: almost nothing renders -- a full-height card is mostly empty
+const H_FULL = 760;
+const H_LOCKED = 300; // gate 0: almost nothing renders -- a full-height card is mostly empty
 
 const GREEN = '#4ADE80';
 const BLUE = '#60A5FA';
@@ -99,26 +99,6 @@ const POSITION_PRIMARY_GROUPS = {
   K: ['Physical', 'Kicking'], P: ['Physical', 'Kicking'],
 };
 
-// Not an app concept -- the reference card's 4-gauge "Signature Ratings"
-// row has no prospect equivalent, so this picks each position's 4 most
-// defining attributes to fill that slot with gated ranges instead.
-const SIGNATURE_ATTRS = {
-  QB: ['throwPower', 'shortAcc', 'midAcc', 'awa'],
-  RB: ['spd', 'trucking', 'breakTackle', 'awa'],
-  WR: ['spd', 'catch', 'shortRouteRun', 'release'],
-  TE: ['catch', 'runBlock', 'spd', 'awa'],
-  OT: ['passBlock', 'runBlock', 'str', 'awa'],
-  OG: ['passBlock', 'runBlock', 'str', 'awa'],
-  C: ['passBlock', 'runBlock', 'awa', 'str'],
-  DE: ['powerMoves', 'finesseMoves', 'tackle', 'awa'],
-  DT: ['powerMoves', 'tackle', 'str', 'awa'],
-  LB: ['tackle', 'playRecog', 'pursuit', 'zoneCoverage'],
-  CB: ['manCoverage', 'zoneCoverage', 'spd', 'press'],
-  S: ['zoneCoverage', 'tackle', 'manCoverage', 'spd'],
-  K: ['kickPower', 'kickAcc', 'awa', 'sta'],
-  P: ['kickPower', 'kickAcc', 'awa', 'sta'],
-};
-
 function initialsOf(name) {
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
   if (!parts.length) return '?';
@@ -143,7 +123,7 @@ function pill(text, { bg = 'rgba(255,255,255,0.12)', color = '#FFFFFF', border }
 // No emoji glyphs are loaded (only Anton/Barlow -- see cardKit.js), so a
 // 🔒 character renders as a missing-glyph box. Plain text reads the same
 // intent without depending on a font this card doesn't ship.
-function lockedRow(label = 'Locked — insufficient scouting intel') {
+function mutedRow(text) {
   return {
     type: 'div',
     props: {
@@ -151,49 +131,36 @@ function lockedRow(label = 'Locked — insufficient scouting intel') {
         display: 'flex', alignItems: 'center', fontFamily: 'Barlow', fontSize: 14,
         color: 'rgba(255,255,255,0.35)', fontStyle: 'italic', padding: '6px 0',
       },
-      children: `[ LOCKED ] ${label}`,
+      children: text,
     },
   };
 }
 
-// Badge for the Signature Ratings row -- a bordered circle showing the
-// gated range (not the true value) at its center. Satori has no
-// conic-gradient support (confirmed: it fails to parse the declaration
-// outright), so this is a flat ring rather than a true fill-proportional
-// gauge -- the border color still reflects the true value's tier.
-function ratingRing(label, field, val, gate) {
-  const color = tierColor(val);
-  const range = attrDisplay(val, gate, field);
+function lockedRow(label = 'Locked — insufficient scouting intel') {
+  return mutedRow(`[ LOCKED ] ${label}`);
+}
+
+const DATE_FMT = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
+
+// One row in the Related Articles list -- a ScoutingNewsStory headline plus
+// its date. No body/photo (there's no room on a card this size); this is a
+// pointer to the story, not the story itself.
+function storyRow(story) {
+  const date = story.created_date ? DATE_FMT.format(new Date(story.created_date)) : null;
   return {
     type: 'div',
     props: {
-      style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: 190 },
+      style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, fontSize: 14, padding: '4px 0' },
       children: [
         {
           type: 'div',
-          props: {
-            style: {
-              display: 'flex', width: 130, height: 130, borderRadius: 65,
-              border: `6px solid ${color}`, background: 'rgba(255,255,255,0.04)',
-              alignItems: 'center', justifyContent: 'center',
-            },
-            children: {
-              type: 'div',
-              props: {
-                style: { display: 'flex', fontFamily: 'Anton', fontSize: 26, color: '#FFFFFF' },
-                children: range,
-              },
-            },
-          },
+          props: { style: { display: 'flex', color: '#FFFFFF', fontWeight: 600 }, children: (story.headline || 'Untitled').slice(0, 70) },
         },
-        {
+        date && {
           type: 'div',
-          props: {
-            style: { display: 'flex', fontFamily: 'Barlow', fontSize: 13, color: 'rgba(255,255,255,0.6)', letterSpacing: 1 },
-            children: label.toUpperCase(),
-          },
+          props: { style: { display: 'flex', color: 'rgba(255,255,255,0.4)', fontSize: 12, whiteSpace: 'nowrap' }, children: date },
         },
-      ],
+      ].filter(Boolean),
     },
   };
 }
@@ -251,19 +218,25 @@ function sectionLabel(text) {
 /**
  * @param {object} p - a DraftProspect row (raw Base44 fields)
  * @param {number} gate - ScoutingGate.gate_level for this prospect's draft class (0-4)
+ * @param {object[]} stories - related ScoutingNewsStory rows (see draftProspects.js's getProspectStories), newest first
  * @returns {Promise<Buffer>} PNG bytes
  */
-export async function renderProspectCard(p, gate) {
+export async function renderProspectCard(p, gate, stories = []) {
+  // portrait_url (AI-generated Big Board portrait) is the intended headshot
+  // source, but is currently null for every prospect in the app's own data
+  // -- headshot_url (the CFB27 skin-tone-matched portrait) is what's
+  // actually populated today, so it's the fallback rather than the primary.
+  const portraitSrc = p.portrait_url || p.headshot_url;
+
   const [fonts, logo, headshot] = await Promise.all([
     loadFonts(),
     p.college ? loadLogoDataUri(getCollegeLogoUrl(p.college)).catch(() => null) : Promise.resolve(null),
-    p.headshot_url ? loadLogoDataUri(p.headshot_url).catch(() => null) : Promise.resolve(null),
+    portraitSrc ? loadLogoDataUri(portraitSrc).catch(() => null) : Promise.resolve(null),
   ]);
 
   const collegeColor = p.college ? `#${getCollegeColor(p.college)}` : DARK_BG;
   const showPhysical = gate >= 1;
   const showAttrs = gate >= 1;
-  const showStats = gate >= 2;
   const showArchetype = gate >= 2;
   const showGrade = gate >= 3;
   const showRanks = gate >= 3;
@@ -274,10 +247,6 @@ export async function renderProspectCard(p, gate) {
     .flatMap((g) => ATTR_GROUPS[g] || [])
     .filter((f) => p[f] != null && p[f] > 0)
     .slice(0, 9);
-
-  const sigFields = (SIGNATURE_ATTRS[p.player_position] || []).filter((f) => p[f] != null && p[f] > 0).slice(0, 4);
-
-  const stats = (p.college_stats_by_season || []).slice(0, 3);
 
   const H = gate < 1 ? H_LOCKED : H_FULL;
 
@@ -390,7 +359,7 @@ export async function renderProspectCard(p, gate) {
           props: {
             style: { display: 'flex', flexDirection: 'column', padding: '24px 32px', gap: 22, flex: 1 },
             children: [
-              // Signature ratings row
+              // Related articles row
               gate < 1
                 ? lockedRow('No scouting intel released for this draft class yet')
                 : {
@@ -398,14 +367,14 @@ export async function renderProspectCard(p, gate) {
                     props: {
                       style: { display: 'flex', flexDirection: 'column' },
                       children: [
-                        sectionLabel('Signature Ratings'),
+                        sectionLabel('Related Articles'),
                         {
                           type: 'div',
                           props: {
-                            style: { display: 'flex', justifyContent: 'space-around' },
-                            children: sigFields.length
-                              ? sigFields.map((f) => ratingRing(ATTR_LABELS[f] || f, f, p[f], gate))
-                              : [lockedRow('No standout ratings on file')],
+                            style: { display: 'flex', flexDirection: 'column' },
+                            children: stories.length
+                              ? stories.map(storyRow)
+                              : [mutedRow('No scouting stories on file yet')],
                           },
                         },
                       ],
@@ -539,58 +508,7 @@ export async function renderProspectCard(p, gate) {
                   ],
                 },
               },
-
-              // College career
-              {
-                type: 'div',
-                props: {
-                  style: { display: 'flex', flexDirection: 'column' },
-                  children: [
-                    sectionLabel('College Career'),
-                    showStats && stats.length
-                      ? {
-                          type: 'div',
-                          props: {
-                            style: { display: 'flex', flexDirection: 'column', gap: 8 },
-                            children: stats.map((row) => ({
-                              type: 'div',
-                              props: {
-                                style: { display: 'flex', alignItems: 'baseline', gap: 12, fontSize: 14 },
-                                children: [
-                                  {
-                                    type: 'div',
-                                    props: {
-                                      style: { display: 'flex', width: 130, color: GOLD, fontWeight: 700 },
-                                      children: [row.season_number ? `Season ${row.season_number}` : null, row.college_year].filter(Boolean).join(' · '),
-                                    },
-                                  },
-                                  { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF' }, children: row.stat_line || '—' } },
-                                ],
-                              },
-                            })),
-                          },
-                        }
-                      : lockedRow(showStats ? 'No college stats on file' : 'Film study not yet available'),
-                  ],
-                },
-              },
             ].filter(Boolean),
-          },
-        },
-
-        // Footer
-        {
-          type: 'div',
-          props: {
-            style: {
-              display: 'flex', justifyContent: 'space-between', padding: '10px 32px',
-              borderTop: '1px solid rgba(255,255,255,0.08)', fontFamily: 'Barlow', fontSize: 11,
-              color: 'rgba(255,255,255,0.35)', letterSpacing: 1,
-            },
-            children: [
-              { type: 'div', props: { children: p.draft_class_season ? `SEASON ${p.draft_class_season} DRAFT CLASS` : 'DRAFT PROSPECT' } },
-              { type: 'div', props: { children: 'XCFL SCOUTING' } },
-            ],
           },
         },
       ],
