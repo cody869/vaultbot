@@ -51,7 +51,9 @@ import {
 } from "./vault.js";
 import {
   suggestProspects,
+  suggestDraftSeasons,
   getProspectById,
+  findProspect,
   getGateLevel,
   warmProspectCache,
 } from "./draftProspects.js";
@@ -305,9 +307,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
         } catch {}
       }
     } else if (interaction.commandName === "prospect") {
+      // Cascading options: season -> position -> name. Position is a fixed
+      // addChoices list (no autocomplete needed); season and name each
+      // narrow against whatever was already picked, same as admin's
+      // game/team routing by which option is currently focused.
       try {
-        const focused = String(interaction.options.getFocused() ?? "");
-        await interaction.respond(await suggestProspects(focused, 25));
+        const { name: focusedName, value } = interaction.options.getFocused(true);
+        if (focusedName === "season") {
+          await interaction.respond(await suggestDraftSeasons(value, 25));
+        } else {
+          const season = interaction.options.getInteger("season") ?? undefined;
+          const position = interaction.options.getString("position") ?? undefined;
+          await interaction.respond(
+            await suggestProspects(String(value ?? ""), 25, { season, position })
+          );
+        }
       } catch (err) {
         console.error("[AUTOCOMPLETE] prospect failed:", err.message);
         try {
@@ -535,18 +549,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
         break;
       }
       case "prospect": {
-        const id = interaction.options.getString("name");
-        console.log(`[PROSPECT] /prospect invoked with: ${id}`);
+        const season = interaction.options.getInteger("season");
+        const position = interaction.options.getString("position");
+        const input = interaction.options.getString("name");
+        console.log(`[PROSPECT] /prospect invoked with: season=${season} position=${position} name=${input}`);
 
-        const prospect = await withTimeout(getProspectById(id), 25_000, "Prospect lookup");
+        // Autocomplete sends record ids; a plain typed name (still possible
+        // even with autocomplete on) falls back to a filtered name search.
+        let prospect = await withTimeout(getProspectById(input), 25_000, "Prospect lookup");
         if (!prospect) {
-          // Autocomplete normally prevents this -- only reachable via a
-          // stale dropdown pick (prospect deleted/renamed since the client
-          // cached the choice list).
-          await interaction.editReply(
-            `Couldn't find that prospect anymore — try typing the name again.`
+          const { matches, unambiguous } = await withTimeout(
+            findProspect(input, { season, position }),
+            25_000,
+            "Prospect search"
           );
-          break;
+          if (!matches.length) {
+            await interaction.editReply(
+              `Couldn't find a **${position}** prospect from Season ${season} matching **${input}** — pick from the dropdown for an exact match.`
+            );
+            break;
+          }
+          if (!unambiguous) {
+            await interaction.editReply(
+              `Multiple **${position}** prospects from Season ${season} match **${input}** — pick from the dropdown for an exact match.`
+            );
+            break;
+          }
+          prospect = matches[0];
         }
 
         const gate = await withTimeout(

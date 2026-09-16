@@ -50,16 +50,25 @@ async function getAllProspects() {
   return refreshProspectsInBackground();
 }
 
+function matchesFilters(p, season, position) {
+  if (season != null && p.draft_class_season !== season) return false;
+  if (position && p.player_position !== position) return false;
+  return true;
+}
+
 // Suggestions for autocomplete — same ranking convention as vault.js's
 // suggestPlayers: exact > starts-with > word-match > substring, tie-broken
 // by overall_rank (lower/better first). Bust-outs/transfers-out
 // (is_active:false) are excluded, same as the app's own Big Board query.
-export async function suggestProspects(partial, limit = 25) {
+// /prospect asks for season and position first, so by the time the user is
+// typing a name the list is already narrowed to that draft class + group.
+export async function suggestProspects(partial, limit = 25, { season, position } = {}) {
   const all = await getAllProspects();
   const q = (partial ?? "").trim().toLowerCase();
 
   const scored = all
     .filter((p) => p.is_active !== false)
+    .filter((p) => matchesFilters(p, season, position))
     .map((p) => {
       const n = (p.player_fullName ?? "").toLowerCase();
       const words = n.split(/\s+/);
@@ -82,9 +91,55 @@ export async function suggestProspects(partial, limit = 25) {
   });
 }
 
+// Distinct draft classes present in the data, most recent first — feeds the
+// /prospect "season" option's own autocomplete (an Integer option, so value
+// stays numeric while the label gets the "Season N" framing).
+export async function suggestDraftSeasons(partial, limit = 25) {
+  const all = await getAllProspects();
+  const seasons = [...new Set(all.map((p) => p.draft_class_season).filter((s) => s != null))].sort(
+    (a, b) => b - a
+  );
+  const q = String(partial ?? "").trim();
+  const filtered = q ? seasons.filter((s) => String(s).includes(q)) : seasons;
+  return filtered.slice(0, limit).map((s) => ({ name: `Season ${s}`, value: s }));
+}
+
 export async function getProspectById(id) {
   const all = await getAllProspects();
   return all.find((p) => p.id === id) ?? null;
+}
+
+// Fallback for when the name option was submitted as free text instead of
+// an autocomplete pick (still possible in Discord even with autocomplete
+// on) — same tiered exact/starts-with/word/substring match as
+// suggestProspects, narrowed by whatever season/position were already
+// chosen, so a plain name is enough as long as it's unambiguous within
+// that slice.
+export async function findProspect(nameInput, { season, position } = {}) {
+  const all = await getAllProspects();
+  const q = (nameInput ?? "").trim().toLowerCase();
+  if (!q) return { matches: [], unambiguous: false };
+
+  const scored = all
+    .filter((p) => p.is_active !== false)
+    .filter((p) => matchesFilters(p, season, position))
+    .map((p) => {
+      const n = (p.player_fullName ?? "").toLowerCase();
+      const words = n.split(/\s+/);
+      let tier = 0;
+      if (n === q) tier = 4;
+      else if (n.startsWith(q)) tier = 3;
+      else if (words.includes(q)) tier = 2;
+      else if (n.includes(q)) tier = 1;
+      return { p, tier };
+    })
+    .filter((x) => x.tier > 0)
+    .sort((a, b) => b.tier - a.tier || (a.p.overall_rank ?? 999) - (b.p.overall_rank ?? 999));
+
+  const matches = scored.map((x) => x.p);
+  const exact = scored.filter((x) => x.tier === 4);
+  const unambiguous = matches.length === 1 || exact.length === 1;
+  return { matches, unambiguous };
 }
 
 // --- scouting gates -----------------------------------------------------

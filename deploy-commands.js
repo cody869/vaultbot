@@ -61,6 +61,35 @@ export const commands = [
   new SlashCommandBuilder()
     .setName("prospect")
     .setDescription("Look up a draft prospect's scouting card (gated to what's currently scoutable)")
+    .addIntegerOption((o) =>
+      o
+        .setName("season")
+        .setDescription("Draft class — start typing, then pick from the list")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("position")
+        .setDescription("Position group")
+        .setRequired(true)
+        .addChoices(
+          { name: "QB", value: "QB" },
+          { name: "RB", value: "RB" },
+          { name: "WR", value: "WR" },
+          { name: "TE", value: "TE" },
+          { name: "OT", value: "OT" },
+          { name: "OG", value: "OG" },
+          { name: "C", value: "C" },
+          { name: "DE", value: "DE" },
+          { name: "DT", value: "DT" },
+          { name: "LB", value: "LB" },
+          { name: "CB", value: "CB" },
+          { name: "S", value: "S" },
+          { name: "K", value: "K" },
+          { name: "P", value: "P" }
+        )
+    )
     .addStringOption((o) =>
       o
         .setName("name")
