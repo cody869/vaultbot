@@ -368,7 +368,7 @@ function resolveWeeks(mode, leagueInfo, weekNumber) {
  * (confirmed live). Fully sequential processing already prevents that, but
  * keeping weeks un-interleaved keeps the plan's order intuitive too.
  */
-function buildPlan({ weeks, datasets, willExportLeagueInfo, rosters, teamList }) {
+function buildPlan({ weeks, datasets, willExportLeagueInfo, rosters, teamList, includeFreeAgents = true }) {
   const items = [];
   if (willExportLeagueInfo) {
     items.push({ type: "teams", label: "Teams" });
@@ -407,7 +407,7 @@ function buildPlan({ weeks, datasets, willExportLeagueInfo, rosters, teamList })
     }
   }
   if (rosters) {
-    items.push({ type: "freeagents", label: "Free agents" });
+    if (includeFreeAgents) items.push({ type: "freeagents", label: "Free agents" });
     teamList.forEach((team, teamIndex) => {
       items.push({ type: "roster", teamId: team.teamId, teamIndex, label: `Roster: team ${team.teamId}` });
     });
@@ -516,6 +516,9 @@ async function runPlan(client, leagueId, platform, items, emitItem, cancelSignal
  * @param {number|number[]} [opts.week]  1-based week number ("week") or array of
  *                                       1-based week numbers ("weeks") — required for either mode
  * @param {boolean}  opts.rosters      also pull all 32 rosters + free agents
+ * @param {boolean}  [opts.includeFreeAgents=true]  when opts.rosters is set, also pull the
+ *                                     free-agent pool. Set false to export just the 32 team
+ *                                     rosters and skip free agents entirely.
  * @param {boolean}  opts.leagueInfo   also pull teams + standings
  * @param {string[]} opts.datasets     which per-week datasets (default: all 8)
  * @param {Function} [opts.onPlan]     async (items) => void — called once, right after the
@@ -535,6 +538,7 @@ async function runExport({
   mode = "current",
   week,
   rosters = false,
+  includeFreeAgents = true,
   leagueInfo: wantLeagueInfo = true,
   datasets = ALL_DATASETS,
   onPlan,
@@ -573,7 +577,7 @@ async function runExport({
     console.log("[EA] skipping teams/standings — destination has no handler for them");
   }
 
-  const items = buildPlan({ weeks, datasets, willExportLeagueInfo, rosters, teamList });
+  const items = buildPlan({ weeks, datasets, willExportLeagueInfo, rosters, teamList, includeFreeAgents });
   await emitPlan(items);
 
   const failures = await runPlan(client, leagueId, platform, items, emitItem, cancelSignal);
@@ -595,8 +599,11 @@ async function runExport({
  * asking it for rosters alone would still pull a week of stats. Rosters change
  * on their own schedule (trades, signings, cuts) rather than when a game is
  * played, so they get their own cadence.
+ *
+ * @param {boolean} [includeFreeAgents=true]  set false to skip the free-agent
+ *                                            pool and export just the 32 team rosters.
  */
-async function runRosterExport({ onPlan, onItem, cancelSignal } = {}) {
+async function runRosterExport({ onPlan, onItem, cancelSignal, includeFreeAgents = true } = {}) {
   requireUrl();
   const emitPlan = onPlan || (async () => {});
   const emitItem = onItem || (async () => {});
@@ -608,7 +615,7 @@ async function runRosterExport({ onPlan, onItem, cancelSignal } = {}) {
   const info = await client.getLeagueInfo(leagueId);
   const teamList = info.teamIdInfoList || [];
 
-  const items = buildPlan({ weeks: [], datasets: [], willExportLeagueInfo: false, rosters: true, teamList });
+  const items = buildPlan({ weeks: [], datasets: [], willExportLeagueInfo: false, rosters: true, teamList, includeFreeAgents });
   await emitPlan(items);
 
   const failures = await runPlan(client, leagueId, platform, items, emitItem, cancelSignal);

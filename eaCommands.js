@@ -10,7 +10,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
 } from "discord.js";
-import { runExport, ALL_DATASETS, ExportCancelledError } from "./eaExport.js";
+import { runExport, runRosterExport, ALL_DATASETS, ExportCancelledError } from "./eaExport.js";
 import { getConnection } from "./eaTokenStore.js";
 import { getWatcherStatus } from "./eaWatcher.js";
 
@@ -246,6 +246,7 @@ function weekLabel(session) {
 
 function dataStepPayload(session) {
   const datasets = session.datasets || (session.datasets = ALL_DATASETS.slice());
+  if (session.includeFreeAgents === undefined) session.includeFreeAgents = true;
   const chosen =
     datasets.length === ALL_DATASETS.length
       ? "all 8 categories"
@@ -269,13 +270,21 @@ function dataStepPayload(session) {
       "# Madden Export",
       `**Step 2 of 2 — ${weekLabel(session)}.**`,
       `Categories: ${chosen}. Narrow it below to send just one or a few (e.g. passing/rushing/receiving/defense), or leave it as-is for everything, then run.`,
+      `Rosters include free agents: **${session.includeFreeAgents ? "yes" : "no"}** (toggle below — only matters if you run a rosters export).`,
     ].join("\n"),
     embeds: [],
     components: [
       new ActionRowBuilder().addComponents(datasetSelect),
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("export:data:stats").setLabel("Run export").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("export:data:rosters").setLabel("Run export + rosters").setStyle(ButtonStyle.Secondary)
+        new ButtonBuilder().setCustomId("export:data:rosters").setLabel("Run export + rosters").setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId("export:data:rosters-only").setLabel("Run rosters only (no stats)").setStyle(ButtonStyle.Secondary)
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("export:toggle:freeagents")
+          .setLabel(session.includeFreeAgents ? "Free agents: ON (click to exclude)" : "Free agents: OFF (click to include)")
+          .setStyle(session.includeFreeAgents ? ButtonStyle.Success : ButtonStyle.Danger)
       ),
     ],
   };
@@ -354,29 +363,42 @@ export async function handleExportComponent(interaction) {
     return true;
   }
 
+  if (parts[1] === "toggle" && parts[2] === "freeagents") {
+    session.includeFreeAgents = !session.includeFreeAgents;
+    await interaction.update(dataStepPayload(session));
+    return true;
+  }
+
   if (parts[1] === "data") {
-    const rosters = parts[2] === "rosters";
-    const { mode, week, datasets } = session;
+    const rostersOnly = parts[2] === "rosters-only";
+    const rosters = rostersOnly || parts[2] === "rosters";
+    const { mode, week, datasets, includeFreeAgents } = session;
     endExportSession(interaction.user.id);
     await interaction.update({ content: "# Madden Export\nStarting…", embeds: [], components: [cancelRow()] });
-    await runExportFlow(interaction, mode, week, rosters, datasets);
+    if (rostersOnly) {
+      await runRosterExportFlow(interaction, includeFreeAgents);
+    } else {
+      await runExportFlow(interaction, mode, week, rosters, datasets, includeFreeAgents);
+    }
     return true;
   }
 
   return true;
 }
 
-async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DATASETS) {
+// Shared by runExportFlow and runRosterExportFlow: wires up the live status
+// message (plan rendering, throttled edits, cancel button) around whichever
+// export promise the caller starts. `startExport(cancelSignal, onPlan, onItem)`
+// must return the export's promise — kept as a factory rather than a plain
+// promise so `inFlight`/`exportController` can be set before anything actually
+// starts running.
+async function driveExport(interaction, startExport) {
   if (inFlight) {
     await interaction.editReply({ content: "An export is already running. Give it a minute.", components: [] });
     return;
   }
 
   const started = Date.now();
-  const weekArg = mode === "week" || mode === "weeks" ? ` week=${[].concat(week).join(",")}` : "";
-  console.log(
-    `[EA] /admin export mode=${mode}${weekArg} datasets=${datasets.join(",")} rosters=${rosters} by ${interaction.user.tag}`
-  );
 
   // Local mirror of the plan runExport builds, kept in sync via onPlan/onItem
   // below so every edit can re-render the full live status grid.
@@ -411,7 +433,7 @@ async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DA
   const controller = new AbortController();
   exportController = controller;
 
-  inFlight = runExport({ mode, week, rosters, datasets, leagueInfo: true, onPlan, onItem, cancelSignal: controller.signal });
+  inFlight = startExport(controller.signal, onPlan, onItem);
   try {
     const summary = await inFlight;
     const secs = Math.round((Date.now() - started) / 1000);
@@ -436,6 +458,26 @@ async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DA
     inFlight = null;
     exportController = null;
   }
+}
+
+async function runExportFlow(interaction, mode, week, rosters, datasets = ALL_DATASETS, includeFreeAgents = true) {
+  const weekArg = mode === "week" || mode === "weeks" ? ` week=${[].concat(week).join(",")}` : "";
+  console.log(
+    `[EA] /admin export mode=${mode}${weekArg} datasets=${datasets.join(",")} rosters=${rosters}` +
+    `${rosters ? ` includeFreeAgents=${includeFreeAgents}` : ""} by ${interaction.user.tag}`
+  );
+  await driveExport(interaction, (cancelSignal, onPlan, onItem) =>
+    runExport({ mode, week, rosters, includeFreeAgents, datasets, leagueInfo: true, onPlan, onItem, cancelSignal })
+  );
+}
+
+// Rosters-only export: no weeks, no stats, no league info -- see
+// runRosterExport() in eaExport.js for why runExport() can't express this.
+async function runRosterExportFlow(interaction, includeFreeAgents = true) {
+  console.log(`[EA] /admin export rosters-only includeFreeAgents=${includeFreeAgents} by ${interaction.user.tag}`);
+  await driveExport(interaction, (cancelSignal, onPlan, onItem) =>
+    runRosterExport({ includeFreeAgents, onPlan, onItem, cancelSignal })
+  );
 }
 
 function fmtAgo(ts) {
