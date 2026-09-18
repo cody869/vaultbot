@@ -302,6 +302,43 @@ function resolveWeeks(mode, leagueInfo, weekNumber) {
   const { seasonWeek, seasonWeekType } = leagueInfo.careerHubInfo.seasonInfo;
   const stage = seasonWeekType === 0 ? Stage.PRESEASON : Stage.SEASON;
 
+  // Offseason guard -- applies to EVERY mode, not just "current".
+  //
+  // EA's Blaze export endpoints have NO season parameter at all (confirmed:
+  // getSchedules/getWeeklyStats send only {leagueId, stageIndex, weekIndex}).
+  // They only ever reflect whatever the CURRENTLY LIVE franchise has for that
+  // week slot -- there is no way to ask for "season 84 week 5" specifically.
+  // During the offseason (seasonWeekType === 8), that live state is the new
+  // season's not-yet-played placeholder schedule, not the season that just
+  // ended. This was already known to corrupt "current" mode (see the S84
+  // week-4 incident this guard was originally added for), but "week",
+  // "weeks", and "all" had NO equivalent check -- confirmed live (Sept 2026):
+  // running "All weeks" during the offseason pulled the new season's
+  // scoreless placeholder schedule for every week, and maddenWebhook's
+  // scheduleId-keyed upsert used it to re-stamp real completed season-84
+  // games as season 85 with their scores zeroed out. Weeks 1-14 and most of
+  // 19-23 of a fully-played season were wiped this way in a single run.
+  //
+  // "current"/"recent"/"surrounding" silently return [] here (the existing,
+  // tested behavior for the unattended auto-export watcher -- nothing to do
+  // this cycle is a normal, expected outcome for a background poll).
+  // "week"/"weeks"/"all" are explicit, human-initiated picks from the
+  // Discord wizard, so they throw instead: silently no-op'ing a deliberate
+  // "run export" click would just look broken with no explanation, and the
+  // underlying reason (EA can't serve trustworthy historical data for ANY
+  // week right now, not just "current") applies just as much to an
+  // explicitly-numbered week as it does to "current".
+  if (seasonWeekType === 8) {
+    if (mode === "week" || mode === "weeks" || mode === "all") {
+      throw new Error(
+        "The league is in the offseason -- EA isn't serving reliable week data right now " +
+        "(it only reflects the live franchise state, and the new season's schedule hasn't " +
+        "been played yet). Wait until the season is underway before exporting by week."
+      );
+    }
+    if (mode === "current") return [];
+  }
+
   if (mode === "week") {
     return [{ weekIndex: weekNumberToIndex(weekNumber), stage: Stage.SEASON }];
   }
@@ -320,18 +357,6 @@ function resolveWeeks(mode, leagueInfo, weekNumber) {
   }
 
   if (mode === "current") {
-    // Offseason: seasonWeek/stage here reflect whatever internal offseason
-    // sub-stage EA is tracking (free agency, draft prep, etc.), not a real
-    // week of the season -- "recent"/"surrounding" below already special-
-    // case seasonWeekType === 8 for exactly this reason, but "current" was
-    // missed. Confirmed live (Sept 2026 offseason): left unguarded, this
-    // asked EA for "stage=SEASON, week=4" during the offseason and got back
-    // the PREVIOUS season's actual week 4 results (apparently a Madden
-    // schedule-screen placeholder) tagged with the new season's index --
-    // eaWatcher.js's auto-export pulled it in as if it were real, current
-    // games, and scorebugWatcher.js correctly (if unknowingly) posted cards
-    // for a week that never happened.
-    if (seasonWeekType === 8) return [];
     return [{ weekIndex: seasonWeek, stage }];
   }
 
