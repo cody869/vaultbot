@@ -133,6 +133,7 @@ async function main() {
   const alreadyDone = new Set(manifest.map((m) => m.game_key));
 
   let i = 0;
+  let debugDumps = 0;
   for (const [gameKey, candidates] of byGameKey) {
     i++;
     if (alreadyDone.has(gameKey)) continue; // resume support
@@ -146,12 +147,23 @@ async function main() {
     for (const row of candidates) {
       try {
         const msg = await fetchDiscordMessage(row.discord_channel_id, row.discord_message_id);
-        const attachment = (msg.attachments || [])[0];
-        if (!attachment) {
+        // Normally the card comes back as a real attachment. Fall back to the
+        // embed's own image URL (Discord resolves the `attachment://filename`
+        // reference into a real CDN url on the embed regardless) in case the
+        // attachments array itself comes back empty for some reason.
+        const imageUrl = (msg.attachments || [])[0]?.url || msg.embeds?.[0]?.image?.url;
+        if (!imageUrl) {
           lastErr = "no attachment";
+          if (debugDumps < 3) {
+            debugDumps++;
+            fs.writeFileSync(
+              path.join(OUT_DIR, `debug-${safeName(gameKey)}.json`),
+              JSON.stringify(msg, null, 2)
+            );
+          }
           continue;
         }
-        const imgRes = await fetch(attachment.url);
+        const imgRes = await fetch(imageUrl);
         if (!imgRes.ok) {
           lastErr = `image HTTP ${imgRes.status}`;
           continue;
