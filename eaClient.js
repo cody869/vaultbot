@@ -425,12 +425,16 @@ async function createEAClient(token, session) {
         componentName: "franchisemode",
       }),
 
-    toggleAutoPilot: (leagueId, toggleAutoPilotUserId, actionTimeout = 0) =>
+    // actionTimeout's name is decompiled straight from the app and reads
+    // like seconds, but confirmed live: the in-game autopilot picker only
+    // offers week increments, and this value drives that same picker -- so
+    // despite the name, the unit here is weeks, not seconds.
+    toggleAutoPilot: (leagueId, toggleAutoPilotUserId, actionTimeoutWeeks = 0) =>
       sendBlazeRequest(token, sessionBox, {
         commandName: "Mobile_UserAdmin_ToggleAutoPilot",
         componentId: 2060,
         commandId: 0,
-        requestPayload: { leagueId, actionTimeout, toggleAutoPilotUserId },
+        requestPayload: { leagueId, actionTimeout: actionTimeoutWeeks, toggleAutoPilotUserId },
         componentName: "franchisemode",
       }),
 

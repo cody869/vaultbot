@@ -84,7 +84,7 @@ export const adminCommandBuilder = new SlashCommandBuilder()
       .addIntegerOption((o) =>
         o.setName("team").setDescription("Start typing a team name, then pick from the list").setRequired(true).setAutocomplete(true)
       )
-      .addIntegerOption((o) => o.setName("timeout").setDescription("Action timeout in seconds (0 = default)"))
+      .addIntegerOption((o) => o.setName("weeks").setDescription("Autopilot duration in weeks (0 = default/indefinite) -- matches the in-game picker, not seconds"))
   )
   .addSubcommand((sub) =>
     sub
@@ -344,8 +344,8 @@ export async function handleAdminCommand(interaction) {
       }
       case "toggle-autopilot": {
         const { client, leagueId, blazeUserId, label } = await resolveTarget(interaction);
-        const timeout = interaction.options.getInteger("timeout") ?? 0;
-        await client.toggleAutoPilot(leagueId, blazeUserId, timeout);
+        const weeks = interaction.options.getInteger("weeks") ?? 0;
+        await client.toggleAutoPilot(leagueId, blazeUserId, weeks);
         await interaction.editReply(`Toggled autopilot for **${label}**.`);
         break;
       }
