@@ -210,7 +210,7 @@ async function postCard(client, g, standingsRows) {
 
   const png = await renderScorebugCard({
     week: g.week, teamA, teamB,
-    contributors: await getGameContributors(g.scheduleId, g.cycle),
+    contributors: await getGameContributors(g.scheduleId, g.cycle, g.season_number, g.week),
   });
   const filename = `scorebug-${awayAbbr}-${homeAbbr}-wk${g.week ?? "x"}.png`;
   const file = new AttachmentBuilder(png, { name: filename });
@@ -328,7 +328,7 @@ async function tick(client, { seed = false } = {}) {
     if (waitedMs < STATS_MAX_WAIT_MS) {
       let completeness;
       try {
-        completeness = await getGameStatsCompleteness(g.scheduleId, g.cycle);
+        completeness = await getGameStatsCompleteness(g.scheduleId, g.cycle, g.season_number, g.week);
       } catch (err) {
         console.error(`[SCOREBUG] stats completeness check failed for ${key}: ${err.message}`);
         continue; // treat an unconfirmed check the same as "not ready yet"

@@ -39,18 +39,33 @@ function recordFor(standingsRows, teamAbbr) {
 // live entity schemas, not guessed. team_abbrName lives directly on each
 // WeeklyStats row (no roster join needed).
 //
+// schedule_id is NOT globally unique on its own -- confirmed live: the same
+// schedule_id (545784077) was reused for two entirely unrelated games,
+// season 84 week 15 (Chargers @ 49ers) and season 85 week 1 (Eagles @
+// Patriots). That collision let an unrelated game's stats leak into this
+// one's contributor strip (Brock Purdy/De'Zhaun Stribling showing up on an
+// Eagles @ Patriots scorebug). WeeklyStats.season_index/week_index are what
+// actually disambiguate -- both rows share schedule_id but season_index
+// 84 vs 85 and week_index 15 vs 1. Every row is now required to match the
+// game's season_number/week too, not just schedule_id+cycle.
+//
 // Server-side filters aren't always honored (same caveat vault.js's other
 // readers work around), so this tries a narrow request first and re-checks
 // every row in memory regardless -- a false-positive from an ignored filter
 // never slips through. Shared by getGameContributors() and
 // getGameStatsCompleteness() so a caller checking both only fetches once.
-async function fetchGameStatsRows(scheduleId, cycle) {
+async function fetchGameStatsRows(scheduleId, cycle, seasonNumber, week) {
   if (scheduleId == null) return [];
+
+  const matches = (r) =>
+    r.schedule_id === scheduleId &&
+    r.season_index === seasonNumber &&
+    r.week_index === week;
 
   let rows;
   try {
     rows = await list("WeeklyStats", { schedule_id: scheduleId });
-    rows = rows.filter((r) => r.schedule_id === scheduleId);
+    rows = rows.filter(matches);
   } catch (err) {
     console.error(`[SCOREBUG] WeeklyStats fetch failed: ${err.message}`);
     return [];
@@ -61,7 +76,7 @@ async function fetchGameStatsRows(scheduleId, cycle) {
     // honored, so fall back to a cycle-scoped broad fetch and filter here.
     try {
       const broad = await list("WeeklyStats", { cycle }, { limit: 5000 });
-      rows = broad.filter((r) => r.schedule_id === scheduleId);
+      rows = broad.filter(matches);
     } catch (err) {
       console.error(`[SCOREBUG] WeeklyStats broad fetch failed: ${err.message}`);
       return [];
@@ -90,8 +105,8 @@ const COMPLETENESS_FIELDS = {
  * than send it with an incomplete stat strip -- confirmed live: cards were
  * going out before all four categories had landed.
  */
-export async function getGameStatsCompleteness(scheduleId, cycle) {
-  const rows = await fetchGameStatsRows(scheduleId, cycle);
+export async function getGameStatsCompleteness(scheduleId, cycle, seasonNumber, week) {
+  const rows = await fetchGameStatsRows(scheduleId, cycle, seasonNumber, week);
   const missing = Object.entries(COMPLETENESS_FIELDS)
     .filter(([, field]) => !rows.some((r) => (r[field] ?? 0) > 0))
     .map(([name]) => name);
@@ -99,8 +114,8 @@ export async function getGameStatsCompleteness(scheduleId, cycle) {
 }
 
 // Top passer/rusher/receiver for one game, read from WeeklyStats.
-export async function getGameContributors(scheduleId, cycle) {
-  const rows = await fetchGameStatsRows(scheduleId, cycle);
+export async function getGameContributors(scheduleId, cycle, seasonNumber, week) {
+  const rows = await fetchGameStatsRows(scheduleId, cycle, seasonNumber, week);
   if (!rows.length) return [];
 
   const topBy = (field, qualifyField) => {
@@ -175,7 +190,7 @@ export async function buildScorebugAttachments(scoresData, standingsRows) {
       : { abbr: homeAbbr, score: g.homeScore, record: recordFor(standingsRows, homeAbbr) };
 
     try {
-      const contributors = await getGameContributors(g.scheduleId, g.cycle);
+      const contributors = await getGameContributors(g.scheduleId, g.cycle, scoresData.season, week);
       const png = await renderScorebugCard({ week, teamA, teamB, contributors });
       attachments.push(
         new AttachmentBuilder(png, {
