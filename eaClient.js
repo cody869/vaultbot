@@ -430,7 +430,7 @@ async function createEAClient(token, session) {
         commandName: "Mobile_UserAdmin_ToggleAutoPilot",
         componentId: 2060,
         commandId: 0,
-        requestPayload: { leagueId, actionTimeout, ToggleAutoPilotUserId: toggleAutoPilotUserId },
+        requestPayload: { leagueId, actionTimeout, toggleAutoPilotUserId },
         componentName: "franchisemode",
       }),
 
