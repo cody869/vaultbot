@@ -56,7 +56,7 @@ async function renderSuspensionCard(s) {
   const [fonts, logo] = await Promise.all([loadFonts(), loadLogoDataUri(team.logoUrl)]);
 
   const headline = isWarning ? 'WARNING' : 'SUSPENDED';
-  const headlineColor = isWarning ? AMBER : RED;
+  const headlineColor = isWarning ? AMBER : '#FFFFFF';
 
   const badgeText = isWarning ? 'WARNING' : `${s.games} GAME${s.games === 1 ? '' : 'S'}`;
   const badgeBg = isWarning ? AMBER : RED;
