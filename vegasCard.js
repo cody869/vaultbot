@@ -12,10 +12,29 @@ import { getTeam } from './teamLogos.js';
 import { loadFonts, loadLogoDataUri, GOLD, DARK_BG } from './cardKit.js';
 
 const W = 900;
-const HEADER_H = 84;
+const HERO_H = 210;
 const ROW_H = 96;
 const FOOTER_H = 56;
-const LOGO_SIZE = 360;
+const HERO_LOGO = 300;
+const SEAM_ANGLE = 10;
+
+// The XCFL Vault's own icon -- already public (used as the app's favicon /
+// og:image), so it's a safe, confirmed-real image to use as the card's
+// center badge. There is no real helmet art anywhere in this project (see
+// renderOddsCard's comment below) -- this stands in for the "center circle
+// badge" from the reference NFL/Prime graphic instead.
+const LEAGUE_BADGE_URL = 'https://media.base44.com/images/public/69d09944c8636f39abaa7ef0/ea59f960b_Untitleddesign10.png';
+
+// Diagonal seam geometry, same technique scorebugCard.js already uses and
+// has confirmed renders cleanly through Satori -- a big rotated rectangle
+// sized/positioned so its own internal gradient lines up into a continuous
+// seam across the card at `angleDeg`.
+function seamRectGeometry(angleDeg, sectionH, size = 700) {
+  const rad = (angleDeg * Math.PI) / 180;
+  const cx = W / 2 + (size / 2) * Math.cos(rad);
+  const cy = sectionH / 2 + (size / 2) * Math.sin(rad);
+  return { left: cx - size / 2, top: cy - size / 2, size };
+}
 
 function americanOdds(n) {
   if (n == null) return '—';
@@ -100,15 +119,111 @@ function marketRow(label, left, right) {
 async function renderOddsCard(line) {
   const home = getTeam(line.homeAbbr);
   const away = getTeam(line.awayAbbr);
-  const H = HEADER_H + ROW_H * 3 + FOOTER_H + 32;
+  const H = HERO_H + ROW_H * 3 + FOOTER_H + 16;
 
-  const [fonts, homeLogo, awayLogo] = await Promise.all([
+  // The reference graphic's helmet art doesn't exist anywhere in this
+  // project -- neither the app's pixel-art set (`/helmets/*.png`, which
+  // turned out to be a dead path with no actual files behind it, in the app
+  // repo or its build output) nor a photoreal source. The one asset that IS
+  // confirmed real end-to-end is this bot's own GitHub-hosted team crest
+  // logos (teamLogos.js), already proven through this exact render
+  // pipeline -- so the diagonal hero below uses those, sized up as the
+  // hero art, instead of a helmet.
+  const [fonts, homeLogo, awayLogo, badgeLogo] = await Promise.all([
     loadFonts(),
     loadLogoDataUri(home.logoUrl),
     loadLogoDataUri(away.logoUrl),
+    loadLogoDataUri(LEAGUE_BADGE_URL),
   ]);
 
   const spreadAwayValue = line.spreadHome != null ? -line.spreadHome : null;
+  const seam = seamRectGeometry(SEAM_ANGLE, HERO_H);
+
+  const hero = {
+    type: 'div',
+    props: {
+      style: {
+        width: W, height: HERO_H, display: 'flex', position: 'relative',
+        overflow: 'hidden', background: `linear-gradient(90deg, ${away.color} 0%, #000000 78%)`,
+      },
+      children: [
+        {
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', display: 'flex',
+              width: seam.size, height: seam.size,
+              top: seam.top, left: seam.left,
+              transform: `rotate(${SEAM_ANGLE}deg)`,
+              background: `linear-gradient(90deg, #000000 22%, ${home.color} 100%)`,
+            },
+          },
+        },
+        {
+          type: 'img',
+          props: {
+            src: awayLogo, width: HERO_LOGO, height: HERO_LOGO,
+            style: { position: 'absolute', top: HERO_H - HERO_LOGO * 0.82, left: -HERO_LOGO * 0.2, opacity: 0.35 },
+          },
+        },
+        {
+          type: 'img',
+          props: {
+            src: homeLogo, width: HERO_LOGO, height: HERO_LOGO,
+            style: { position: 'absolute', top: HERO_H - HERO_LOGO * 0.82, right: -HERO_LOGO * 0.2, opacity: 0.35 },
+          },
+        },
+        {
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', display: 'flex', top: 16, left: '50%',
+              transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.75)',
+              fontFamily: 'Barlow', fontSize: 15, letterSpacing: 2,
+            },
+            children: [
+              line.week != null ? `WEEK ${line.week}` : '',
+              line.matchNumber != null ? ` · #${line.matchNumber}` : '',
+            ].join(''),
+          },
+        },
+        {
+          type: 'div',
+          props: {
+            style: { position: 'absolute', display: 'flex', flexDirection: 'column', top: 48, left: 30 },
+            children: [
+              { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 64, lineHeight: 1 }, children: line.awayAbbr } },
+              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.75)', fontFamily: 'Barlow', fontSize: 16, marginTop: 4 }, children: away.name || '' } },
+            ],
+          },
+        },
+        {
+          type: 'div',
+          props: {
+            style: { position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', top: 48, right: 30 },
+            children: [
+              { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 64, lineHeight: 1 }, children: line.homeAbbr } },
+              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.75)', fontFamily: 'Barlow', fontSize: 16, marginTop: 4 }, children: home.name || '' } },
+            ],
+          },
+        },
+        {
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              top: HERO_H - 40, left: '50%', transform: 'translate(-50%, -50%)',
+              width: 68, height: 68, borderRadius: 34,
+              background: DARK_BG, border: `3px solid ${GOLD}`,
+            },
+            children: badgeLogo
+              ? { type: 'img', props: { src: badgeLogo, width: 44, height: 44, style: { display: 'flex', borderRadius: 22 } } }
+              : { type: 'div', props: { style: { display: 'flex', color: GOLD, fontFamily: 'Anton', fontSize: 20 }, children: 'VS' } },
+          },
+        },
+      ],
+    },
+  };
 
   const tree = {
     type: 'div',
@@ -119,51 +234,7 @@ async function renderOddsCard(line) {
         border: `3px solid ${GOLD}`, background: DARK_BG,
       },
       children: [
-        {
-          type: 'img',
-          props: {
-            src: awayLogo, width: LOGO_SIZE, height: LOGO_SIZE,
-            style: { position: 'absolute', top: -40, left: -LOGO_SIZE * 0.25, opacity: 0.1 },
-          },
-        },
-        {
-          type: 'img',
-          props: {
-            src: homeLogo, width: LOGO_SIZE, height: LOGO_SIZE,
-            style: { position: 'absolute', top: -40, right: -LOGO_SIZE * 0.25, opacity: 0.1 },
-          },
-        },
-        {
-          type: 'div',
-          props: {
-            style: {
-              display: 'flex', flexDirection: 'column', height: HEADER_H,
-              padding: '14px 32px 0', position: 'relative',
-            },
-            children: [
-              line.week != null && {
-                type: 'div',
-                props: {
-                  style: {
-                    display: 'flex', color: 'rgba(255,255,255,0.6)', fontFamily: 'Barlow',
-                    fontSize: 14, letterSpacing: 2,
-                  },
-                  children: [
-                    `WEEK ${line.week}`,
-                    line.matchNumber != null ? ` · #${line.matchNumber}` : '',
-                  ].join(''),
-                },
-              },
-              {
-                type: 'div',
-                props: {
-                  style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 34, marginTop: 2 },
-                  children: `${away.name || line.awayAbbr} @ ${home.name || line.homeAbbr}`,
-                },
-              },
-            ].filter(Boolean),
-          },
-        },
+        hero,
         {
           type: 'div',
           props: {
