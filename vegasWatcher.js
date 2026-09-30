@@ -16,7 +16,7 @@ import { AttachmentBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, Butto
 import { list, updateEntity, invokeFunction, pollCached } from "./vault.js";
 import { isRateLimited } from "./base44Pacer.js";
 import { withFileLock } from "./fileLock.js";
-import { renderOddsCard } from "./vegasCard.js";
+import { renderOddsCard, renderSettlementCard } from "./vegasCard.js";
 import { abbrFromName } from "./emoji.js";
 import { isGameFinal } from "./scorebugHelper.js";
 
@@ -102,17 +102,36 @@ async function postSettlementSummary(client, line, game, result) {
   const lost = result.graded.filter((g) => g.status === "lost").length;
   const push = result.graded.filter((g) => g.status === "push").length;
 
-  const embed = new EmbedBuilder()
-    .setTitle(`${line.away_team} @ ${line.home_team} — Settled`)
-    .setDescription(`Final: ${line.away_team} ${game.user2_score} @ ${line.home_team} ${game.user1_score}`)
-    .addFields(
-      { name: "Won", value: String(won), inline: true },
-      { name: "Lost", value: String(lost), inline: true },
-      { name: "Push", value: String(push), inline: true }
-    )
-    .setColor(0xd4a843);
+  const homeAbbr = abbrFromName(line.home_team);
+  const awayAbbr = abbrFromName(line.away_team);
 
-  await channel.send({ embeds: [embed] });
+  try {
+    const png = await renderSettlementCard({
+      homeAbbr, awayAbbr,
+      homeScore: game.user1_score,
+      awayScore: game.user2_score,
+      week: line.week,
+      matchNumber: line.match_number,
+      won, lost, push,
+    });
+    const filename = `vegas-final-${awayAbbr}-${homeAbbr}-wk${line.week ?? "x"}.png`;
+    await channel.send({ files: [new AttachmentBuilder(png, { name: filename })] });
+  } catch (err) {
+    // A card render hiccup shouldn't hide that the line actually settled --
+    // fall back to the plain-text summary so the result still posts.
+    console.error(`[VEGAS] settlement card render failed for ${line.id}, falling back to embed: ${err.message}`);
+    const embed = new EmbedBuilder()
+      .setTitle(`${line.away_team} @ ${line.home_team} — Settled`)
+      .setDescription(`Final: ${line.away_team} ${game.user2_score} @ ${line.home_team} ${game.user1_score}`)
+      .addFields(
+        { name: "Won", value: String(won), inline: true },
+        { name: "Lost", value: String(lost), inline: true },
+        { name: "Push", value: String(push), inline: true }
+      )
+      .setColor(0xd4a843);
+    await channel.send({ embeds: [embed] });
+  }
+
   console.log(`[VEGAS] settled line ${line.id}: ${won} won, ${lost} lost, ${push} push`);
 }
 

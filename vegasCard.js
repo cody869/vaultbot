@@ -256,6 +256,146 @@ function marketRow(label, left, right) {
   };
 }
 
+// Builds the diagonal-free hero banner shared by the odds card and the
+// settlement card: gradient (dipping dark in the middle for label
+// contrast) + grain + smoke, player/helmet art bottom-anchored on each
+// side, big abbreviation lettering, and the league badge centered on the
+// seam. `topLabel` is whatever short string sits top-center (the odds
+// card's "WEEK X · #N", the settlement card's "FINAL").
+//
+// Player art is never mirrored -- it carries a readable jersey number, so
+// flipping it would print the number backwards (confirmed on a test
+// render). Whichever pose the art was generated in is however it prints.
+// The helmet fallback has no such problem (no legible text on it) and
+// keeps the old flip-to-face-center + slight rotate treatment.
+function buildHero({ away, home, awayAbbr, homeAbbr, awayPlayer, homePlayer, awayHelmet, homeHelmet, badgeLogo, noiseTexture, smokeTexture, topLabel }) {
+  const heroArt = (abbr, playerSrc, helmetSrc, side) => {
+    if (playerSrc) {
+      return {
+        type: 'div',
+        props: {
+          style: { display: 'flex' },
+          children: { type: 'img', props: { src: playerSrc, height: PLAYER_H, style: { display: 'flex' } } },
+        },
+      };
+    }
+    if (!helmetSrc) return { type: 'div', props: { style: { display: 'flex', width: 1 } } };
+    const flip = side === 'home';
+    return {
+      type: 'div',
+      props: {
+        style: { display: 'flex', transform: `rotate(${flip ? 4 : -4}deg)` },
+        children: {
+          type: 'div',
+          props: {
+            style: { display: 'flex', transform: flip ? 'scaleX(-1)' : 'scaleX(1)' },
+            children: { type: 'img', props: { src: helmetSrc, width: FALLBACK_HELMET_W, height: FALLBACK_HELMET_H, style: { display: 'flex' } } },
+          },
+        },
+      },
+    };
+  };
+
+  const abbrBox = (abbr, align) => ({
+    type: 'div',
+    props: {
+      style: {
+        display: 'flex', flex: 1, flexDirection: 'column',
+        alignItems: align, justifyContent: 'center',
+      },
+      children: {
+        type: 'div',
+        props: {
+          style: {
+            display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 68,
+            lineHeight: 1, textShadow: '0 3px 10px rgba(0,0,0,0.5)',
+          },
+          children: abbr,
+        },
+      },
+    },
+  });
+
+  // Muted (blended toward the card's dark background) rather than the raw
+  // brand hex, which read as a harsh, glossy wash across the whole banner.
+  const awayBg = muteColor(away.color);
+  const homeBg = muteColor(home.color);
+
+  return {
+    type: 'div',
+    props: {
+      style: {
+        width: W, height: HERO_H, display: 'flex', position: 'relative',
+        // Each side holds its own solid team color, dipping to the card's
+        // dark background across a wide band in the middle instead of
+        // blending straight from one team color into the other. A plain
+        // two-stop lerp put a long muddy, unpredictably-lit patch right
+        // behind the center label (RGB interpolation isn't perceptually
+        // even, so how readable that patch was depended on which two
+        // colors happened to be playing) -- dipping to a color that's
+        // always dark guarantees the label has contrast no matter the
+        // matchup.
+        overflow: 'hidden',
+        background: `linear-gradient(90deg, ${awayBg} 0%, ${awayBg} 25%, ${DARK_BG} 44%, ${DARK_BG} 56%, ${homeBg} 75%, ${homeBg} 100%)`,
+      },
+      children: [
+        // Flat per-pixel grain, low alpha, sized to exactly cover the hero
+        // -- breaks up what would otherwise be a perfectly smooth gradient
+        // fill, same idea as film grain over a color wash.
+        { type: 'img', props: { src: noiseTexture, width: W, height: HERO_H, style: { position: 'absolute', top: 0, left: 0, display: 'flex' } } },
+        // Soft smoke rising from the floor of the hero, mostly transparent.
+        { type: 'img', props: { src: smokeTexture, width: W, height: HERO_H, style: { position: 'absolute', top: 0, left: 0, display: 'flex' } } },
+        topLabel && {
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', display: 'flex', top: 10, left: '50%',
+              transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.7)',
+              fontFamily: 'Barlow', fontSize: 13, letterSpacing: 2,
+            },
+            children: topLabel,
+          },
+        },
+        {
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', display: 'flex', alignItems: 'flex-end',
+              top: 0, left: 0, right: 0, bottom: 0, padding: '0 28px',
+            },
+            children: [
+              heroArt(awayAbbr, awayPlayer, awayHelmet, 'away'),
+              abbrBox(awayAbbr, 'flex-start'),
+              abbrBox(homeAbbr, 'flex-end'),
+              heroArt(homeAbbr, homePlayer, homeHelmet, 'home'),
+            ],
+          },
+        },
+        // Positioned independently of the row above, not as a flex sibling
+        // between the two abbreviation boxes -- player art poses vary a lot
+        // in natural width (a standing pose vs. a full-stretch dive), which
+        // would skew the two flex:1 boxes unevenly and drag the badge off
+        // true center. Anchoring it to the hero's horizontal center instead
+        // keeps it on the split line no matter how lopsided the two side's
+        // art is. No card/border around it -- just the mark itself, sized up
+        // a bit so it still reads clearly without one.
+        {
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              left: '50%', bottom: 34, transform: 'translateX(-50%)',
+            },
+            children: badgeLogo
+              ? { type: 'img', props: { src: badgeLogo, width: 104, height: 104, style: { display: 'flex' } } }
+              : { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 26, textShadow: '0 3px 10px rgba(0,0,0,0.5)' }, children: 'VS' } },
+          },
+        },
+      ].filter(Boolean),
+    },
+  };
+}
+
 /**
  * @param {object} line
  * @param {number} [line.matchNumber]
@@ -310,145 +450,13 @@ async function renderOddsCard(line) {
 
   const spreadAwayValue = line.spreadHome != null ? -line.spreadHome : null;
 
-  // Smooth gradient banner, away color to home color -- simpler and more
-  // legible than the earlier diagonal-seam treatment. Player/helmet |
-  // abbreviation | badge | abbreviation | player/helmet laid out as a
-  // single flex row so everything stays bottom-anchored and evenly
-  // spaced without hand-tuned coordinates.
-  //
-  // Player art is never mirrored -- it carries a readable jersey number, so
-  // flipping it would print the number backwards (confirmed on a test
-  // render). Whichever pose the art was generated in is however it prints.
-  // The helmet fallback has no such problem (no legible text on it) and
-  // keeps the old flip-to-face-center + slight rotate treatment.
-  const heroArt = (abbr, playerSrc, helmetSrc, side) => {
-    if (playerSrc) {
-      return {
-        type: 'div',
-        props: {
-          style: { display: 'flex' },
-          children: { type: 'img', props: { src: playerSrc, height: PLAYER_H, style: { display: 'flex' } } },
-        },
-      };
-    }
-    if (!helmetSrc) return { type: 'div', props: { style: { display: 'flex', width: 1 } } };
-    const flip = side === 'home';
-    return {
-      type: 'div',
-      props: {
-        style: { display: 'flex', transform: `rotate(${flip ? 4 : -4}deg)` },
-        children: {
-          type: 'div',
-          props: {
-            style: { display: 'flex', transform: flip ? 'scaleX(-1)' : 'scaleX(1)' },
-            children: { type: 'img', props: { src: helmetSrc, width: FALLBACK_HELMET_W, height: FALLBACK_HELMET_H, style: { display: 'flex' } } },
-          },
-        },
-      },
-    };
-  };
-
-  const abbrBox = (abbr, align) => ({
-    type: 'div',
-    props: {
-      style: {
-        display: 'flex', flex: 1, flexDirection: 'column',
-        alignItems: align, justifyContent: 'center',
-      },
-      children: {
-        type: 'div',
-        props: {
-          style: {
-            display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 68,
-            lineHeight: 1, textShadow: '0 3px 10px rgba(0,0,0,0.5)',
-          },
-          children: abbr,
-        },
-      },
-    },
+  const hero = buildHero({
+    away, home, awayAbbr: line.awayAbbr, homeAbbr: line.homeAbbr,
+    awayPlayer, homePlayer, awayHelmet, homeHelmet, badgeLogo, noiseTexture, smokeTexture,
+    topLabel: line.week != null
+      ? [`WEEK ${line.week}`, line.matchNumber != null ? ` · #${line.matchNumber}` : ''].join('')
+      : null,
   });
-
-  // Muted (blended toward the card's dark background) rather than the raw
-  // brand hex, which read as a harsh, glossy wash across the whole banner.
-  const awayBg = muteColor(away.color);
-  const homeBg = muteColor(home.color);
-
-  const hero = {
-    type: 'div',
-    props: {
-      style: {
-        width: W, height: HERO_H, display: 'flex', position: 'relative',
-        // Each side holds its own solid team color, dipping to the card's
-        // dark background across a wide band in the middle instead of
-        // blending straight from one team color into the other. A plain
-        // two-stop lerp put a long muddy, unpredictably-lit patch right
-        // behind the center label (RGB interpolation isn't perceptually
-        // even, so how readable that patch was depended on which two
-        // colors happened to be playing) -- dipping to a color that's
-        // always dark guarantees the label has contrast no matter the
-        // matchup.
-        overflow: 'hidden',
-        background: `linear-gradient(90deg, ${awayBg} 0%, ${awayBg} 25%, ${DARK_BG} 44%, ${DARK_BG} 56%, ${homeBg} 75%, ${homeBg} 100%)`,
-      },
-      children: [
-        // Flat per-pixel grain, low alpha, sized to exactly cover the hero
-        // -- breaks up what would otherwise be a perfectly smooth gradient
-        // fill, same idea as film grain over a color wash.
-        { type: 'img', props: { src: noiseTexture, width: W, height: HERO_H, style: { position: 'absolute', top: 0, left: 0, display: 'flex' } } },
-        // Soft smoke rising from the floor of the hero, mostly transparent.
-        { type: 'img', props: { src: smokeTexture, width: W, height: HERO_H, style: { position: 'absolute', top: 0, left: 0, display: 'flex' } } },
-        line.week != null && {
-          type: 'div',
-          props: {
-            style: {
-              position: 'absolute', display: 'flex', top: 10, left: '50%',
-              transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.7)',
-              fontFamily: 'Barlow', fontSize: 13, letterSpacing: 2,
-            },
-            children: [
-              `WEEK ${line.week}`,
-              line.matchNumber != null ? ` · #${line.matchNumber}` : '',
-            ].join(''),
-          },
-        },
-        {
-          type: 'div',
-          props: {
-            style: {
-              position: 'absolute', display: 'flex', alignItems: 'flex-end',
-              top: 0, left: 0, right: 0, bottom: 0, padding: '0 28px',
-            },
-            children: [
-              heroArt(line.awayAbbr, awayPlayer, awayHelmet, 'away'),
-              abbrBox(line.awayAbbr, 'flex-start'),
-              abbrBox(line.homeAbbr, 'flex-end'),
-              heroArt(line.homeAbbr, homePlayer, homeHelmet, 'home'),
-            ],
-          },
-        },
-        // Positioned independently of the row above, not as a flex sibling
-        // between the two abbreviation boxes -- player art poses vary a lot
-        // in natural width (a standing pose vs. a full-stretch dive), which
-        // would skew the two flex:1 boxes unevenly and drag the badge off
-        // true center. Anchoring it to the hero's horizontal center instead
-        // keeps it on the split line no matter how lopsided the two side's
-        // art is. No card/border around it -- just the mark itself, sized up
-        // a bit so it still reads clearly without one.
-        {
-          type: 'div',
-          props: {
-            style: {
-              position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              left: '50%', bottom: 34, transform: 'translateX(-50%)',
-            },
-            children: badgeLogo
-              ? { type: 'img', props: { src: badgeLogo, width: 104, height: 104, style: { display: 'flex' } } }
-              : { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 26, textShadow: '0 3px 10px rgba(0,0,0,0.5)' }, children: 'VS' } },
-          },
-        },
-      ].filter(Boolean),
-    },
-  };
 
   const tree = {
     type: 'div',
@@ -632,4 +640,110 @@ async function renderBetReceiptCard(bet) {
   return resvg.render().asPng();
 }
 
-export { renderOddsCard, renderBetReceiptCard };
+/**
+ * Posted once a featured line's game goes final -- reuses the odds card's
+ * hero (same gradient/grain/smoke/player-art treatment, "FINAL" in place
+ * of the week label) instead of a separate plain-text embed, so a settled
+ * result still reads as one of these cards.
+ *
+ * @param {object} result
+ * @param {string} result.awayAbbr
+ * @param {string} result.homeAbbr
+ * @param {number} result.awayScore
+ * @param {number} result.homeScore
+ * @param {number} [result.week]
+ * @param {number} [result.matchNumber]
+ * @param {number} result.won
+ * @param {number} result.lost
+ * @param {number} result.push
+ * @returns {Promise<Buffer>} PNG bytes
+ */
+async function renderSettlementCard(result) {
+  const home = getTeam(result.homeAbbr);
+  const away = getTeam(result.awayAbbr);
+  const STAT_H = 175;
+  const H = HERO_H + STAT_H;
+
+  const [fonts, awayPlayer, homePlayer, badgeLogo, noiseTexture, smokeTexture] = await Promise.all([
+    loadFonts(),
+    loadPlayerDataUri(result.awayAbbr),
+    loadPlayerDataUri(result.homeAbbr),
+    loadLogoDataUri(LEAGUE_BADGE_URL),
+    getNoiseTexture(),
+    getSmokeTexture(),
+  ]);
+  const [awayHelmet, homeHelmet] = await Promise.all([
+    awayPlayer ? null : loadHelmetDataUri(result.awayAbbr).catch(() => null),
+    homePlayer ? null : loadHelmetDataUri(result.homeAbbr).catch(() => null),
+  ]);
+
+  const hero = buildHero({
+    away, home, awayAbbr: result.awayAbbr, homeAbbr: result.homeAbbr,
+    awayPlayer, homePlayer, awayHelmet, homeHelmet, badgeLogo, noiseTexture, smokeTexture,
+    topLabel: [
+      'FINAL',
+      result.week != null ? `WEEK ${result.week}` : null,
+      result.matchNumber != null ? `#${result.matchNumber}` : null,
+    ].filter(Boolean).join(' · '),
+  });
+
+  const awayWon = result.awayScore > result.homeScore;
+  const homeWon = result.homeScore > result.awayScore;
+  const scoreColor = (won) => (won ? GOLD : 'rgba(255,255,255,0.55)');
+
+  const statTile = (label, value, color) => ({
+    type: 'div',
+    props: {
+      style: {
+        display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1,
+        background: 'rgba(255,255,255,0.05)', borderRadius: 8, padding: '12px 4px', gap: 4,
+      },
+      children: [
+        { type: 'div', props: { style: { display: 'flex', color, fontFamily: 'Anton', fontSize: 32 }, children: String(value) } },
+        { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.55)', fontFamily: 'Barlow', fontSize: 13, letterSpacing: 2 }, children: label } },
+      ],
+    },
+  });
+
+  const tree = {
+    type: 'div',
+    props: {
+      style: {
+        width: W, height: H, display: 'flex', flexDirection: 'column',
+        position: 'relative', overflow: 'hidden', borderRadius: 10,
+        border: `3px solid ${GOLD}`, background: DARK_BG,
+      },
+      children: [
+        hero,
+        {
+          type: 'div',
+          props: {
+            style: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 18, padding: '18px 32px 6px' },
+            children: [
+              { type: 'div', props: { style: { display: 'flex', color: scoreColor(awayWon), fontFamily: 'Anton', fontSize: 30 }, children: `${away.name || result.awayAbbr} ${result.awayScore}` } },
+              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.4)', fontFamily: 'Barlow', fontSize: 20 }, children: '—' } },
+              { type: 'div', props: { style: { display: 'flex', color: scoreColor(homeWon), fontFamily: 'Anton', fontSize: 30 }, children: `${home.name || result.homeAbbr} ${result.homeScore}` } },
+            ],
+          },
+        },
+        {
+          type: 'div',
+          props: {
+            style: { display: 'flex', gap: 12, padding: '8px 32px 20px' },
+            children: [
+              statTile('WON', result.won, '#3FA34D'),
+              statTile('LOST', result.lost, '#C60C30'),
+              statTile('PUSH', result.push, GOLD),
+            ],
+          },
+        },
+      ],
+    },
+  };
+
+  const svg = await satori(tree, { width: W, height: H, fonts });
+  const resvg = new Resvg(svg, { fitTo: { mode: 'width', value: W * 2 } });
+  return resvg.render().asPng();
+}
+
+export { renderOddsCard, renderBetReceiptCard, renderSettlementCard };
