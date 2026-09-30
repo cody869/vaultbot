@@ -357,22 +357,30 @@ async function renderOddsCard(line) {
             children: [
               heroArt(line.awayAbbr, awayPlayer, awayHelmet, 'away'),
               abbrBox(line.awayAbbr, 'flex-start'),
-              {
-                type: 'div',
-                props: {
-                  style: {
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    width: 72, height: 72, borderRadius: 12, flexShrink: 0, marginBottom: 40,
-                    background: '#FFFFFF', border: `3px solid ${GOLD}`,
-                  },
-                  children: badgeLogo
-                    ? { type: 'img', props: { src: badgeLogo, width: 48, height: 48, style: { display: 'flex', borderRadius: 24 } } }
-                    : { type: 'div', props: { style: { display: 'flex', color: DARK_BG, fontFamily: 'Anton', fontSize: 18 }, children: 'VS' } },
-                },
-              },
               abbrBox(line.homeAbbr, 'flex-end'),
               heroArt(line.homeAbbr, homePlayer, homeHelmet, 'home'),
             ],
+          },
+        },
+        // Positioned independently of the row above, not as a flex sibling
+        // between the two abbreviation boxes -- player art poses vary a lot
+        // in natural width (a standing pose vs. a full-stretch dive), which
+        // made the two flex:1 boxes uneven widths and dragged the badge off
+        // the seam's own fixed geometric center. Anchoring it to the hero's
+        // true horizontal center keeps it on the seam no matter how lopsided
+        // the two side's art is.
+        {
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              left: '50%', bottom: 40, transform: 'translateX(-50%)',
+              width: 72, height: 72, borderRadius: 12,
+              background: '#FFFFFF', border: `3px solid ${GOLD}`,
+            },
+            children: badgeLogo
+              ? { type: 'img', props: { src: badgeLogo, width: 48, height: 48, style: { display: 'flex', borderRadius: 24 } } }
+              : { type: 'div', props: { style: { display: 'flex', color: DARK_BG, fontFamily: 'Anton', fontSize: 18 }, children: 'VS' } },
           },
         },
       ].filter(Boolean),
