@@ -85,6 +85,41 @@ async function getNoiseTexture() {
   return noiseTextureCache;
 }
 
+// Soft, mostly-transparent smoke rising from the bottom of the hero --
+// a coarse random grid smoothed way up (bicubic resize turns blocky noise
+// into soft cloud-like blobs) with a vertical alpha falloff so it's dense
+// near the floor and fully gone by the upper third. Team-independent, so
+// it's generated once and cached like the grain layer.
+let smokeTextureCache = null;
+async function getSmokeTexture() {
+  if (smokeTextureCache) return smokeTextureCache;
+  const gw = 22, gh = 14;
+  const grid = Buffer.alloc(gw * gh * 4);
+  for (let i = 0; i < gw * gh; i++) {
+    const v = 235 + Math.floor(Math.random() * 20);
+    grid[i * 4] = v; grid[i * 4 + 1] = v; grid[i * 4 + 2] = v; grid[i * 4 + 3] = 255;
+  }
+  const { data } = await sharp(grid, { raw: { width: gw, height: gh, channels: 4 } })
+    .resize({ width: W, height: HERO_H, kernel: 'cubic' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const out = Buffer.alloc(W * HERO_H * 4);
+  for (let y = 0; y < HERO_H; y++) {
+    const fromBottom = 1 - y / HERO_H;
+    const falloff = Math.max(0, Math.min(1, (fromBottom - 0.38) / 0.62));
+    for (let x = 0; x < W; x++) {
+      const p = (y * W + x) * 4;
+      const wisp = (data[p] - 235) / 20;
+      out[p] = 255; out[p + 1] = 255; out[p + 2] = 255;
+      out[p + 3] = Math.round(falloff * (26 + wisp * 55));
+    }
+  }
+  const png = await sharp(out, { raw: { width: W, height: HERO_H, channels: 4 } }).png().toBuffer();
+  smokeTextureCache = 'data:image/png;base64,' + png.toString('base64');
+  return smokeTextureCache;
+}
+
 // The app's own pixel-art helmets (src/lib/nflTeamLogos.js's
 // teamHelmetUrl()/`<Helmet>`) -- confirmed live at the app's own domain,
 // not part of this bot's repo. Only one abbreviation differs between this
@@ -248,12 +283,13 @@ async function renderOddsCard(line) {
   // Vault hiccup here shouldn't stop the odds card itself from posting, so
   // both fail soft (no owner shown / no leaderboard strip) instead of
   // rejecting the whole render.
-  const [fonts, awayPlayer, homePlayer, badgeLogo, noiseTexture, awayMember, homeMember, leaders] = await Promise.all([
+  const [fonts, awayPlayer, homePlayer, badgeLogo, noiseTexture, smokeTexture, awayMember, homeMember, leaders] = await Promise.all([
     loadFonts(),
     loadPlayerDataUri(line.awayAbbr),
     loadPlayerDataUri(line.homeAbbr),
     loadLogoDataUri(LEAGUE_BADGE_URL),
     getNoiseTexture(),
+    getSmokeTexture(),
     findMemberByTeam(line.awayAbbr).catch(() => null),
     findMemberByTeam(line.homeAbbr).catch(() => null),
     getVegasLeaders(5).catch(() => []),
@@ -342,19 +378,25 @@ async function renderOddsCard(line) {
     props: {
       style: {
         width: W, height: HERO_H, display: 'flex', position: 'relative',
-        // Each side holds its own solid team color out to ~40%, blending
-        // only across the middle fifth -- a plain 0%-100% two-stop lerp
-        // put the long muddy middle of the blend on the darker team's
-        // side (RGB interpolation isn't perceptually even), which read as
-        // one team's color dominating the banner instead of a fair split.
+        // Each side holds its own solid team color, dipping to the card's
+        // dark background across a wide band in the middle instead of
+        // blending straight from one team color into the other. A plain
+        // two-stop lerp put a long muddy, unpredictably-lit patch right
+        // behind the center label (RGB interpolation isn't perceptually
+        // even, so how readable that patch was depended on which two
+        // colors happened to be playing) -- dipping to a color that's
+        // always dark guarantees the label has contrast no matter the
+        // matchup.
         overflow: 'hidden',
-        background: `linear-gradient(90deg, ${awayBg} 0%, ${awayBg} 40%, ${homeBg} 60%, ${homeBg} 100%)`,
+        background: `linear-gradient(90deg, ${awayBg} 0%, ${awayBg} 25%, ${DARK_BG} 44%, ${DARK_BG} 56%, ${homeBg} 75%, ${homeBg} 100%)`,
       },
       children: [
         // Flat per-pixel grain, low alpha, sized to exactly cover the hero
         // -- breaks up what would otherwise be a perfectly smooth gradient
         // fill, same idea as film grain over a color wash.
         { type: 'img', props: { src: noiseTexture, width: W, height: HERO_H, style: { position: 'absolute', top: 0, left: 0, display: 'flex' } } },
+        // Soft smoke rising from the floor of the hero, mostly transparent.
+        { type: 'img', props: { src: smokeTexture, width: W, height: HERO_H, style: { position: 'absolute', top: 0, left: 0, display: 'flex' } } },
         line.week != null && {
           type: 'div',
           props: {
