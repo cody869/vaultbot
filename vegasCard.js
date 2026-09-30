@@ -305,7 +305,13 @@ async function renderOddsCard(line) {
     props: {
       style: {
         width: W, height: HERO_H, display: 'flex', position: 'relative',
-        overflow: 'hidden', background: `linear-gradient(90deg, ${away.color} 0%, ${home.color} 100%)`,
+        // Each side holds its own solid team color out to ~40%, blending
+        // only across the middle fifth -- a plain 0%-100% two-stop lerp
+        // put the long muddy middle of the blend on the darker team's
+        // side (RGB interpolation isn't perceptually even), which read as
+        // one team's color dominating the banner instead of a fair split.
+        overflow: 'hidden',
+        background: `linear-gradient(90deg, ${away.color} 0%, ${away.color} 40%, ${home.color} 60%, ${home.color} 100%)`,
       },
       children: [
         line.week != null && {
@@ -327,7 +333,7 @@ async function renderOddsCard(line) {
           props: {
             style: {
               position: 'absolute', display: 'flex', alignItems: 'flex-end',
-              top: 0, left: 0, right: 0, bottom: 0, padding: '0 8px',
+              top: 0, left: 0, right: 0, bottom: 0, padding: '0 28px',
             },
             children: [
               heroArt(line.awayAbbr, awayPlayer, awayHelmet, 'away'),
@@ -353,7 +359,7 @@ async function renderOddsCard(line) {
               left: '50%', bottom: 34, transform: 'translateX(-50%)',
             },
             children: badgeLogo
-              ? { type: 'img', props: { src: badgeLogo, width: 80, height: 80, style: { display: 'flex' } } }
+              ? { type: 'img', props: { src: badgeLogo, width: 104, height: 104, style: { display: 'flex' } } }
               : { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 26, textShadow: '0 3px 10px rgba(0,0,0,0.5)' }, children: 'VS' } },
           },
         },
