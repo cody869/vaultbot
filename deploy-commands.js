@@ -4,6 +4,7 @@ import "dotenv/config";
 import { REST, Routes, SlashCommandBuilder } from "discord.js";
 import { fantasyCommand } from "./fantasyDeployCommands.js";
 import { adminCommandBuilder } from "./adminCommands.js";
+import { vegasCommand } from "./vegasCommands.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -213,6 +214,9 @@ export const commands = [
 
   // /fantasy and its subcommands (best ball league).
   ...fantasyCommand,
+
+  // /bet and /wallet (in-house Vegas sportsbook).
+  ...vegasCommand,
 ].map((c) => c.toJSON());
 
 // Registers the current command set with Discord. Safe to call on every

@@ -10,6 +10,15 @@ import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { startScheduleWatcher } from "./scheduleWatcher.js";
 import { startSuspensionWatcher } from "./suspensionWatcher.js";
+import { startVegasWatcher } from "./vegasWatcher.js";
+import {
+  suggestVegasLines,
+  handleBetCommand,
+  handleVegasCommand,
+  handleVegasMarketButton,
+  handleVegasSideButton,
+  handleVegasStakeModal,
+} from "./vegasCommands.js";
 import { startWeeklyDigestWatcher } from "./weeklyDigestWatcher.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams, handleForceWinButton } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
@@ -145,6 +154,9 @@ client.once(Events.ClientReady, async (c) => {
   // Posts approved 70/30 Rule suspensions to SUSPENSIONS_CHANNEL_ID once each,
   // tagging the affected owner. No-ops if that env var is unset.
   setTimeout(() => startSuspensionWatcher(c), 15_000);
+  // Posts staff-opened Vegas lines to VEGAS_CHANNEL_ID and settles them
+  // automatically once the linked Game goes final. No-ops if unset.
+  setTimeout(() => startVegasWatcher(c), 17_000);
   // Posts a stylized recap card + write-up to the scorebug channel when an
   // admin publishes a WeeklyDigest in the app. Polls slowly (default 5 min)
   // -- published rarely, by a human, no live event to track.
@@ -372,6 +384,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.respond([]);
         } catch {}
       }
+    } else if (interaction.commandName === "bet") {
+      try {
+        const focused = String(interaction.options.getFocused() ?? "");
+        await interaction.respond(await suggestVegasLines(focused));
+      } catch (err) {
+        console.error("[AUTOCOMPLETE] bet failed:", err.message);
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
     } else if (interaction.commandName === "fantasy") {
       // Serves /fantasy pick and /fantasy queue from the cached draft pool.
       // A cold pool build can take longer than Discord's 3s autocomplete
@@ -443,6 +465,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // Vegas bet wizard: market choice -> side choice (-> a modal for stake,
+  // handled separately below since showModal() needs its own branch type).
+  // Also checked before the trade catch-all.
+  if (interaction.isButton() && interaction.customId.startsWith("vegas:mkt:")) {
+    await handleVegasMarketButton(interaction);
+    return;
+  }
+  if (interaction.isButton() && interaction.customId.startsWith("vegas:side:")) {
+    await handleVegasSideButton(interaction);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("vegas:stake:")) {
+    await handleVegasStakeModal(interaction);
+    return;
+  }
+
   if (interaction.isButton() || interaction.isStringSelectMenu()) {
     await handleTradeComponent(interaction);
     return;
@@ -454,6 +493,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === "submit_trade") {
     await interaction.deferReply({ ephemeral: true });
     await startTradeFlow(interaction);
+    return;
+  }
+
+  // /bet replies for itself (buttons, then a modal) -- it must not go
+  // through the generic deferReply below, same reasoning as submit_trade.
+  if (interaction.commandName === "bet") {
+    await handleBetCommand(interaction);
     return;
   }
 
@@ -728,6 +774,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       case "news": {
         await handleNews(interaction);
+        break;
+      }
+      case "wallet": {
+        await handleVegasCommand(interaction);
         break;
       }
       case "admin": {
