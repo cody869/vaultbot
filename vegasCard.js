@@ -29,7 +29,6 @@ const FOOTER_H = 56;
 const PLAYER_H = Math.round(HERO_H * 0.95);
 const FALLBACK_HELMET_H = 170;
 const FALLBACK_HELMET_W = Math.round(FALLBACK_HELMET_H * (112 / 96));
-const SEAM_ANGLE = 10;
 
 // Full-body player art, one flat PNG per team dropped in by hand as it's
 // generated (see players/README if one exists) -- real alpha transparency,
@@ -91,16 +90,6 @@ async function loadHelmetDataUri(abbr) {
   return dataUri;
 }
 
-// Diagonal seam geometry, same technique scorebugCard.js already uses and
-// has confirmed renders cleanly through Satori -- a big rotated rectangle
-// sized/positioned so its own internal gradient lines up into a continuous
-// seam across the card at `angleDeg`.
-function seamRectGeometry(angleDeg, sectionH, size = 700) {
-  const rad = (angleDeg * Math.PI) / 180;
-  const cx = W / 2 + (size / 2) * Math.cos(rad);
-  const cy = sectionH / 2 + (size / 2) * Math.sin(rad);
-  return { left: cx - size / 2, top: cy - size / 2, size };
-}
 
 // Top N wallets by balance for the current season (the highest season_number
 // present in VegasWallet -- there's no separate "current season" config at
@@ -252,11 +241,10 @@ async function renderOddsCard(line) {
   const H = HERO_H + ROW_H * 3 + FOOTER_H + LEADERS_H + 16;
 
   const spreadAwayValue = line.spreadHome != null ? -line.spreadHome : null;
-  const seam = seamRectGeometry(SEAM_ANGLE, HERO_H);
 
-  // Clean two-tone banner (no dark gap at the seam, like scorebugCard's
-  // treatment) -- solid away color on the left, solid home color on the
-  // right, cut by one diagonal edge. Player/helmet | abbreviation | badge |
+  // Smooth gradient banner, away color to home color, with a thin vertical
+  // line marking the true center -- simpler and more legible than the
+  // earlier diagonal-seam treatment. Player/helmet | abbreviation | badge |
   // abbreviation | player/helmet laid out as a single flex row so
   // everything stays bottom-anchored and evenly spaced without hand-tuned
   // coordinates.
@@ -318,18 +306,15 @@ async function renderOddsCard(line) {
     props: {
       style: {
         width: W, height: HERO_H, display: 'flex', position: 'relative',
-        overflow: 'hidden', background: away.color,
+        overflow: 'hidden', background: `linear-gradient(90deg, ${away.color} 0%, ${home.color} 100%)`,
       },
       children: [
         {
           type: 'div',
           props: {
             style: {
-              position: 'absolute', display: 'flex',
-              width: seam.size, height: seam.size,
-              top: seam.top, left: seam.left,
-              transform: `rotate(${SEAM_ANGLE}deg)`,
-              background: home.color,
+              position: 'absolute', display: 'flex', top: 0, bottom: 0, left: '50%',
+              width: 3, transform: 'translateX(-50%)', background: 'rgba(255,255,255,0.45)',
             },
           },
         },
@@ -365,22 +350,21 @@ async function renderOddsCard(line) {
         // Positioned independently of the row above, not as a flex sibling
         // between the two abbreviation boxes -- player art poses vary a lot
         // in natural width (a standing pose vs. a full-stretch dive), which
-        // made the two flex:1 boxes uneven widths and dragged the badge off
-        // the seam's own fixed geometric center. Anchoring it to the hero's
-        // true horizontal center keeps it on the seam no matter how lopsided
-        // the two side's art is.
+        // would skew the two flex:1 boxes unevenly and drag the badge off
+        // true center. Anchoring it to the hero's horizontal center instead
+        // keeps it on the split line no matter how lopsided the two side's
+        // art is. No card/border around it -- just the mark itself, sized up
+        // a bit so it still reads clearly without one.
         {
           type: 'div',
           props: {
             style: {
               position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              left: '50%', bottom: 40, transform: 'translateX(-50%)',
-              width: 72, height: 72, borderRadius: 12,
-              background: '#FFFFFF', border: `3px solid ${GOLD}`,
+              left: '50%', bottom: 34, transform: 'translateX(-50%)',
             },
             children: badgeLogo
-              ? { type: 'img', props: { src: badgeLogo, width: 48, height: 48, style: { display: 'flex', borderRadius: 24 } } }
-              : { type: 'div', props: { style: { display: 'flex', color: DARK_BG, fontFamily: 'Anton', fontSize: 18 }, children: 'VS' } },
+              ? { type: 'img', props: { src: badgeLogo, width: 80, height: 80, style: { display: 'flex' } } }
+              : { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 26, textShadow: '0 3px 10px rgba(0,0,0,0.5)' }, children: 'VS' } },
           },
         },
       ].filter(Boolean),
