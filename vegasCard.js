@@ -11,7 +11,7 @@ import { Resvg } from '@resvg/resvg-js';
 import sharp from 'sharp';
 import { getTeam } from './teamLogos.js';
 import { loadFonts, loadLogoDataUri, GOLD, DARK_BG } from './cardKit.js';
-import { findMemberByTeam, memberDisplayName } from './vault.js';
+import { findMemberByTeam, memberDisplayName, getLeagueMembers, list } from './vault.js';
 
 const W = 900;
 const HERO_H = 190;
@@ -72,6 +72,33 @@ function seamRectGeometry(angleDeg, sectionH, size = 700) {
   const cy = sectionH / 2 + (size / 2) * Math.sin(rad);
   return { left: cx - size / 2, top: cy - size / 2, size };
 }
+
+// Top N wallets by balance for the current season (the highest season_number
+// present in VegasWallet -- there's no separate "current season" config at
+// the bot layer, same idiom vault.js's own getStatLeaders/getScores use).
+// Pure balance ranking, not the app's eligible-only prize order -- this is
+// just a quick "who's up" flourish on the card, not the official standings.
+async function getVegasLeaders(limit = 5) {
+  const wallets = await list('VegasWallet', {}, { limit: 500 });
+  if (!wallets.length) return [];
+  const season = Math.max(...wallets.map((w) => w.season_number ?? 0));
+  const members = await getLeagueMembers();
+
+  return wallets
+    .filter((w) => w.season_number === season)
+    .sort((a, b) => (b.balance ?? 0) - (a.balance ?? 0))
+    .slice(0, limit)
+    .map((w) => ({
+      name: memberDisplayName(members.find((m) => m.username === w.username) || { team_name: w.team_name }),
+      balance: w.balance ?? 0,
+    }));
+}
+
+function truncate(s, n) {
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+const RANK_COLOR = { 1: GOLD, 2: '#C7CDD6', 3: '#C98A4B' };
 
 function americanOdds(n) {
   if (n == null) return '—';
@@ -167,21 +194,25 @@ function marketRow(label, left, right) {
 async function renderOddsCard(line) {
   const home = getTeam(line.homeAbbr);
   const away = getTeam(line.awayAbbr);
-  const H = HERO_H + ROW_H * 3 + FOOTER_H + 16;
 
-  // Owner lookup is a nice-to-have, not load-bearing -- a Vault hiccup here
-  // shouldn't stop the odds card itself from posting, so it fails soft to
-  // "no owner shown" instead of rejecting the whole render.
-  const [fonts, awayHelmet, homeHelmet, badgeLogo, awayMember, homeMember] = await Promise.all([
+  // Owner/leaderboard lookups are a nice-to-have, not load-bearing -- a
+  // Vault hiccup here shouldn't stop the odds card itself from posting, so
+  // both fail soft (no owner shown / no leaderboard strip) instead of
+  // rejecting the whole render.
+  const [fonts, awayHelmet, homeHelmet, badgeLogo, awayMember, homeMember, leaders] = await Promise.all([
     loadFonts(),
     loadHelmetDataUri(line.awayAbbr),
     loadHelmetDataUri(line.homeAbbr),
     loadLogoDataUri(LEAGUE_BADGE_URL),
     findMemberByTeam(line.awayAbbr).catch(() => null),
     findMemberByTeam(line.homeAbbr).catch(() => null),
+    getVegasLeaders(5).catch(() => []),
   ]);
   const awayOwner = awayMember ? memberDisplayName(awayMember) : null;
   const homeOwner = homeMember ? memberDisplayName(homeMember) : null;
+
+  const LEADERS_H = leaders.length ? 120 : 0;
+  const H = HERO_H + ROW_H * 3 + FOOTER_H + LEADERS_H + 16;
 
   const spreadAwayValue = line.spreadHome != null ? -line.spreadHome : null;
   const seam = seamRectGeometry(SEAM_ANGLE, HERO_H);
@@ -345,7 +376,48 @@ async function renderOddsCard(line) {
             ].filter(Boolean),
           },
         },
-      ],
+        // Quick "who's up" flourish, not the official prize standings (that
+        // stays balance-ranked with no eligibility filter -- see
+        // getVegasLeaders) -- omitted entirely when no wallets exist yet.
+        leaders.length && {
+          type: 'div',
+          props: {
+            style: {
+              display: 'flex', flexDirection: 'column', padding: '10px 32px 14px',
+              borderTop: '1px solid rgba(212,168,67,0.3)', gap: 8,
+            },
+            children: [
+              {
+                type: 'div',
+                props: {
+                  style: { display: 'flex', color: 'rgba(255,255,255,0.55)', fontFamily: 'Barlow', fontSize: 13, letterSpacing: 2 },
+                  children: 'SEASON LEADERS',
+                },
+              },
+              {
+                type: 'div',
+                props: {
+                  style: { display: 'flex', gap: 10 },
+                  children: leaders.map((l, i) => ({
+                    type: 'div',
+                    props: {
+                      style: {
+                        display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1,
+                        background: 'rgba(255,255,255,0.05)', borderRadius: 6, padding: '8px 4px', gap: 2,
+                      },
+                      children: [
+                        { type: 'div', props: { style: { display: 'flex', color: RANK_COLOR[i + 1] || 'rgba(255,255,255,0.5)', fontFamily: 'Anton', fontSize: 15 }, children: `#${i + 1}` } },
+                        { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Barlow', fontSize: 13, fontWeight: 700 }, children: truncate(l.name, 12) } },
+                        { type: 'div', props: { style: { display: 'flex', color: GOLD, fontFamily: 'Barlow', fontSize: 14 }, children: `$${l.balance.toLocaleString()}` } },
+                      ],
+                    },
+                  })),
+                },
+              },
+            ],
+          },
+        },
+      ].filter(Boolean),
     },
   };
 
