@@ -54,6 +54,37 @@ async function loadPlayerDataUri(abbr) {
 // two helmets like the league shield in the reference NFL/Prime graphic.
 const LEAGUE_BADGE_URL = 'https://media.base44.com/images/public/69d09944c8636f39abaa7ef0/ea59f960b_Untitleddesign10.png';
 
+// Blends a team's (often quite saturated) brand color toward the card's
+// dark background so the hero gradient reads as muted rather than a raw
+// hex-code wash.
+function muteColor(hex, amount = 0.35) {
+  const h = hex.replace('#', '');
+  const d = DARK_BG.replace('#', '');
+  const mix = (a, b) => Math.round(a + (b - a) * amount);
+  const toHex = (n) => n.toString(16).padStart(2, '0');
+  const r = mix(parseInt(h.slice(0, 2), 16), parseInt(d.slice(0, 2), 16));
+  const g = mix(parseInt(h.slice(2, 4), 16), parseInt(d.slice(2, 4), 16));
+  const b = mix(parseInt(h.slice(4, 6), 16), parseInt(d.slice(4, 6), 16));
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+// A single subtle grain overlay, generated once and reused for every card
+// (team-independent) -- low per-pixel alpha, laid over the gradient so the
+// hero doesn't read as a flat, glossy color fill.
+let noiseTextureCache = null;
+async function getNoiseTexture() {
+  if (noiseTextureCache) return noiseTextureCache;
+  const buf = Buffer.alloc(W * HERO_H * 4);
+  for (let i = 0; i < W * HERO_H; i++) {
+    const v = 90 + Math.floor(Math.random() * 140);
+    const a = 8 + Math.floor(Math.random() * 14);
+    buf[i * 4] = v; buf[i * 4 + 1] = v; buf[i * 4 + 2] = v; buf[i * 4 + 3] = a;
+  }
+  const png = await sharp(buf, { raw: { width: W, height: HERO_H, channels: 4 } }).png().toBuffer();
+  noiseTextureCache = 'data:image/png;base64,' + png.toString('base64');
+  return noiseTextureCache;
+}
+
 // The app's own pixel-art helmets (src/lib/nflTeamLogos.js's
 // teamHelmetUrl()/`<Helmet>`) -- confirmed live at the app's own domain,
 // not part of this bot's repo. Only one abbreviation differs between this
@@ -217,11 +248,12 @@ async function renderOddsCard(line) {
   // Vault hiccup here shouldn't stop the odds card itself from posting, so
   // both fail soft (no owner shown / no leaderboard strip) instead of
   // rejecting the whole render.
-  const [fonts, awayPlayer, homePlayer, badgeLogo, awayMember, homeMember, leaders] = await Promise.all([
+  const [fonts, awayPlayer, homePlayer, badgeLogo, noiseTexture, awayMember, homeMember, leaders] = await Promise.all([
     loadFonts(),
     loadPlayerDataUri(line.awayAbbr),
     loadPlayerDataUri(line.homeAbbr),
     loadLogoDataUri(LEAGUE_BADGE_URL),
+    getNoiseTexture(),
     findMemberByTeam(line.awayAbbr).catch(() => null),
     findMemberByTeam(line.homeAbbr).catch(() => null),
     getVegasLeaders(5).catch(() => []),
@@ -300,6 +332,11 @@ async function renderOddsCard(line) {
     },
   });
 
+  // Muted (blended toward the card's dark background) rather than the raw
+  // brand hex, which read as a harsh, glossy wash across the whole banner.
+  const awayBg = muteColor(away.color);
+  const homeBg = muteColor(home.color);
+
   const hero = {
     type: 'div',
     props: {
@@ -311,9 +348,13 @@ async function renderOddsCard(line) {
         // side (RGB interpolation isn't perceptually even), which read as
         // one team's color dominating the banner instead of a fair split.
         overflow: 'hidden',
-        background: `linear-gradient(90deg, ${away.color} 0%, ${away.color} 40%, ${home.color} 60%, ${home.color} 100%)`,
+        background: `linear-gradient(90deg, ${awayBg} 0%, ${awayBg} 40%, ${homeBg} 60%, ${homeBg} 100%)`,
       },
       children: [
+        // Flat per-pixel grain, low alpha, sized to exactly cover the hero
+        // -- breaks up what would otherwise be a perfectly smooth gradient
+        // fill, same idea as film grain over a color wash.
+        { type: 'img', props: { src: noiseTexture, width: W, height: HERO_H, style: { position: 'absolute', top: 0, left: 0, display: 'flex' } } },
         line.week != null && {
           type: 'div',
           props: {
