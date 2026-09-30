@@ -242,12 +242,11 @@ async function renderOddsCard(line) {
 
   const spreadAwayValue = line.spreadHome != null ? -line.spreadHome : null;
 
-  // Smooth gradient banner, away color to home color, with a thin vertical
-  // line marking the true center -- simpler and more legible than the
-  // earlier diagonal-seam treatment. Player/helmet | abbreviation | badge |
-  // abbreviation | player/helmet laid out as a single flex row so
-  // everything stays bottom-anchored and evenly spaced without hand-tuned
-  // coordinates.
+  // Smooth gradient banner, away color to home color -- simpler and more
+  // legible than the earlier diagonal-seam treatment. Player/helmet |
+  // abbreviation | badge | abbreviation | player/helmet laid out as a
+  // single flex row so everything stays bottom-anchored and evenly
+  // spaced without hand-tuned coordinates.
   //
   // Player art is never mirrored -- it carries a readable jersey number, so
   // flipping it would print the number backwards (confirmed on a test
@@ -309,15 +308,6 @@ async function renderOddsCard(line) {
         overflow: 'hidden', background: `linear-gradient(90deg, ${away.color} 0%, ${home.color} 100%)`,
       },
       children: [
-        {
-          type: 'div',
-          props: {
-            style: {
-              position: 'absolute', display: 'flex', top: 0, bottom: 0, left: '50%',
-              width: 3, transform: 'translateX(-50%)', background: 'rgba(255,255,255,0.45)',
-            },
-          },
-        },
         line.week != null && {
           type: 'div',
           props: {
