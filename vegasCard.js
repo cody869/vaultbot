@@ -9,17 +9,46 @@
 import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
 import sharp from 'sharp';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { getTeam } from './teamLogos.js';
 import { loadFonts, loadLogoDataUri, GOLD, DARK_BG } from './cardKit.js';
 import { findMemberByTeam, memberDisplayName, getLeagueMembers, list } from './vault.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const W = 900;
-const HERO_H = 190;
+// Tall enough for full-body player art; a team with no art yet falls back
+// to a small helmet bottom-anchored in the same space (see heroArt below),
+// so the hero looks intentional either way while the set fills in team by
+// team instead of needing all 32 before any of this ships.
+const HERO_H = 320;
 const ROW_H = 96;
 const FOOTER_H = 56;
-const HELMET_H = Math.round(HERO_H * 0.95);
-const HELMET_W = Math.round(HELMET_H * (112 / 96));
+const PLAYER_H = Math.round(HERO_H * 0.95);
+const FALLBACK_HELMET_H = 170;
+const FALLBACK_HELMET_W = Math.round(FALLBACK_HELMET_H * (112 / 96));
 const SEAM_ANGLE = 10;
+
+// Full-body player art, one flat PNG per team dropped in by hand as it's
+// generated (see players/README if one exists) -- real alpha transparency,
+// no upscaling needed (unlike the tiny 112x96 helmet sprites). Keyed by
+// this bot's own abbreviation scheme (emoji.js's abbrFromName), since these
+// never touch the app's helmet-URL convention.
+const PLAYERS_DIR = path.join(__dirname, 'players');
+const playerCache = new Map();
+async function loadPlayerDataUri(abbr) {
+  const filePath = path.join(PLAYERS_DIR, `${abbr}.png`);
+  if (playerCache.has(filePath)) return playerCache.get(filePath);
+  if (!fs.existsSync(filePath)) {
+    playerCache.set(filePath, null);
+    return null;
+  }
+  const dataUri = 'data:image/png;base64,' + fs.readFileSync(filePath).toString('base64');
+  playerCache.set(filePath, dataUri);
+  return dataUri;
+}
 
 // The XCFL Vault's own icon -- already public (used as the app's favicon /
 // og:image) -- as the card's center badge, sitting on the seam between the
@@ -199,14 +228,22 @@ async function renderOddsCard(line) {
   // Vault hiccup here shouldn't stop the odds card itself from posting, so
   // both fail soft (no owner shown / no leaderboard strip) instead of
   // rejecting the whole render.
-  const [fonts, awayHelmet, homeHelmet, badgeLogo, awayMember, homeMember, leaders] = await Promise.all([
+  const [fonts, awayPlayer, homePlayer, badgeLogo, awayMember, homeMember, leaders] = await Promise.all([
     loadFonts(),
-    loadHelmetDataUri(line.awayAbbr),
-    loadHelmetDataUri(line.homeAbbr),
+    loadPlayerDataUri(line.awayAbbr),
+    loadPlayerDataUri(line.homeAbbr),
     loadLogoDataUri(LEAGUE_BADGE_URL),
     findMemberByTeam(line.awayAbbr).catch(() => null),
     findMemberByTeam(line.homeAbbr).catch(() => null),
     getVegasLeaders(5).catch(() => []),
+  ]);
+  // The helmet fallback only needs fetching for a side that has no player
+  // art yet -- skips the network call entirely once all 32 are in, and
+  // fails soft (rather than killing the whole card) if the Vault app
+  // happens to be down when it IS needed.
+  const [awayHelmet, homeHelmet] = await Promise.all([
+    awayPlayer ? null : loadHelmetDataUri(line.awayAbbr).catch(() => null),
+    homePlayer ? null : loadHelmetDataUri(line.homeAbbr).catch(() => null),
   ]);
   const awayOwner = awayMember ? memberDisplayName(awayMember) : null;
   const homeOwner = homeMember ? memberDisplayName(homeMember) : null;
@@ -219,23 +256,42 @@ async function renderOddsCard(line) {
 
   // Clean two-tone banner (no dark gap at the seam, like scorebugCard's
   // treatment) -- solid away color on the left, solid home color on the
-  // right, cut by one diagonal edge. Helmet | abbreviation | badge |
-  // abbreviation | helmet laid out as a single flex row so everything
-  // stays vertically centered and evenly spaced without hand-tuned
+  // right, cut by one diagonal edge. Player/helmet | abbreviation | badge |
+  // abbreviation | player/helmet laid out as a single flex row so
+  // everything stays bottom-anchored and evenly spaced without hand-tuned
   // coordinates.
-  const helmetBox = (src, { flip, rotate }) => ({
-    type: 'div',
-    props: {
-      style: { display: 'flex', transform: `rotate(${rotate}deg)` },
-      children: {
+  //
+  // Player art is never mirrored -- it carries a readable jersey number, so
+  // flipping it would print the number backwards (confirmed on a test
+  // render). Whichever pose the art was generated in is however it prints.
+  // The helmet fallback has no such problem (no legible text on it) and
+  // keeps the old flip-to-face-center + slight rotate treatment.
+  const heroArt = (abbr, playerSrc, helmetSrc, side) => {
+    if (playerSrc) {
+      return {
         type: 'div',
         props: {
-          style: { display: 'flex', transform: flip ? 'scaleX(-1)' : 'scaleX(1)' },
-          children: { type: 'img', props: { src, width: HELMET_W, height: HELMET_H, style: { display: 'flex' } } },
+          style: { display: 'flex' },
+          children: { type: 'img', props: { src: playerSrc, height: PLAYER_H, style: { display: 'flex' } } },
+        },
+      };
+    }
+    if (!helmetSrc) return { type: 'div', props: { style: { display: 'flex', width: 1 } } };
+    const flip = side === 'home';
+    return {
+      type: 'div',
+      props: {
+        style: { display: 'flex', transform: `rotate(${flip ? 4 : -4}deg)` },
+        children: {
+          type: 'div',
+          props: {
+            style: { display: 'flex', transform: flip ? 'scaleX(-1)' : 'scaleX(1)' },
+            children: { type: 'img', props: { src: helmetSrc, width: FALLBACK_HELMET_W, height: FALLBACK_HELMET_H, style: { display: 'flex' } } },
+          },
         },
       },
-    },
-  });
+    };
+  };
 
   const abbrBox = (abbr, align) => ({
     type: 'div',
@@ -295,18 +351,18 @@ async function renderOddsCard(line) {
           type: 'div',
           props: {
             style: {
-              position: 'absolute', display: 'flex', alignItems: 'center',
-              top: 0, left: 0, right: 0, bottom: 0, padding: '0 12px',
+              position: 'absolute', display: 'flex', alignItems: 'flex-end',
+              top: 0, left: 0, right: 0, bottom: 0, padding: '0 8px',
             },
             children: [
-              helmetBox(awayHelmet, { flip: false, rotate: -4 }),
+              heroArt(line.awayAbbr, awayPlayer, awayHelmet, 'away'),
               abbrBox(line.awayAbbr, 'flex-start'),
               {
                 type: 'div',
                 props: {
                   style: {
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    width: 72, height: 72, borderRadius: 12, flexShrink: 0,
+                    width: 72, height: 72, borderRadius: 12, flexShrink: 0, marginBottom: 40,
                     background: '#FFFFFF', border: `3px solid ${GOLD}`,
                   },
                   children: badgeLogo
@@ -315,7 +371,7 @@ async function renderOddsCard(line) {
                 },
               },
               abbrBox(line.homeAbbr, 'flex-end'),
-              helmetBox(homeHelmet, { flip: true, rotate: 4 }),
+              heroArt(line.homeAbbr, homePlayer, homeHelmet, 'home'),
             ],
           },
         },
