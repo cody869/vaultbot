@@ -8,22 +8,58 @@
 
 import satori from 'satori';
 import { Resvg } from '@resvg/resvg-js';
+import sharp from 'sharp';
 import { getTeam } from './teamLogos.js';
 import { loadFonts, loadLogoDataUri, GOLD, DARK_BG } from './cardKit.js';
 
 const W = 900;
-const HERO_H = 210;
+const HERO_H = 240;
 const ROW_H = 96;
 const FOOTER_H = 56;
-const HERO_LOGO = 300;
+const HELMET_W = 300;
+const HELMET_H = Math.round(HELMET_W * (96 / 112));
 const SEAM_ANGLE = 10;
 
 // The XCFL Vault's own icon -- already public (used as the app's favicon /
-// og:image), so it's a safe, confirmed-real image to use as the card's
-// center badge. There is no real helmet art anywhere in this project (see
-// renderOddsCard's comment below) -- this stands in for the "center circle
-// badge" from the reference NFL/Prime graphic instead.
+// og:image) -- as the card's center badge, sitting on the seam between the
+// two helmets like the league shield in the reference NFL/Prime graphic.
 const LEAGUE_BADGE_URL = 'https://media.base44.com/images/public/69d09944c8636f39abaa7ef0/ea59f960b_Untitleddesign10.png';
+
+// The app's own pixel-art helmets (src/lib/nflTeamLogos.js's
+// teamHelmetUrl()/`<Helmet>`) -- confirmed live at the app's own domain,
+// not part of this bot's repo. Only one abbreviation differs between this
+// bot's own scheme (emoji.js's abbrFromName) and the app's: Washington is
+// WAS here, WSH there.
+const HELMET_ABBR_OVERRIDES = { WAS: 'WSH' };
+function helmetUrl(abbr) {
+  return `https://xcfl-companion.com/helmets/${HELMET_ABBR_OVERRIDES[abbr] || abbr}.png`;
+}
+
+// Native helmet art is 112x96 pixel art (same source the app's <Helmet>
+// component renders with image-rendering:pixelated). Satori/resvg have no
+// equivalent "keep it blocky" hint for an embedded raster image, so the
+// crispness has to be baked into the pixels themselves -- fetch once, then
+// nearest-neighbor upscale well past the card's final render resolution
+// before handing it to Satori as a data URI, so any later resampling stays
+// looking like pixel art instead of blurring into mush.
+const helmetCache = new Map();
+async function loadHelmetDataUri(abbr) {
+  const url = helmetUrl(abbr);
+  if (helmetCache.has(url)) return helmetCache.get(url);
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Helmet fetch failed (${res.status}): ${url}`);
+  const raw = Buffer.from(await res.arrayBuffer());
+
+  const upscaled = await sharp(raw)
+    .resize({ width: 112 * 8, height: 96 * 8, kernel: 'nearest' })
+    .png()
+    .toBuffer();
+
+  const dataUri = 'data:image/png;base64,' + upscaled.toString('base64');
+  helmetCache.set(url, dataUri);
+  return dataUri;
+}
 
 // Diagonal seam geometry, same technique scorebugCard.js already uses and
 // has confirmed renders cleanly through Satori -- a big rotated rectangle
@@ -121,23 +157,16 @@ async function renderOddsCard(line) {
   const away = getTeam(line.awayAbbr);
   const H = HERO_H + ROW_H * 3 + FOOTER_H + 16;
 
-  // The reference graphic's helmet art doesn't exist anywhere in this
-  // project -- neither the app's pixel-art set (`/helmets/*.png`, which
-  // turned out to be a dead path with no actual files behind it, in the app
-  // repo or its build output) nor a photoreal source. The one asset that IS
-  // confirmed real end-to-end is this bot's own GitHub-hosted team crest
-  // logos (teamLogos.js), already proven through this exact render
-  // pipeline -- so the diagonal hero below uses those, sized up as the
-  // hero art, instead of a helmet.
-  const [fonts, homeLogo, awayLogo, badgeLogo] = await Promise.all([
+  const [fonts, awayHelmet, homeHelmet, badgeLogo] = await Promise.all([
     loadFonts(),
-    loadLogoDataUri(home.logoUrl),
-    loadLogoDataUri(away.logoUrl),
+    loadHelmetDataUri(line.awayAbbr),
+    loadHelmetDataUri(line.homeAbbr),
     loadLogoDataUri(LEAGUE_BADGE_URL),
   ]);
 
   const spreadAwayValue = line.spreadHome != null ? -line.spreadHome : null;
   const seam = seamRectGeometry(SEAM_ANGLE, HERO_H);
+  const helmetTop = HERO_H - HELMET_H * 0.88;
 
   const hero = {
     type: 'div',
@@ -159,25 +188,45 @@ async function renderOddsCard(line) {
             },
           },
         },
+        // Helmets face each other across the seam, angled in like they're
+        // squaring off -- away (native orientation faces right) tilts in
+        // from the left; home is flipped to face left, tilting in from the
+        // right. Both are sized past the hero's edges and bottom so
+        // overflow:hidden crops them into a dynamic "bursting the frame"
+        // look instead of a neatly-contained thumbnail.
         {
-          type: 'img',
+          type: 'div',
           props: {
-            src: awayLogo, width: HERO_LOGO, height: HERO_LOGO,
-            style: { position: 'absolute', top: HERO_H - HERO_LOGO * 0.82, left: -HERO_LOGO * 0.2, opacity: 0.35 },
-          },
-        },
-        {
-          type: 'img',
-          props: {
-            src: homeLogo, width: HERO_LOGO, height: HERO_LOGO,
-            style: { position: 'absolute', top: HERO_H - HERO_LOGO * 0.82, right: -HERO_LOGO * 0.2, opacity: 0.35 },
+            style: {
+              position: 'absolute', display: 'flex',
+              top: helmetTop, left: -HELMET_W * 0.18,
+              transform: 'rotate(-9deg)',
+            },
+            children: { type: 'img', props: { src: awayHelmet, width: HELMET_W, height: HELMET_H, style: { display: 'flex' } } },
           },
         },
         {
           type: 'div',
           props: {
             style: {
-              position: 'absolute', display: 'flex', top: 16, left: '50%',
+              position: 'absolute', display: 'flex',
+              top: helmetTop, right: -HELMET_W * 0.18,
+              transform: 'rotate(9deg)',
+            },
+            children: {
+              type: 'div',
+              props: {
+                style: { display: 'flex', transform: 'scaleX(-1)' },
+                children: { type: 'img', props: { src: homeHelmet, width: HELMET_W, height: HELMET_H, style: { display: 'flex' } } },
+              },
+            },
+          },
+        },
+        {
+          type: 'div',
+          props: {
+            style: {
+              position: 'absolute', display: 'flex', top: 14, left: '50%',
               transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.75)',
               fontFamily: 'Barlow', fontSize: 15, letterSpacing: 2,
             },
@@ -187,23 +236,35 @@ async function renderOddsCard(line) {
             ].join(''),
           },
         },
+        // Bold lettering deliberately overlaps the bottom of the helmets --
+        // the poster-typography layering the reference graphic uses -- so a
+        // dark backing panel sits behind each so it stays legible over
+        // lighter helmets (Dolphins, Bills, etc).
         {
           type: 'div',
           props: {
-            style: { position: 'absolute', display: 'flex', flexDirection: 'column', top: 48, left: 30 },
+            style: {
+              position: 'absolute', display: 'flex', flexDirection: 'column',
+              bottom: 14, left: 20, padding: '6px 14px', borderRadius: 4,
+              background: 'rgba(0,0,0,0.45)',
+            },
             children: [
-              { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 64, lineHeight: 1 }, children: line.awayAbbr } },
-              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.75)', fontFamily: 'Barlow', fontSize: 16, marginTop: 4 }, children: away.name || '' } },
+              { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 60, lineHeight: 1 }, children: line.awayAbbr } },
+              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.8)', fontFamily: 'Barlow', fontSize: 15, marginTop: 2 }, children: away.name || '' } },
             ],
           },
         },
         {
           type: 'div',
           props: {
-            style: { position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', top: 48, right: 30 },
+            style: {
+              position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
+              bottom: 14, right: 20, padding: '6px 14px', borderRadius: 4,
+              background: 'rgba(0,0,0,0.45)',
+            },
             children: [
-              { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 64, lineHeight: 1 }, children: line.homeAbbr } },
-              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.75)', fontFamily: 'Barlow', fontSize: 16, marginTop: 4 }, children: home.name || '' } },
+              { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 60, lineHeight: 1 }, children: line.homeAbbr } },
+              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.8)', fontFamily: 'Barlow', fontSize: 15, marginTop: 2 }, children: home.name || '' } },
             ],
           },
         },
