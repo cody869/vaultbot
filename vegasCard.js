@@ -11,13 +11,14 @@ import { Resvg } from '@resvg/resvg-js';
 import sharp from 'sharp';
 import { getTeam } from './teamLogos.js';
 import { loadFonts, loadLogoDataUri, GOLD, DARK_BG } from './cardKit.js';
+import { findMemberByTeam, memberDisplayName } from './vault.js';
 
 const W = 900;
-const HERO_H = 240;
+const HERO_H = 190;
 const ROW_H = 96;
 const FOOTER_H = 56;
-const HELMET_W = 300;
-const HELMET_H = Math.round(HELMET_W * (96 / 112));
+const HELMET_H = Math.round(HERO_H * 0.95);
+const HELMET_W = Math.round(HELMET_H * (112 / 96));
 const SEAM_ANGLE = 10;
 
 // The XCFL Vault's own icon -- already public (used as the app's favicon /
@@ -78,6 +79,8 @@ function americanOdds(n) {
 }
 
 // One market row: a label on the left, two selection boxes on the right.
+// Each box also carries the Discord username of whoever owns that team, so
+// bettors can see who they're up against on every line, not just the header.
 function marketRow(label, left, right) {
   const box = (b) => ({
     type: 'div',
@@ -98,8 +101,17 @@ function marketRow(label, left, right) {
         {
           type: 'div',
           props: {
-            style: { display: 'flex', color: GOLD, fontFamily: 'Barlow', fontSize: 17 },
-            children: b.odds,
+            style: { display: 'flex', gap: 8, alignItems: 'baseline' },
+            children: [
+              { type: 'div', props: { style: { display: 'flex', color: GOLD, fontFamily: 'Barlow', fontSize: 17 }, children: b.odds } },
+              b.owner && {
+                type: 'div',
+                props: {
+                  style: { display: 'flex', color: 'rgba(255,255,255,0.45)', fontFamily: 'Barlow', fontSize: 13 },
+                  children: `@${b.owner}`,
+                },
+              },
+            ].filter(Boolean),
           },
         },
       ],
@@ -157,23 +169,69 @@ async function renderOddsCard(line) {
   const away = getTeam(line.awayAbbr);
   const H = HERO_H + ROW_H * 3 + FOOTER_H + 16;
 
-  const [fonts, awayHelmet, homeHelmet, badgeLogo] = await Promise.all([
+  // Owner lookup is a nice-to-have, not load-bearing -- a Vault hiccup here
+  // shouldn't stop the odds card itself from posting, so it fails soft to
+  // "no owner shown" instead of rejecting the whole render.
+  const [fonts, awayHelmet, homeHelmet, badgeLogo, awayMember, homeMember] = await Promise.all([
     loadFonts(),
     loadHelmetDataUri(line.awayAbbr),
     loadHelmetDataUri(line.homeAbbr),
     loadLogoDataUri(LEAGUE_BADGE_URL),
+    findMemberByTeam(line.awayAbbr).catch(() => null),
+    findMemberByTeam(line.homeAbbr).catch(() => null),
   ]);
+  const awayOwner = awayMember ? memberDisplayName(awayMember) : null;
+  const homeOwner = homeMember ? memberDisplayName(homeMember) : null;
 
   const spreadAwayValue = line.spreadHome != null ? -line.spreadHome : null;
   const seam = seamRectGeometry(SEAM_ANGLE, HERO_H);
-  const helmetTop = HERO_H - HELMET_H * 0.88;
+
+  // Clean two-tone banner (no dark gap at the seam, like scorebugCard's
+  // treatment) -- solid away color on the left, solid home color on the
+  // right, cut by one diagonal edge. Helmet | abbreviation | badge |
+  // abbreviation | helmet laid out as a single flex row so everything
+  // stays vertically centered and evenly spaced without hand-tuned
+  // coordinates.
+  const helmetBox = (src, { flip, rotate }) => ({
+    type: 'div',
+    props: {
+      style: { display: 'flex', transform: `rotate(${rotate}deg)` },
+      children: {
+        type: 'div',
+        props: {
+          style: { display: 'flex', transform: flip ? 'scaleX(-1)' : 'scaleX(1)' },
+          children: { type: 'img', props: { src, width: HELMET_W, height: HELMET_H, style: { display: 'flex' } } },
+        },
+      },
+    },
+  });
+
+  const abbrBox = (abbr, align) => ({
+    type: 'div',
+    props: {
+      style: {
+        display: 'flex', flex: 1, flexDirection: 'column',
+        alignItems: align, justifyContent: 'center',
+      },
+      children: {
+        type: 'div',
+        props: {
+          style: {
+            display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 68,
+            lineHeight: 1, textShadow: '0 3px 10px rgba(0,0,0,0.5)',
+          },
+          children: abbr,
+        },
+      },
+    },
+  });
 
   const hero = {
     type: 'div',
     props: {
       style: {
         width: W, height: HERO_H, display: 'flex', position: 'relative',
-        overflow: 'hidden', background: `linear-gradient(90deg, ${away.color} 0%, #000000 78%)`,
+        overflow: 'hidden', background: away.color,
       },
       children: [
         {
@@ -184,105 +242,53 @@ async function renderOddsCard(line) {
               width: seam.size, height: seam.size,
               top: seam.top, left: seam.left,
               transform: `rotate(${SEAM_ANGLE}deg)`,
-              background: `linear-gradient(90deg, #000000 22%, ${home.color} 100%)`,
+              background: home.color,
             },
           },
         },
-        // Helmets face each other across the seam, angled in like they're
-        // squaring off -- away (native orientation faces right) tilts in
-        // from the left; home is flipped to face left, tilting in from the
-        // right. Both are sized past the hero's edges and bottom so
-        // overflow:hidden crops them into a dynamic "bursting the frame"
-        // look instead of a neatly-contained thumbnail.
-        {
+        line.week != null && {
           type: 'div',
           props: {
             style: {
-              position: 'absolute', display: 'flex',
-              top: helmetTop, left: -HELMET_W * 0.18,
-              transform: 'rotate(-9deg)',
-            },
-            children: { type: 'img', props: { src: awayHelmet, width: HELMET_W, height: HELMET_H, style: { display: 'flex' } } },
-          },
-        },
-        {
-          type: 'div',
-          props: {
-            style: {
-              position: 'absolute', display: 'flex',
-              top: helmetTop, right: -HELMET_W * 0.18,
-              transform: 'rotate(9deg)',
-            },
-            children: {
-              type: 'div',
-              props: {
-                style: { display: 'flex', transform: 'scaleX(-1)' },
-                children: { type: 'img', props: { src: homeHelmet, width: HELMET_W, height: HELMET_H, style: { display: 'flex' } } },
-              },
-            },
-          },
-        },
-        {
-          type: 'div',
-          props: {
-            style: {
-              position: 'absolute', display: 'flex', top: 14, left: '50%',
-              transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.75)',
-              fontFamily: 'Barlow', fontSize: 15, letterSpacing: 2,
+              position: 'absolute', display: 'flex', top: 10, left: '50%',
+              transform: 'translateX(-50%)', color: 'rgba(255,255,255,0.7)',
+              fontFamily: 'Barlow', fontSize: 13, letterSpacing: 2,
             },
             children: [
-              line.week != null ? `WEEK ${line.week}` : '',
+              `WEEK ${line.week}`,
               line.matchNumber != null ? ` · #${line.matchNumber}` : '',
             ].join(''),
           },
         },
-        // Bold lettering deliberately overlaps the bottom of the helmets --
-        // the poster-typography layering the reference graphic uses -- so a
-        // dark backing panel sits behind each so it stays legible over
-        // lighter helmets (Dolphins, Bills, etc).
         {
           type: 'div',
           props: {
             style: {
-              position: 'absolute', display: 'flex', flexDirection: 'column',
-              bottom: 14, left: 20, padding: '6px 14px', borderRadius: 4,
-              background: 'rgba(0,0,0,0.45)',
+              position: 'absolute', display: 'flex', alignItems: 'center',
+              top: 0, left: 0, right: 0, bottom: 0, padding: '0 12px',
             },
             children: [
-              { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 60, lineHeight: 1 }, children: line.awayAbbr } },
-              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.8)', fontFamily: 'Barlow', fontSize: 15, marginTop: 2 }, children: away.name || '' } },
+              helmetBox(awayHelmet, { flip: false, rotate: -4 }),
+              abbrBox(line.awayAbbr, 'flex-start'),
+              {
+                type: 'div',
+                props: {
+                  style: {
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    width: 72, height: 72, borderRadius: 12, flexShrink: 0,
+                    background: '#FFFFFF', border: `3px solid ${GOLD}`,
+                  },
+                  children: badgeLogo
+                    ? { type: 'img', props: { src: badgeLogo, width: 48, height: 48, style: { display: 'flex', borderRadius: 24 } } }
+                    : { type: 'div', props: { style: { display: 'flex', color: DARK_BG, fontFamily: 'Anton', fontSize: 18 }, children: 'VS' } },
+                },
+              },
+              abbrBox(line.homeAbbr, 'flex-end'),
+              helmetBox(homeHelmet, { flip: true, rotate: 4 }),
             ],
           },
         },
-        {
-          type: 'div',
-          props: {
-            style: {
-              position: 'absolute', display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
-              bottom: 14, right: 20, padding: '6px 14px', borderRadius: 4,
-              background: 'rgba(0,0,0,0.45)',
-            },
-            children: [
-              { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Anton', fontSize: 60, lineHeight: 1 }, children: line.homeAbbr } },
-              { type: 'div', props: { style: { display: 'flex', color: 'rgba(255,255,255,0.8)', fontFamily: 'Barlow', fontSize: 15, marginTop: 2 }, children: home.name || '' } },
-            ],
-          },
-        },
-        {
-          type: 'div',
-          props: {
-            style: {
-              position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              top: HERO_H - 40, left: '50%', transform: 'translate(-50%, -50%)',
-              width: 68, height: 68, borderRadius: 34,
-              background: DARK_BG, border: `3px solid ${GOLD}`,
-            },
-            children: badgeLogo
-              ? { type: 'img', props: { src: badgeLogo, width: 44, height: 44, style: { display: 'flex', borderRadius: 22 } } }
-              : { type: 'div', props: { style: { display: 'flex', color: GOLD, fontFamily: 'Anton', fontSize: 20 }, children: 'VS' } },
-          },
-        },
-      ],
+      ].filter(Boolean),
     },
   };
 
@@ -303,13 +309,13 @@ async function renderOddsCard(line) {
             children: [
               marketRow(
                 'MONEYLINE',
-                { title: away.name || line.awayAbbr, odds: americanOdds(line.moneylineAway) },
-                { title: home.name || line.homeAbbr, odds: americanOdds(line.moneylineHome) }
+                { title: away.name || line.awayAbbr, odds: americanOdds(line.moneylineAway), owner: awayOwner },
+                { title: home.name || line.homeAbbr, odds: americanOdds(line.moneylineHome), owner: homeOwner }
               ),
               marketRow(
                 'POINT SPREAD',
-                { title: `${away.name || line.awayAbbr} ${spreadAwayValue > 0 ? '+' : ''}${spreadAwayValue ?? '—'}`, odds: americanOdds(line.spreadAwayOdds) },
-                { title: `${home.name || line.homeAbbr} ${line.spreadHome > 0 ? '+' : ''}${line.spreadHome ?? '—'}`, odds: americanOdds(line.spreadHomeOdds) }
+                { title: `${away.name || line.awayAbbr} ${spreadAwayValue > 0 ? '+' : ''}${spreadAwayValue ?? '—'}`, odds: americanOdds(line.spreadAwayOdds), owner: awayOwner },
+                { title: `${home.name || line.homeAbbr} ${line.spreadHome > 0 ? '+' : ''}${line.spreadHome ?? '—'}`, odds: americanOdds(line.spreadHomeOdds), owner: homeOwner }
               ),
               marketRow(
                 'TOTAL',

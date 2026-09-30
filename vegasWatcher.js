@@ -79,7 +79,14 @@ async function postLine(client, line) {
   if (!channel || !channel.isTextBased()) {
     throw new Error("channel not found or not text-based");
   }
-  const message = await channel.send({ files: [file], components: [marketButtons(line.id)] });
+  // allowedMentions must opt in explicitly or the ping is inert text --
+  // same pattern tradeVoting.js uses for its own @everyone submission ping.
+  const message = await channel.send({
+    content: "@everyone new line is up",
+    files: [file],
+    components: [marketButtons(line.id)],
+    allowedMentions: { parse: ["everyone"] },
+  });
   await updateEntity("VegasLine", line.id, {
     discord_channel_id: CHANNEL_ID,
     discord_message_id: message.id,
