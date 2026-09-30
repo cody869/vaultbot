@@ -23,12 +23,19 @@ import { isGameFinal } from "./scorebugHelper.js";
 const CHANNEL_ID = process.env.VEGAS_CHANNEL_ID;
 const POLL_MS = Number(process.env.VEGAS_POLL_SECONDS || 60) * 1000;
 
+// Staff enter the cutoff in Eastern time (VegasAdmin.jsx converts it to a
+// correct UTC instant before saving) -- display has to pin the same zone
+// explicitly too, or this reads in whatever timezone the Railway container
+// happens to be in instead. timeZoneName: "short" picks EST/EDT correctly
+// on its own depending on the date, no DST math needed here.
 function formatCutoff(cutoffAt) {
   if (!cutoffAt) return null;
   const d = new Date(cutoffAt);
   if (Number.isNaN(d.getTime())) return null;
   return d.toLocaleString("en-US", {
+    timeZone: "America/New_York",
     weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+    timeZoneName: "short",
   });
 }
 
