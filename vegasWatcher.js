@@ -135,6 +135,109 @@ async function postSettlementSummary(client, line, game, result) {
   console.log(`[VEGAS] settled line ${line.id}: ${won} won, ${lost} lost, ${push} push`);
 }
 
+// In-memory "last rendered odds" per line, so the card only gets re-edited
+// and announced when a market actually moved -- not on every poll tick.
+// Resets on container restart; a move that happened while the bot was down
+// is picked up silently (re-seeded, not announced) on the first tick after
+// restart rather than retroactively posted, the same cold-start tradeoff
+// pollCached already accepts elsewhere in this file.
+const lastOdds = new Map();
+
+function oddsSnapshot(line) {
+  return {
+    moneyline_home: line.moneyline_home,
+    moneyline_away: line.moneyline_away,
+    spread_home: line.spread_home,
+    total_line: line.total_line,
+  };
+}
+
+function fmtOdds(n) {
+  if (n == null) return "—";
+  return n > 0 ? `+${n}` : `${n}`;
+}
+
+function describeMoves(prev, cur, line) {
+  const moves = [];
+  if (prev.moneyline_home !== cur.moneyline_home || prev.moneyline_away !== cur.moneyline_away) {
+    moves.push(
+      `Moneyline: ${line.away_team} ${fmtOdds(cur.moneyline_away)} (was ${fmtOdds(prev.moneyline_away)}) · ` +
+      `${line.home_team} ${fmtOdds(cur.moneyline_home)} (was ${fmtOdds(prev.moneyline_home)})`
+    );
+  }
+  if (prev.spread_home !== cur.spread_home) {
+    moves.push(`Spread: ${line.home_team} ${fmtOdds(cur.spread_home)} (was ${fmtOdds(prev.spread_home)})`);
+  }
+  if (prev.total_line !== cur.total_line) {
+    moves.push(`Total: ${cur.total_line} (was ${prev.total_line})`);
+  }
+  return moves;
+}
+
+// Re-renders and edits a line's posted odds card when placeBetOnLine has
+// moved its moneyline/spread/total off what's currently shown, and drops a
+// short follow-up explaining what moved and why (stake imbalance, not a
+// staff edit). First sighting of a line in this process just seeds the
+// cache -- the already-posted card already matches opening odds, so there's
+// nothing to announce yet.
+async function checkLineMovement(client, line) {
+  if (!line.discord_message_id) return;
+
+  const cur = oddsSnapshot(line);
+  const prev = lastOdds.get(line.id);
+  lastOdds.set(line.id, cur);
+  if (!prev) return;
+
+  const moves = describeMoves(prev, cur, line);
+  if (!moves.length) return;
+
+  const homeAbbr = abbrFromName(line.home_team);
+  const awayAbbr = abbrFromName(line.away_team);
+  if (!homeAbbr || !awayAbbr) return;
+
+  try {
+    const channel = await client.channels.fetch(CHANNEL_ID);
+    if (!channel || !channel.isTextBased()) return;
+    const message = await channel.messages.fetch(line.discord_message_id).catch(() => null);
+    if (!message) return;
+
+    const png = await renderOddsCard({
+      matchNumber: line.match_number,
+      week: line.week,
+      homeAbbr,
+      awayAbbr,
+      moneylineHome: line.moneyline_home,
+      moneylineAway: line.moneyline_away,
+      spreadHome: line.spread_home,
+      spreadHomeOdds: line.spread_home_odds,
+      spreadAwayOdds: line.spread_away_odds,
+      totalLine: line.total_line,
+      totalOverOdds: line.total_over_odds,
+      totalUnderOdds: line.total_under_odds,
+      minBet: line.min_bet ?? 100,
+      maxBet: line.max_bet ?? 1000,
+      cutoffLabel: formatCutoff(line.cutoff_at),
+    });
+    const filename = `vegas-${awayAbbr}-${homeAbbr}-wk${line.week ?? "x"}.png`;
+    await message.edit({ files: [new AttachmentBuilder(png, { name: filename })] });
+
+    await channel.send({
+      content: `📈 **Line moved** — ${line.away_team} @ ${line.home_team} (#${line.match_number})\n${moves.join("\n")}`,
+      reply: { messageReference: message.id },
+      allowedMentions: { parse: [] },
+    });
+    console.log(`[VEGAS] line ${line.id} moved: ${moves.join(" | ")}`);
+  } catch (err) {
+    console.error(`[VEGAS] movement update failed for ${line.id}: ${err.message}`);
+  }
+}
+
+async function checkMovements(client, openLines) {
+  for (const line of openLines.filter((l) => l.discord_message_id)) {
+    await checkLineMovement(client, line);
+  }
+}
+
 async function postNewLines(client, openLines) {
   const toPost = openLines.filter((l) => !l.discord_message_id);
   for (const line of toPost) {
@@ -198,6 +301,7 @@ async function tick(client) {
   if (!openLines.length) return;
 
   await postNewLines(client, openLines);
+  await checkMovements(client, openLines);
   await triggerSettlements(client, openLines, games);
 }
 
