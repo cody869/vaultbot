@@ -386,6 +386,84 @@ function buildDevUpgradesSection(upgrades, images) {
   return { node, height: H };
 }
 
+const VEGAS_LABEL_H = 30;
+const VEGAS_ROW_H = 36;
+const VEGAS_MAX_SHOWN = 8;
+const VEGAS_FONT = 16;
+
+function fmtOdds(n) {
+  if (n == null) return '—';
+  return n > 0 ? `+${n}` : `${n}`;
+}
+
+// More negative American odds = shorter price = the favorite. Equal prices
+// (a true pick'em, or missing data) report no favorite rather than guessing.
+function favoriteFromLine(line, home, away) {
+  const mh = line.moneylineHome;
+  const ma = line.moneylineAway;
+  if (mh == null || ma == null || mh === ma) return null;
+  return mh < ma
+    ? { label: home.abbr || home.name, odds: mh }
+    : { label: away.abbr || away.name, odds: ma };
+}
+
+function buildVegasSection(lines) {
+  const shown = lines.slice(0, VEGAS_MAX_SHOWN);
+  const overflow = lines.length - shown.length;
+
+  const rows = shown.map((line, i) => {
+    const home = resolveTeam(line.homeTeam);
+    const away = resolveTeam(line.awayTeam);
+    const fav = favoriteFromLine(line, home, away);
+    const top = 20 + VEGAS_LABEL_H + i * VEGAS_ROW_H;
+    const matchup = `${line.matchNumber ? `#${line.matchNumber}  ` : ''}${away.abbr || away.name} @ ${home.abbr || home.name}`;
+    const favText = fav ? `${fav.label} ${fmtOdds(fav.odds)}` : 'Even money';
+
+    return {
+      type: 'div',
+      props: {
+        style: {
+          position: 'absolute', display: 'flex', alignItems: 'center',
+          justifyContent: 'space-between', top, left: MARGIN, width: USABLE_W,
+        },
+        children: [
+          { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Barlow', fontSize: VEGAS_FONT }, children: matchup } },
+          { type: 'div', props: { style: { display: 'flex', color: GOLD, fontFamily: 'Barlow', fontSize: VEGAS_FONT }, children: favText } },
+        ],
+      },
+    };
+  });
+
+  const bodyEnd = 20 + VEGAS_LABEL_H + shown.length * VEGAS_ROW_H;
+  const H = bodyEnd + (overflow > 0 ? 22 : 0) + 14;
+
+  const node = {
+    type: 'div',
+    props: {
+      style: { width: W, height: H, display: 'flex', position: 'relative', background: '#171C24' },
+      children: [
+        { type: 'div', props: { style: { position: 'absolute', top: 0, left: 0, width: W, height: 1, display: 'flex', background: 'rgba(212,168,67,0.4)' } } },
+        {
+          type: 'div',
+          props: {
+            style: { position: 'absolute', display: 'flex', top: 16, left: MARGIN, color: GOLD, fontFamily: 'Barlow', fontSize: 13, letterSpacing: 1 },
+            children: 'VEGAS — OPEN LINES',
+          },
+        },
+        ...rows,
+        overflow > 0 && {
+          type: 'div',
+          props: {
+            style: { position: 'absolute', display: 'flex', top: bodyEnd, left: MARGIN, color: 'rgba(255,255,255,0.5)', fontFamily: 'Barlow', fontSize: 14 },
+            children: `+${overflow} more`,
+          },
+        },
+      ].filter(Boolean),
+    },
+  };
+  return { node, height: H };
+}
+
 const PREVIEW_LABEL_H = 30;
 const PREVIEW_TEAMS_H = 40;
 const PREVIEW_BLURB_FONT = 16;
@@ -449,15 +527,17 @@ function buildNextGameSection(nextGame, awayLogo, homeLogo) {
  * @param {string[]} [d.storylines]
  * @param {{playerFullName: string, teamName?: string, fromTrait: string|number, toTrait: string|number}[]} [d.devUpgrades]
  * @param {object} [d.nextGame] - {awayTeam, homeTeam, blurb}
+ * @param {{matchNumber?: number, homeTeam: string, awayTeam: string, moneylineHome?: number, moneylineAway?: number}[]} [d.vegasLines]
  * @returns {Promise<Buffer>} PNG bytes
  */
 async function renderWeeklyDigestCard(d) {
-  const { week, seasonNumber, headline, summary, topGame, statLeaders, storylines, devUpgrades, nextGame } = d;
+  const { week, seasonNumber, headline, summary, topGame, statLeaders, storylines, devUpgrades, nextGame, vegasLines } = d;
   const hasTopGame = !!(topGame && topGame.homeTeam && topGame.awayTeam);
   const hasStrip = Array.isArray(statLeaders) && statLeaders.length > 0;
   const hasStorylines = Array.isArray(storylines) && storylines.length > 0;
   const hasDev = Array.isArray(devUpgrades) && devUpgrades.length > 0;
   const hasNextGame = !!(nextGame && nextGame.homeTeam && nextGame.awayTeam);
+  const hasVegas = Array.isArray(vegasLines) && vegasLines.length > 0;
 
   const home = hasTopGame ? resolveTeam(topGame.homeTeam) : null;
   const away = hasTopGame ? resolveTeam(topGame.awayTeam) : null;
@@ -499,6 +579,7 @@ async function renderWeeklyDigestCard(d) {
     { ...nextGame, awayAbbr: nextAway.abbr, homeAbbr: nextHome.abbr },
     nextAwayLogo, nextHomeLogo,
   ));
+  if (hasVegas) sections.push(buildVegasSection(vegasLines));
 
   const H = sections.reduce((sum, s) => sum + s.height, 0);
 

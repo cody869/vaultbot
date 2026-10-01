@@ -30,6 +30,11 @@
 // update on the Base44 side matching these exact names:
 //   player_dev_upgrades  array of {player_fullName, team_name, from_trait, to_trait}
 //   next_game_of_week    {home_team, away_team, blurb}
+//
+// The Vegas section is populated live from the VegasLine entity instead
+// (open lines for this digest's week/season, favorite derived from
+// moneyline), not from a WeeklyDigest field -- see the openLines fetch in
+// postDigest().
 
 import { AttachmentBuilder } from "discord.js";
 import { list, updateEntity, pollCached } from "./vault.js";
@@ -75,6 +80,13 @@ async function postDigest(client, d) {
   const token = await claim(d);
   if (!token) return;
 
+  let openLines = [];
+  try {
+    openLines = await list("VegasLine", { status: "open", season_number: d.season_number, week: d.week }, { limit: 50 });
+  } catch (err) {
+    console.warn(`[DIGEST] vegas lines fetch failed for ${d.id}: ${err.message}`);
+  }
+
   let msg;
   try {
     const png = await renderWeeklyDigestCard({
@@ -111,6 +123,13 @@ async function postDigest(client, d) {
         awayTeam: d.next_game_of_week.away_team,
         blurb: d.next_game_of_week.blurb,
       },
+      vegasLines: openLines.map((l) => ({
+        matchNumber: l.match_number,
+        homeTeam: l.home_team,
+        awayTeam: l.away_team,
+        moneylineHome: l.moneyline_home,
+        moneylineAway: l.moneyline_away,
+      })),
     });
     const filename = `weekly-digest-${d.season_number ?? "x"}-wk${d.week ?? "x"}.png`;
     const file = new AttachmentBuilder(png, { name: filename });
