@@ -387,13 +387,18 @@ function buildDevUpgradesSection(upgrades, images) {
 }
 
 const VEGAS_LABEL_H = 30;
-const VEGAS_ROW_H = 36;
+const VEGAS_ROW_H = 50;
 const VEGAS_MAX_SHOWN = 8;
 const VEGAS_FONT = 16;
+const VEGAS_FLOW_FONT = 13;
 
 function fmtOdds(n) {
   if (n == null) return '—';
   return n > 0 ? `+${n}` : `${n}`;
+}
+
+function fmtMoney(n) {
+  return `$${Math.round(n).toLocaleString('en-US')}`;
 }
 
 // More negative American odds = shorter price = the favorite. Equal prices
@@ -407,6 +412,26 @@ function favoriteFromLine(line, home, away) {
     : { label: away.abbr || away.name, odds: ma };
 }
 
+// Moneyline/spread bets back a team directly (home/away); totals bets
+// (over/under) don't belong to either team, so they're reported as a
+// separate pair rather than folded into the home/away split.
+function moneyFlowText(flow, home, away) {
+  const f = flow || {};
+  const home$ = Number(f.home) || 0;
+  const away$ = Number(f.away) || 0;
+  const over$ = Number(f.over) || 0;
+  const under$ = Number(f.under) || 0;
+
+  const parts = [];
+  if (home$ || away$) {
+    parts.push(`${home.abbr || home.name} ${fmtMoney(home$)}  ·  ${away.abbr || away.name} ${fmtMoney(away$)}`);
+  }
+  if (over$ || under$) {
+    parts.push(`O ${fmtMoney(over$)} / U ${fmtMoney(under$)}`);
+  }
+  return parts.length ? parts.join('   ') : 'No bets yet';
+}
+
 function buildVegasSection(lines) {
   const shown = lines.slice(0, VEGAS_MAX_SHOWN);
   const overflow = lines.length - shown.length;
@@ -418,17 +443,33 @@ function buildVegasSection(lines) {
     const top = 20 + VEGAS_LABEL_H + i * VEGAS_ROW_H;
     const matchup = `${line.matchNumber ? `#${line.matchNumber}  ` : ''}${away.abbr || away.name} @ ${home.abbr || home.name}`;
     const favText = fav ? `${fav.label} ${fmtOdds(fav.odds)}` : 'Even money';
+    const flowText = moneyFlowText(line.moneyFlow, home, away);
 
     return {
       type: 'div',
       props: {
         style: {
-          position: 'absolute', display: 'flex', alignItems: 'center',
-          justifyContent: 'space-between', top, left: MARGIN, width: USABLE_W,
+          position: 'absolute', display: 'flex', flexDirection: 'column',
+          top, left: MARGIN, width: USABLE_W,
         },
         children: [
-          { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Barlow', fontSize: VEGAS_FONT }, children: matchup } },
-          { type: 'div', props: { style: { display: 'flex', color: GOLD, fontFamily: 'Barlow', fontSize: VEGAS_FONT }, children: favText } },
+          {
+            type: 'div',
+            props: {
+              style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
+              children: [
+                { type: 'div', props: { style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Barlow', fontSize: VEGAS_FONT }, children: matchup } },
+                { type: 'div', props: { style: { display: 'flex', color: GOLD, fontFamily: 'Barlow', fontSize: VEGAS_FONT }, children: favText } },
+              ],
+            },
+          },
+          {
+            type: 'div',
+            props: {
+              style: { display: 'flex', color: 'rgba(255,255,255,0.55)', fontFamily: 'Barlow', fontSize: VEGAS_FLOW_FONT, marginTop: 4 },
+              children: flowText,
+            },
+          },
         ],
       },
     };
@@ -527,7 +568,7 @@ function buildNextGameSection(nextGame, awayLogo, homeLogo) {
  * @param {string[]} [d.storylines]
  * @param {{playerFullName: string, teamName?: string, fromTrait: string|number, toTrait: string|number}[]} [d.devUpgrades]
  * @param {object} [d.nextGame] - {awayTeam, homeTeam, blurb}
- * @param {{matchNumber?: number, homeTeam: string, awayTeam: string, moneylineHome?: number, moneylineAway?: number}[]} [d.vegasLines]
+ * @param {{matchNumber?: number, homeTeam: string, awayTeam: string, moneylineHome?: number, moneylineAway?: number, moneyFlow?: {home?: number, away?: number, over?: number, under?: number}}[]} [d.vegasLines]
  * @returns {Promise<Buffer>} PNG bytes
  */
 async function renderWeeklyDigestCard(d) {

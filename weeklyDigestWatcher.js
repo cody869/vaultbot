@@ -31,10 +31,10 @@
 //   player_dev_upgrades  array of {player_fullName, team_name, from_trait, to_trait}
 //   next_game_of_week    {home_team, away_team, blurb}
 //
-// The Vegas section is populated live from the VegasLine entity instead
+// The Vegas section is populated live from VegasLine/VegasBet instead
 // (open lines for this digest's week/season, favorite derived from
-// moneyline), not from a WeeklyDigest field -- see the openLines fetch in
-// postDigest().
+// moneyline, money-flow totals summed per line), not from a WeeklyDigest
+// field -- see the openLines/moneyFlowByLine fetches in postDigest().
 
 import { AttachmentBuilder } from "discord.js";
 import { list, updateEntity, pollCached } from "./vault.js";
@@ -87,6 +87,34 @@ async function postDigest(client, d) {
     console.warn(`[DIGEST] vegas lines fetch failed for ${d.id}: ${err.message}`);
   }
 
+  // Per-line bet totals ("where is the money flowing"), fetched one line at
+  // a time -- featured games are a handful per week, so this stays cheap
+  // and avoids needing an $in-style filter vault.js's list() doesn't support.
+  const moneyFlowByLine = new Map();
+  await Promise.all(openLines.map(async (l) => {
+    let bets = [];
+    try {
+      bets = await list("VegasBet", { line_id: l.id }, { limit: 500 });
+    } catch (err) {
+      console.warn(`[DIGEST] vegas bets fetch failed for line ${l.id}: ${err.message}`);
+      return;
+    }
+    const flow = { home: 0, away: 0, over: 0, under: 0 };
+    for (const b of bets) {
+      if (b.status === "void") continue;
+      const stake = Number(b.stake) || 0;
+      if (b.market === "total") {
+        if (b.selection === "over") flow.over += stake;
+        else if (b.selection === "under") flow.under += stake;
+      } else if (b.selection === "home") {
+        flow.home += stake;
+      } else if (b.selection === "away") {
+        flow.away += stake;
+      }
+    }
+    moneyFlowByLine.set(l.id, flow);
+  }));
+
   let msg;
   try {
     const png = await renderWeeklyDigestCard({
@@ -129,6 +157,7 @@ async function postDigest(client, d) {
         awayTeam: l.away_team,
         moneylineHome: l.moneyline_home,
         moneylineAway: l.moneyline_away,
+        moneyFlow: moneyFlowByLine.get(l.id),
       })),
     });
     const filename = `weekly-digest-${d.season_number ?? "x"}-wk${d.week ?? "x"}.png`;
