@@ -94,6 +94,53 @@ async function postLine(client, line) {
   console.log(`[VEGAS] posted line ${line.id}: ${line.away_team} @ ${line.home_team} -> ${message.id}`);
 }
 
+// Same privacy rule as suspensionWatcher.js's resolveOwnerMention():
+// VegasBet.username is a LeagueMember join key and often an email, so it
+// must never be echoed into Discord. Each bet already carries its own
+// discord_user_id (set at placeBetOnLine time, not looked up after the
+// fact), so a real ping is almost always available; team_name is the safe
+// fallback when it isn't.
+function bettorLabel(bet) {
+  if (bet.discord_user_id) return `<@${bet.discord_user_id}>`;
+  if (bet.team_name) return bet.team_name;
+  return "Unknown bettor";
+}
+
+// What a bet actually backed, in plain English -- home/away selections
+// resolve against the line's own team names (moneyline/spread), while a
+// total bet has no team side at all (over/under).
+function describeBetSelection(bet, line) {
+  if (bet.market === "total") {
+    const side = bet.selection === "over" ? "Over" : "Under";
+    return bet.line_value != null ? `${side} ${bet.line_value}` : side;
+  }
+  const team = bet.selection === "home" ? line.home_team : line.away_team;
+  if (bet.market === "spread" && bet.line_value != null) {
+    return `${team} ${bet.line_value > 0 ? "+" : ""}${bet.line_value}`;
+  }
+  return `${team} ML`;
+}
+
+const GRADED_LIST_LIMIT = 15;
+
+function formatGradedList(graded, line, status, headerLabel) {
+  const matching = (graded || []).filter((g) => g.status === status);
+  if (!matching.length) return null;
+
+  const shown = matching.slice(0, GRADED_LIST_LIMIT);
+  const overflow = matching.length - shown.length;
+  const rows = shown.map((bet) => {
+    const stake = Number(bet.stake) || 0;
+    const tail = status === "won"
+      ? ` → won $${Math.round(Number(bet.potential_payout) || 0).toLocaleString("en-US")}`
+      : ` (-$${stake.toLocaleString("en-US")})`;
+    return `• ${bettorLabel(bet)} — ${describeBetSelection(bet, line)}, $${stake.toLocaleString("en-US")}${tail}`;
+  });
+  if (overflow > 0) rows.push(`…+${overflow} more`);
+
+  return `**${headerLabel}**\n${rows.join("\n")}`;
+}
+
 async function postSettlementSummary(client, line, game, result) {
   const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
@@ -101,6 +148,19 @@ async function postSettlementSummary(client, line, game, result) {
   const won = result.graded.filter((g) => g.status === "won").length;
   const lost = result.graded.filter((g) => g.status === "lost").length;
   const push = result.graded.filter((g) => g.status === "push").length;
+
+  const winnersBlock = formatGradedList(result.graded, line, "won", "🏆 Winners");
+  const losersBlock = formatGradedList(result.graded, line, "lost", "💀 Losers");
+  const content = [winnersBlock, losersBlock].filter(Boolean).join("\n\n") || undefined;
+  // Mention only the bettors actually named above -- an explicit allow-list
+  // rather than parse:["users"], so nothing else in the content can trigger
+  // an unintended ping.
+  const mentionIds = [...new Set(
+    (result.graded || [])
+      .filter((g) => (g.status === "won" || g.status === "lost") && g.discord_user_id)
+      .map((g) => g.discord_user_id)
+  )];
+  const allowedMentions = content ? { users: mentionIds } : { parse: [] };
 
   const homeAbbr = abbrFromName(line.home_team);
   const awayAbbr = abbrFromName(line.away_team);
@@ -115,7 +175,7 @@ async function postSettlementSummary(client, line, game, result) {
       won, lost, push,
     });
     const filename = `vegas-final-${awayAbbr}-${homeAbbr}-wk${line.week ?? "x"}.png`;
-    await channel.send({ files: [new AttachmentBuilder(png, { name: filename })] });
+    await channel.send({ content, files: [new AttachmentBuilder(png, { name: filename })], allowedMentions });
   } catch (err) {
     // A card render hiccup shouldn't hide that the line actually settled --
     // fall back to the plain-text summary so the result still posts.
@@ -129,7 +189,7 @@ async function postSettlementSummary(client, line, game, result) {
         { name: "Push", value: String(push), inline: true }
       )
       .setColor(0xd4a843);
-    await channel.send({ embeds: [embed] });
+    await channel.send({ content, embeds: [embed], allowedMentions });
   }
 
   console.log(`[VEGAS] settled line ${line.id}: ${won} won, ${lost} lost, ${push} push`);
