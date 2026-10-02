@@ -14,7 +14,6 @@ import { startVegasWatcher } from "./vegasWatcher.js";
 import {
   suggestVegasLines,
   handleBetCommand,
-  handleVegasCommand,
   handleVegasMarketButton,
   handleVegasSideButton,
   handleVegasStakeModal,
@@ -496,8 +495,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  // /bet replies for itself (buttons, then a modal) -- it must not go
-  // through the generic deferReply below, same reasoning as submit_trade.
+  // /bet place|mine replies for itself (buttons/modal for place, its own
+  // deferred ephemeral reply for mine) -- it must not go through the
+  // generic deferReply below, same reasoning as submit_trade.
   if (interaction.commandName === "bet") {
     await handleBetCommand(interaction);
     return;
@@ -774,10 +774,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       case "news": {
         await handleNews(interaction);
-        break;
-      }
-      case "wallet": {
-        await handleVegasCommand(interaction);
         break;
       }
       case "admin": {

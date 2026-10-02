@@ -1,6 +1,13 @@
 // vegasWatcher.js — posts newly-opened Vegas lines to Discord, and settles
 // them automatically once their linked Game goes final.
 //
+// VEGAS_CHANNEL_ID is the public sportsbook channel: odds cards, line
+// movement, and settlement results post there for everyone to see, but
+// nothing posted there is interactive (no buttons). Betting itself happens
+// through /bet place|mine (vegasCommands.js), meant to be run in a separate
+// channel -- restrict that at the Discord level (Server Settings ->
+// Integrations -> command channel permissions), not here.
+//
 // Mirrors scorebugWatcher.js's poll/claim/withFileLock pattern exactly: a
 // VegasLine posts itself once (discord_message_id is the claim token, same
 // idea as ScorebugPost/Suspension), and settlement is triggered once per
@@ -12,7 +19,7 @@
 //   VEGAS_CHANNEL_ID     channel to post odds cards and results into
 //   VEGAS_POLL_SECONDS   optional — default 60
 
-import { AttachmentBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
+import { AttachmentBuilder, EmbedBuilder } from "discord.js";
 import { list, updateEntity, invokeFunction, pollCached } from "./vault.js";
 import { isRateLimited } from "./base44Pacer.js";
 import { withFileLock } from "./fileLock.js";
@@ -37,14 +44,6 @@ function formatCutoff(cutoffAt) {
     weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
     timeZoneName: "short",
   });
-}
-
-function marketButtons(lineId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`vegas:mkt:${lineId}:moneyline`).setLabel("Moneyline").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`vegas:mkt:${lineId}:spread`).setLabel("Point Spread").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`vegas:mkt:${lineId}:total`).setLabel("Total").setStyle(ButtonStyle.Primary)
-  );
 }
 
 async function postLine(client, line) {
@@ -79,12 +78,14 @@ async function postLine(client, line) {
   if (!channel || !channel.isTextBased()) {
     throw new Error("channel not found or not text-based");
   }
+  // Display-only now -- no buttons. Betting moved to /bet place in its own
+  // channel (see vegasCommands.js's file comment), so this is just the
+  // public odds board plus a pointer to where to actually wager.
   // allowedMentions must opt in explicitly or the ping is inert text --
   // same pattern tradeVoting.js uses for its own @everyone submission ping.
   const message = await channel.send({
-    content: "@everyone new line is up",
+    content: "@everyone new line is up — use `/bet place` to wager.",
     files: [file],
-    components: [marketButtons(line.id)],
     allowedMentions: { parse: ["everyone"] },
   });
   await updateEntity("VegasLine", line.id, {

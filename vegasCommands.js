@@ -1,5 +1,13 @@
-// vegasCommands.js — /bet, /wallet, and the button->button->modal wizard
+// vegasCommands.js — /bet place|mine, and the button->button->modal wizard
 // that places a bet, for the in-house "Vegas" sportsbook.
+//
+// Odds cards and settlement results still post publicly to VEGAS_CHANNEL_ID
+// (vegasWatcher.js) for everyone to see, but they're display-only now --
+// no buttons on the public card. All interaction (placing a bet, checking
+// your own open bets and balance) happens through this one /bet command,
+// meant to be used in its own channel (restrict which channel via Discord's
+// own per-command channel permissions in Server Settings -> Integrations;
+// nothing here hardcodes a channel).
 //
 // Money math never happens here -- every path below ends in
 // invokeFunction("placeBetOnLine", {...}), which runs server-side
@@ -24,17 +32,22 @@ import { renderBetReceiptCard } from "./vegasCard.js";
 export const vegasCommand = [
   new SlashCommandBuilder()
     .setName("bet")
-    .setDescription("Place a bet on an open Vegas line")
-    .addStringOption((o) =>
-      o
-        .setName("line")
-        .setDescription("Start typing a matchup, then pick from the list")
-        .setRequired(true)
-        .setAutocomplete(true)
+    .setDescription("XCFL Sportsbook")
+    .addSubcommand((sub) =>
+      sub
+        .setName("place")
+        .setDescription("Place a bet on an open line")
+        .addStringOption((o) =>
+          o
+            .setName("line")
+            .setDescription("Start typing a matchup, then pick from the list")
+            .setRequired(true)
+            .setAutocomplete(true)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub.setName("mine").setDescription("Your balance and open bets")
     ),
-  new SlashCommandBuilder()
-    .setName("wallet")
-    .setDescription("Show your current-season Vegas balance"),
 ];
 
 async function openLines() {
@@ -63,7 +76,7 @@ async function getLine(lineId) {
   return rows[0] || null;
 }
 
-// Step 1 -> 2: market chosen (from the odds card or /bet), show side buttons.
+// Step 1 -> 2: market chosen (from /bet place's own market buttons), show side buttons.
 async function replyWithSideButtons(interaction, lineId, market) {
   const line = await getLine(lineId);
   if (!line) {
@@ -193,24 +206,23 @@ export async function handleVegasStakeModal(interaction) {
   }
 }
 
-// /bet replies for itself (a fresh interaction.reply with buttons) and must
-// NOT be routed through index.js's generic deferReply -- called as its own
-// early-return special case, same shape as submit_trade's. /wallet goes
-// through the normal deferred switch (handleVegasCommand below), same as
-// every other read-only command.
+// /bet replies for itself -- "place" opens with a fresh interaction.reply
+// (buttons), "mine" defers and edits (plain read) -- and so must NOT be
+// routed through index.js's generic deferReply, same shape as
+// submit_trade's. Both subcommands live under this one early-return case.
 export async function handleBetCommand(interaction) {
+  const sub = interaction.options.getSubcommand();
+  if (sub === "mine") {
+    await handleMyBetsCommand(interaction);
+    return;
+  }
   const lineId = interaction.options.getString("line");
   await replyWithMarketButtons(interaction, lineId);
 }
 
-export async function handleVegasCommand(interaction) {
-  if (interaction.commandName === "wallet") {
-    await handleWalletCommand(interaction);
-  }
-}
-
-// /bet skips straight to market choice (same first step the odds card's
-// buttons start with) rather than duplicating the whole wizard inline.
+// /bet place skips straight to market choice (same first step the old
+// public odds-card buttons used to start with) rather than duplicating the
+// whole wizard inline.
 async function replyWithMarketButtons(interaction, lineId) {
   const line = await getLine(lineId);
   if (!line) {
@@ -229,25 +241,68 @@ async function replyWithMarketButtons(interaction, lineId) {
   });
 }
 
-async function handleWalletCommand(interaction) {
+// What a bet backed, in plain English -- same shape as vegasCard.js's own
+// describeBetSelection, duplicated rather than imported since that one
+// works off abbreviations/the settlement card's own line context and this
+// one has the full VegasLine row on hand already.
+function describeBetSelection(bet, line) {
+  if (bet.market === "total") {
+    const side = bet.selection === "over" ? "Over" : "Under";
+    return bet.line_value != null ? `${side} ${bet.line_value}` : side;
+  }
+  const team = bet.selection === "home" ? line?.home_team : line?.away_team;
+  if (bet.market === "spread" && bet.line_value != null) {
+    return `${team} ${bet.line_value > 0 ? "+" : ""}${bet.line_value}`;
+  }
+  return `${team} ML`;
+}
+
+const MY_BETS_SHOWN = 20;
+
+async function handleMyBetsCommand(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
   const member = await getMemberByDiscordId(interaction.user.id);
   if (!member?.username) {
     await interaction.editReply("Couldn't find your linked league account — ask a commissioner to link your Discord to a team.");
     return;
   }
-  const wallets = await list("VegasWallet", { username: member.username }, { limit: 1, sort: "-season_number" });
+
+  const [wallets, bets, lines] = await Promise.all([
+    list("VegasWallet", { username: member.username }, { limit: 1, sort: "-season_number" }),
+    list("VegasBet", { username: member.username, status: "pending" }, { limit: 100 }),
+    list("VegasLine", {}, { limit: 500 }),
+  ]);
   const wallet = wallets[0];
-  if (!wallet) {
-    await interaction.editReply(`No Vegas wallet found for ${memberDisplayName(member)} yet.`);
-    return;
-  }
-  const eligible = (wallet.bets_placed ?? 0) >= 20;
+  const linesById = new Map(lines.map((l) => [l.id, l]));
+
   const embed = new EmbedBuilder()
-    .setTitle(`${memberDisplayName(member)}'s Wallet`)
-    .setColor(0xd4a843)
-    .addFields(
+    .setTitle(`${memberDisplayName(member)}'s Sportsbook`)
+    .setColor(0xd4a843);
+
+  if (wallet) {
+    const eligible = (wallet.bets_placed ?? 0) >= 20;
+    embed.addFields(
       { name: "Balance", value: `$${wallet.balance}`, inline: true },
       { name: "Bets this season", value: `${wallet.bets_placed ?? 0}${eligible ? " ✅ eligible" : " / 20 for prizes"}`, inline: true }
     );
+  } else {
+    embed.addFields({ name: "Balance", value: "No wallet yet", inline: true });
+  }
+
+  if (!bets.length) {
+    embed.addFields({ name: "Open bets", value: "None right now." });
+  } else {
+    const shown = bets.slice(0, MY_BETS_SHOWN);
+    const rows = shown.map((bet) => {
+      const line = linesById.get(bet.line_id);
+      const matchup = line ? `${line.away_team} @ ${line.home_team}` : "Unknown matchup";
+      const profit = (bet.potential_payout ?? bet.stake) - bet.stake;
+      return `• ${matchup} — ${describeBetSelection(bet, line)}, $${bet.stake} to win $${profit.toFixed(0)}`;
+    });
+    if (bets.length > shown.length) rows.push(`…+${bets.length - shown.length} more`);
+    embed.addFields({ name: `Open bets (${bets.length})`, value: rows.join("\n").slice(0, 1024) });
+  }
+
   await interaction.editReply({ embeds: [embed] });
 }

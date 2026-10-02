@@ -215,7 +215,7 @@ export const commands = [
   // /fantasy and its subcommands (best ball league).
   ...fantasyCommand,
 
-  // /bet and /wallet (in-house Vegas sportsbook).
+  // /bet place|mine (in-house Vegas sportsbook).
   ...vegasCommand,
 ].map((c) => c.toJSON());
 
