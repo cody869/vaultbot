@@ -76,6 +76,11 @@ async function getLine(lineId) {
   return rows[0] || null;
 }
 
+function fmtOdds(n) {
+  if (n == null) return "—";
+  return n > 0 ? `+${n}` : `${n}`;
+}
+
 // Step 1 -> 2: market chosen (from /bet place's own market buttons), show
 // side buttons. interaction.update() edits the SAME ephemeral message the
 // market buttons were on, rather than interaction.reply()'s default of
@@ -94,16 +99,22 @@ async function replyWithSideButtons(interaction, lineId, market) {
     return;
   }
 
+  const spreadAway = line.spread_home != null ? -line.spread_home : null;
   const buttons =
     market === "total"
       ? [
-          new ButtonBuilder().setCustomId(`vegas:side:${lineId}:total:over`).setLabel(`Over ${line.total_line ?? ""}`).setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`vegas:side:${lineId}:total:under`).setLabel(`Under ${line.total_line ?? ""}`).setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`vegas:side:${lineId}:total:over`).setLabel(`Over ${line.total_line ?? ""} (${fmtOdds(line.total_over_odds)})`).setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`vegas:side:${lineId}:total:under`).setLabel(`Under ${line.total_line ?? ""} (${fmtOdds(line.total_under_odds)})`).setStyle(ButtonStyle.Secondary),
         ]
-      : [
-          new ButtonBuilder().setCustomId(`vegas:side:${lineId}:${market}:away`).setLabel(`Bet on ${line.away_team}`).setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`vegas:side:${lineId}:${market}:home`).setLabel(`Bet on ${line.home_team}`).setStyle(ButtonStyle.Secondary),
-        ];
+      : market === "spread"
+        ? [
+            new ButtonBuilder().setCustomId(`vegas:side:${lineId}:spread:away`).setLabel(`${line.away_team} ${spreadAway > 0 ? "+" : ""}${spreadAway ?? "—"} (${fmtOdds(line.spread_away_odds)})`).setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`vegas:side:${lineId}:spread:home`).setLabel(`${line.home_team} ${line.spread_home > 0 ? "+" : ""}${line.spread_home ?? "—"} (${fmtOdds(line.spread_home_odds)})`).setStyle(ButtonStyle.Secondary),
+          ]
+        : [
+            new ButtonBuilder().setCustomId(`vegas:side:${lineId}:moneyline:away`).setLabel(`${line.away_team} (${fmtOdds(line.moneyline_away)})`).setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`vegas:side:${lineId}:moneyline:home`).setLabel(`${line.home_team} (${fmtOdds(line.moneyline_home)})`).setStyle(ButtonStyle.Secondary),
+          ];
 
   await interaction.update({
     content: `**${line.away_team} @ ${line.home_team}** — ${market === "moneyline" ? "Moneyline" : market === "spread" ? "Point Spread" : "Total"}. Pick a side:`,
@@ -116,6 +127,22 @@ export async function handleVegasMarketButton(interaction) {
   await replyWithSideButtons(interaction, lineId, market);
 }
 
+// What a side is actually worth right now, for the stake modal's title --
+// the last thing a bettor sees before committing money, so the odds being
+// locked in need to be right there, not just implied by an earlier step.
+function describeSideForModal(market, selection, line) {
+  if (market === "total") {
+    const side = selection === "over" ? "Over" : "Under";
+    return { label: `${side} ${line?.total_line ?? ""}`, odds: selection === "over" ? line?.total_over_odds : line?.total_under_odds };
+  }
+  const team = selection === "home" ? line?.home_team : line?.away_team;
+  if (market === "spread") {
+    const val = selection === "home" ? line?.spread_home : (line?.spread_home != null ? -line.spread_home : null);
+    return { label: `${team} ${val > 0 ? "+" : ""}${val ?? ""}`, odds: selection === "home" ? line?.spread_home_odds : line?.spread_away_odds };
+  }
+  return { label: team, odds: selection === "home" ? line?.moneyline_home : line?.moneyline_away };
+}
+
 // Step 2 -> 3: side chosen, open the stake modal directly (showModal() must
 // be the immediate response to the interaction -- no reply/defer first).
 export async function handleVegasSideButton(interaction) {
@@ -123,10 +150,11 @@ export async function handleVegasSideButton(interaction) {
   const line = await getLine(lineId);
   const minBet = line?.min_bet ?? 100;
   const maxBet = line?.max_bet ?? 1000;
+  const { label: sideLabel, odds: sideOdds } = describeSideForModal(market, selection, line);
 
   const modal = new ModalBuilder()
     .setCustomId(`vegas:stake:${lineId}:${market}:${selection}`)
-    .setTitle("Place your bet");
+    .setTitle(`${sideLabel} @ ${fmtOdds(sideOdds)}`.slice(0, 45));
 
   const stakeInput = new TextInputBuilder()
     .setCustomId("stake")
@@ -249,8 +277,14 @@ async function replyWithMarketButtons(interaction, lineId) {
     new ButtonBuilder().setCustomId(`vegas:mkt:${lineId}:spread`).setLabel("Point Spread").setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`vegas:mkt:${lineId}:total`).setLabel("Total").setStyle(ButtonStyle.Primary),
   ];
+  const spreadAway = line.spread_home != null ? -line.spread_home : null;
+  const odds =
+    `Moneyline: ${line.away_team} ${fmtOdds(line.moneyline_away)} · ${line.home_team} ${fmtOdds(line.moneyline_home)}\n` +
+    `Spread: ${line.away_team} ${spreadAway > 0 ? "+" : ""}${spreadAway ?? "—"} (${fmtOdds(line.spread_away_odds)}) · ` +
+    `${line.home_team} ${line.spread_home > 0 ? "+" : ""}${line.spread_home ?? "—"} (${fmtOdds(line.spread_home_odds)})\n` +
+    `Total: O ${line.total_line ?? "—"} (${fmtOdds(line.total_over_odds)}) · U ${line.total_line ?? "—"} (${fmtOdds(line.total_under_odds)})`;
   await interaction.reply({
-    content: `**${line.away_team} @ ${line.home_team}** — pick a market:`,
+    content: `**${line.away_team} @ ${line.home_team}** — pick a market:\n${odds}`,
     components: [new ActionRowBuilder().addComponents(buttons)],
     ephemeral: true,
   });
