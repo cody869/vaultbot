@@ -186,14 +186,18 @@ export async function handleVegasStakeModal(interaction) {
     await interaction.deferReply({ ephemeral: true });
   }
 
+  // editReply() only changes what you pass it -- components aren't cleared
+  // just by omitting them, so every exit path below has to say components:
+  // [] explicitly or the side-pick buttons stay live under the final result
+  // (confirmed live: still clickable after a bet had already gone through).
   if (!Number.isFinite(stake) || stake <= 0) {
-    await interaction.editReply("Stake has to be a positive number.");
+    await interaction.editReply({ content: "Stake has to be a positive number.", components: [] });
     return;
   }
 
   const member = await getMemberByDiscordId(interaction.user.id);
   if (!member?.username) {
-    await interaction.editReply("Couldn't find your linked league account — ask a commissioner to link your Discord to a team.");
+    await interaction.editReply({ content: "Couldn't find your linked league account — ask a commissioner to link your Discord to a team.", components: [] });
     return;
   }
 
@@ -209,12 +213,12 @@ export async function handleVegasStakeModal(interaction) {
     });
   } catch (err) {
     console.error("[VEGAS] placeBetOnLine call failed:", err.message);
-    await interaction.editReply("Couldn't reach the Vault to place that bet — try again in a moment.");
+    await interaction.editReply({ content: "Couldn't reach the Vault to place that bet — try again in a moment.", components: [] });
     return;
   }
 
   if (result?.error) {
-    await interaction.editReply(`❌ ${result.error}`);
+    await interaction.editReply({ content: `❌ ${result.error}`, components: [] });
     return;
   }
 
@@ -241,11 +245,15 @@ export async function handleVegasStakeModal(interaction) {
     await interaction.editReply({
       content: `✅ Bet placed. New balance: $${result.balance}`,
       files: [{ attachment: png, name: "bet-receipt.png" }],
+      components: [],
     });
   } catch (err) {
     // A bad logo fetch shouldn't hide a real, successful bet.
     console.error("[VEGAS] receipt card render failed:", err.message);
-    await interaction.editReply(`✅ Bet placed: ${description} for $${bet.stake} @ ${bet.odds > 0 ? "+" : ""}${bet.odds}. New balance: $${result.balance}`);
+    await interaction.editReply({
+      content: `✅ Bet placed: ${description} for $${bet.stake} @ ${bet.odds > 0 ? "+" : ""}${bet.odds}. New balance: $${result.balance}`,
+      components: [],
+    });
   }
 }
 
