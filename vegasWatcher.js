@@ -94,73 +94,26 @@ async function postLine(client, line) {
   console.log(`[VEGAS] posted line ${line.id}: ${line.away_team} @ ${line.home_team} -> ${message.id}`);
 }
 
-// Same privacy rule as suspensionWatcher.js's resolveOwnerMention():
-// VegasBet.username is a LeagueMember join key and often an email, so it
-// must never be echoed into Discord. Each bet already carries its own
-// discord_user_id (set at placeBetOnLine time, not looked up after the
-// fact), so a real ping is almost always available; team_name is the safe
-// fallback when it isn't.
-function bettorLabel(bet) {
-  if (bet.discord_user_id) return `<@${bet.discord_user_id}>`;
-  if (bet.team_name) return bet.team_name;
-  return "Unknown bettor";
-}
-
-// What a bet actually backed, in plain English -- home/away selections
-// resolve against the line's own team names (moneyline/spread), while a
-// total bet has no team side at all (over/under).
-function describeBetSelection(bet, line) {
-  if (bet.market === "total") {
-    const side = bet.selection === "over" ? "Over" : "Under";
-    return bet.line_value != null ? `${side} ${bet.line_value}` : side;
-  }
-  const team = bet.selection === "home" ? line.home_team : line.away_team;
-  if (bet.market === "spread" && bet.line_value != null) {
-    return `${team} ${bet.line_value > 0 ? "+" : ""}${bet.line_value}`;
-  }
-  return `${team} ML`;
-}
-
-const GRADED_LIST_LIMIT = 15;
-
-function formatGradedList(graded, line, status, headerLabel) {
-  const matching = (graded || []).filter((g) => g.status === status);
-  if (!matching.length) return null;
-
-  const shown = matching.slice(0, GRADED_LIST_LIMIT);
-  const overflow = matching.length - shown.length;
-  const rows = shown.map((bet) => {
-    const stake = Number(bet.stake) || 0;
-    const tail = status === "won"
-      ? ` → won $${Math.round(Number(bet.potential_payout) || 0).toLocaleString("en-US")}`
-      : ` (-$${stake.toLocaleString("en-US")})`;
-    return `• ${bettorLabel(bet)} — ${describeBetSelection(bet, line)}, $${stake.toLocaleString("en-US")}${tail}`;
-  });
-  if (overflow > 0) rows.push(`…+${overflow} more`);
-
-  return `**${headerLabel}**\n${rows.join("\n")}`;
-}
-
 async function postSettlementSummary(client, line, game, result) {
   const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
 
-  const won = result.graded.filter((g) => g.status === "won").length;
-  const lost = result.graded.filter((g) => g.status === "lost").length;
-  const push = result.graded.filter((g) => g.status === "push").length;
+  // result.graded (settleVegasLine's own response) only carries
+  // {bet_id, username, status, credit} -- enough for counts, but not enough
+  // to show who bet what for how much. Re-fetch the now-settled VegasBet
+  // rows for the full picture (market/selection/line_value/stake/
+  // potential_payout/discord_user_id), which the card resolves to real
+  // bettor names and renders directly -- confirmed live that naming names
+  // only in a side Discord message (not the card itself) read as detached
+  // from the result it was describing.
+  const bets = await list("VegasBet", { line_id: line.id }, { limit: 500 }).catch((err) => {
+    console.warn(`[VEGAS] settled-bets fetch failed for ${line.id}: ${err.message}`);
+    return [];
+  });
 
-  const winnersBlock = formatGradedList(result.graded, line, "won", "🏆 Winners");
-  const losersBlock = formatGradedList(result.graded, line, "lost", "💀 Losers");
-  const content = [winnersBlock, losersBlock].filter(Boolean).join("\n\n") || undefined;
-  // Mention only the bettors actually named above -- an explicit allow-list
-  // rather than parse:["users"], so nothing else in the content can trigger
-  // an unintended ping.
-  const mentionIds = [...new Set(
-    (result.graded || [])
-      .filter((g) => (g.status === "won" || g.status === "lost") && g.discord_user_id)
-      .map((g) => g.discord_user_id)
-  )];
-  const allowedMentions = content ? { users: mentionIds } : { parse: [] };
+  const won = bets.filter((b) => b.status === "won").length;
+  const lost = bets.filter((b) => b.status === "lost").length;
+  const push = bets.filter((b) => b.status === "push").length;
 
   const homeAbbr = abbrFromName(line.home_team);
   const awayAbbr = abbrFromName(line.away_team);
@@ -173,9 +126,10 @@ async function postSettlementSummary(client, line, game, result) {
       week: line.week,
       matchNumber: line.match_number,
       won, lost, push,
+      bets,
     });
     const filename = `vegas-final-${awayAbbr}-${homeAbbr}-wk${line.week ?? "x"}.png`;
-    await channel.send({ content, files: [new AttachmentBuilder(png, { name: filename })], allowedMentions });
+    await channel.send({ files: [new AttachmentBuilder(png, { name: filename })] });
   } catch (err) {
     // A card render hiccup shouldn't hide that the line actually settled --
     // fall back to the plain-text summary so the result still posts.
@@ -189,7 +143,7 @@ async function postSettlementSummary(client, line, game, result) {
         { name: "Push", value: String(push), inline: true }
       )
       .setColor(0xd4a843);
-    await channel.send({ content, embeds: [embed], allowedMentions });
+    await channel.send({ embeds: [embed] });
   }
 
   console.log(`[VEGAS] settled line ${line.id}: ${won} won, ${lost} lost, ${push} push`);

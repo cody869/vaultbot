@@ -14,7 +14,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { getTeam } from './teamLogos.js';
 import { loadFonts, loadLogoDataUri, GOLD, DARK_BG } from './cardKit.js';
-import { findMemberByTeam, memberDisplayName, getLeagueMembers, list } from './vault.js';
+import { findMemberByTeam, memberDisplayName, getLeagueMembers, getMemberByDiscordId, list } from './vault.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -640,6 +640,84 @@ async function renderBetReceiptCard(bet) {
   return resvg.render().asPng();
 }
 
+// What a bet actually backed, in plain English -- home/away selections
+// resolve against the line's own team abbreviations (moneyline/spread),
+// while a total bet has no team side at all (over/under).
+function describeBetSelection(bet, awayAbbr, homeAbbr) {
+  if (bet.market === 'total') {
+    const side = bet.selection === 'over' ? 'Over' : 'Under';
+    return bet.line_value != null ? `${side} ${bet.line_value}` : side;
+  }
+  const team = bet.selection === 'home' ? homeAbbr : awayAbbr;
+  if (bet.market === 'spread' && bet.line_value != null) {
+    return `${team} ${bet.line_value > 0 ? '+' : ''}${bet.line_value}`;
+  }
+  return `${team} ML`;
+}
+
+const RESULT_ROW_H = 24;
+const RESULT_LABEL_H = 24;
+const RESULT_MAX_SHOWN = 12;
+const RESULT_FONT = 14;
+const RESULT_COLORS = { won: '#3FA34D', lost: '#C60C30' };
+
+function resultListBlock(label, bets, names, awayAbbr, homeAbbr, status) {
+  const shown = bets.slice(0, RESULT_MAX_SHOWN);
+  const overflow = bets.length - shown.length;
+  const color = RESULT_COLORS[status];
+
+  const rows = shown.map((bet, i) => {
+    const name = names.get(bet.id) || bet.team_name || 'Unknown bettor';
+    const stake = Number(bet.stake) || 0;
+    const tail = status === 'won'
+      ? `$${Math.round(Number(bet.potential_payout) || 0).toLocaleString('en-US')}`
+      : `-$${stake.toLocaleString('en-US')}`;
+    return {
+      type: 'div',
+      props: {
+        style: {
+          position: 'absolute', display: 'flex', alignItems: 'center',
+          justifyContent: 'space-between', top: RESULT_LABEL_H + i * RESULT_ROW_H, left: 0, width: '100%',
+        },
+        children: [
+          {
+            type: 'div',
+            props: {
+              style: { display: 'flex', color: '#FFFFFF', fontFamily: 'Barlow', fontSize: RESULT_FONT },
+              children: `${name} — ${describeBetSelection(bet, awayAbbr, homeAbbr)}, $${stake.toLocaleString('en-US')}`,
+            },
+          },
+          { type: 'div', props: { style: { display: 'flex', color, fontFamily: 'Barlow', fontSize: RESULT_FONT }, children: tail } },
+        ],
+      },
+    };
+  });
+
+  const bodyEnd = RESULT_LABEL_H + shown.length * RESULT_ROW_H;
+  const H = bodyEnd + (overflow > 0 ? 20 : 0);
+
+  return {
+    height: H,
+    node: {
+      type: 'div',
+      props: {
+        style: { display: 'flex', flexDirection: 'column', position: 'relative', flex: 1, height: H },
+        children: [
+          { type: 'div', props: { style: { display: 'flex', color, fontFamily: 'Barlow', fontSize: 13, letterSpacing: 1.5 }, children: label } },
+          ...rows,
+          overflow > 0 && {
+            type: 'div',
+            props: {
+              style: { position: 'absolute', display: 'flex', top: bodyEnd, left: 0, color: 'rgba(255,255,255,0.5)', fontFamily: 'Barlow', fontSize: 12 },
+              children: `+${overflow} more`,
+            },
+          },
+        ].filter(Boolean),
+      },
+    },
+  };
+}
+
 /**
  * Posted once a featured line's game goes final -- reuses the odds card's
  * hero (same gradient/grain/smoke/player-art treatment, "FINAL" in place
@@ -656,13 +734,42 @@ async function renderBetReceiptCard(bet) {
  * @param {number} result.won
  * @param {number} result.lost
  * @param {number} result.push
+ * @param {object[]} [result.bets] - settled VegasBet rows for this line (market, selection,
+ *   line_value, stake, potential_payout, status, discord_user_id, team_name) -- won/lost
+ *   ones are listed by name directly on the card.
  * @returns {Promise<Buffer>} PNG bytes
  */
 async function renderSettlementCard(result) {
   const home = getTeam(result.homeAbbr);
   const away = getTeam(result.awayAbbr);
+
+  const wonBets = (result.bets || []).filter((b) => b.status === 'won');
+  const lostBets = (result.bets || []).filter((b) => b.status === 'lost');
+  const namedBets = [...wonBets, ...lostBets].slice(0, RESULT_MAX_SHOWN * 2);
+
+  // Same privacy rule as suspensionWatcher.js's resolveOwnerMention():
+  // VegasBet.username is a LeagueMember join key and often an email, so it
+  // must never appear on the card. discord_user_id resolves to a real,
+  // safe display name; team_name (the row's own fallback) is used when a
+  // member can't be found.
+  const namePairs = await Promise.all(namedBets.map(async (bet) => {
+    try {
+      const member = await getMemberByDiscordId(bet.discord_user_id);
+      return [bet.id, member ? memberDisplayName(member) : null];
+    } catch {
+      return [bet.id, null];
+    }
+  }));
+  const names = new Map(namePairs);
+
+  const winnersBlock = wonBets.length ? resultListBlock('🏆 WINNERS', wonBets, names, result.awayAbbr, result.homeAbbr, 'won') : null;
+  const losersBlock = lostBets.length ? resultListBlock('💀 LOSERS', lostBets, names, result.awayAbbr, result.homeAbbr, 'lost') : null;
+  const RESULTS_H = (winnersBlock || losersBlock)
+    ? 16 + Math.max(winnersBlock?.height || 0, losersBlock?.height || 0) + 20
+    : 0;
+
   const STAT_H = 175;
-  const H = HERO_H + STAT_H;
+  const H = HERO_H + STAT_H + RESULTS_H;
 
   const [fonts, awayPlayer, homePlayer, badgeLogo, noiseTexture, smokeTexture] = await Promise.all([
     loadFonts(),
@@ -737,7 +844,17 @@ async function renderSettlementCard(result) {
             ],
           },
         },
-      ],
+        RESULTS_H > 0 && {
+          type: 'div',
+          props: {
+            style: {
+              display: 'flex', gap: 24, padding: '16px 32px 20px',
+              borderTop: '1px solid rgba(212,168,67,0.3)',
+            },
+            children: [winnersBlock?.node, losersBlock?.node].filter(Boolean),
+          },
+        },
+      ].filter(Boolean),
     },
   };
 
