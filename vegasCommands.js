@@ -76,15 +76,21 @@ async function getLine(lineId) {
   return rows[0] || null;
 }
 
-// Step 1 -> 2: market chosen (from /bet place's own market buttons), show side buttons.
+// Step 1 -> 2: market chosen (from /bet place's own market buttons), show
+// side buttons. interaction.update() edits the SAME ephemeral message the
+// market buttons were on, rather than interaction.reply()'s default of
+// posting a brand new one -- that's what was piling up a fresh "only you
+// can see this" ghost message per click. Every step of this wizard follows
+// the same rule: update the one message in place, never reply() again
+// after the first.
 async function replyWithSideButtons(interaction, lineId, market) {
   const line = await getLine(lineId);
   if (!line) {
-    await interaction.reply({ content: "That line no longer exists.", ephemeral: true });
+    await interaction.update({ content: "That line no longer exists.", components: [] });
     return;
   }
   if (line.status !== "open") {
-    await interaction.reply({ content: `This line is ${line.status}, not open for betting.`, ephemeral: true });
+    await interaction.update({ content: `This line is ${line.status}, not open for betting.`, components: [] });
     return;
   }
 
@@ -99,10 +105,9 @@ async function replyWithSideButtons(interaction, lineId, market) {
           new ButtonBuilder().setCustomId(`vegas:side:${lineId}:${market}:home`).setLabel(`Bet on ${line.home_team}`).setStyle(ButtonStyle.Secondary),
         ];
 
-  await interaction.reply({
+  await interaction.update({
     content: `**${line.away_team} @ ${line.home_team}** — ${market === "moneyline" ? "Moneyline" : market === "spread" ? "Point Spread" : "Total"}. Pick a side:`,
     components: [new ActionRowBuilder().addComponents(buttons)],
-    ephemeral: true,
   });
 }
 
@@ -141,7 +146,17 @@ export async function handleVegasStakeModal(interaction) {
   const [, , lineId, market, selection] = interaction.customId.split(":");
   const stake = Number(interaction.fields.getTextInputValue("stake"));
 
-  await interaction.deferReply({ ephemeral: true });
+  // This modal is always opened from the side-button step (handleVegasSideButton),
+  // so it's always "from a message" -- deferUpdate() + editReply() finishes the
+  // edit on that same wizard message instead of deferReply()'s default of
+  // opening yet another new ephemeral message. isFromMessage() is still
+  // checked rather than assumed, so a future caller that isn't button-driven
+  // degrades to a normal new reply instead of throwing.
+  if (interaction.isFromMessage()) {
+    await interaction.deferUpdate();
+  } else {
+    await interaction.deferReply({ ephemeral: true });
+  }
 
   if (!Number.isFinite(stake) || stake <= 0) {
     await interaction.editReply("Stake has to be a positive number.");
