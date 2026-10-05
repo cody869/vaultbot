@@ -650,7 +650,11 @@ function describeBetSelection(bet, awayAbbr, homeAbbr) {
   }
   const team = bet.selection === 'home' ? homeAbbr : awayAbbr;
   if (bet.market === 'spread' && bet.line_value != null) {
-    return `${team} ${bet.line_value > 0 ? '+' : ''}${bet.line_value}`;
+    // line_value is always stored home-referenced -- flip the sign for an
+    // away-side bet so this shows that team's own number, not the home
+    // team's (confirmed live: a Dolphins away bet showed the Falcons' +4.5).
+    const val = bet.selection === 'home' ? bet.line_value : -bet.line_value;
+    return `${team} ${val > 0 ? '+' : ''}${val}`;
   }
   return `${team} ML`;
 }

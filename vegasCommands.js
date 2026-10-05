@@ -226,11 +226,18 @@ export async function handleVegasStakeModal(interaction) {
   const line = await getLine(lineId);
   const teamAbbr =
     market !== "total" ? abbrFromName(selection === "home" ? line?.home_team : line?.away_team) : null;
+  // line_value is always stored home-referenced (placeBetOnLine locks in
+  // line.spread_home regardless of which side was bet -- settleVegasLine's
+  // grading relies on that convention). An away-side bet has to flip the
+  // sign to show that team's own number, same fix as describeBetSelection()
+  // below and Vegas.jsx's describeBet() -- confirmed live all three were
+  // showing the home team's spread number on an away-side bet.
+  const spreadDisplayValue = selection === "home" ? bet.line_value : -bet.line_value;
   const description =
     market === "moneyline"
       ? `${bet.team_name} Moneyline`
       : market === "spread"
-        ? `${bet.team_name} ${bet.line_value > 0 ? "+" : ""}${bet.line_value}`
+        ? `${bet.team_name} ${spreadDisplayValue > 0 ? "+" : ""}${spreadDisplayValue}`
         : `${selection === "over" ? "Over" : "Under"} ${bet.line_value}`;
 
   try {
@@ -309,7 +316,11 @@ function describeBetSelection(bet, line) {
   }
   const team = bet.selection === "home" ? line?.home_team : line?.away_team;
   if (bet.market === "spread" && bet.line_value != null) {
-    return `${team} ${bet.line_value > 0 ? "+" : ""}${bet.line_value}`;
+    // line_value is always stored home-referenced -- flip the sign for an
+    // away-side bet so this shows that team's own number, not the home
+    // team's (confirmed live: a Dolphins away bet showed the Falcons' +4.5).
+    const val = bet.selection === "home" ? bet.line_value : -bet.line_value;
+    return `${team} ${val > 0 ? "+" : ""}${val}`;
   }
   return `${team} ML`;
 }
