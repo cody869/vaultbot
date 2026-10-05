@@ -266,36 +266,52 @@ async function buildCard(s) {
 async function postOne(client, suspension, members) {
   if (!(await claim(suspension))) return false;
 
-  const channel = await client.channels.fetch(CHANNEL_ID);
-  if (!channel) {
-    console.error(`[SUSPENSION] channel ${CHANNEL_ID} not found`);
+  // Claimed but not yet actually sent -- everything from here through a
+  // successful channel.send() runs inside this try so a failure anywhere
+  // in it releases the claim instead of leaving it stuck. writeBackMessageId
+  // below is deliberately NOT covered by this: once the message really is
+  // sent, losing track of its id should keep the record locked (post once,
+  // not twice) -- same distinction weeklyDigestWatcher.js's postDigest()
+  // already draws. Before this, ANY throw after a successful claim() (a bad
+  // channel fetch, a send that got rate-limited or rejected) left
+  // discord_message_id permanently non-empty, and isDue() only checks
+  // whether that field is empty -- confirmed live: a Carolina Panthers
+  // suspension claimed successfully, something after that threw, and the
+  // record silently never posted and never would have on any later tick.
+  let channel, message;
+  try {
+    channel = await client.channels.fetch(CHANNEL_ID);
+    if (!channel) throw new Error(`channel ${CHANNEL_ID} not found`);
+
+    const ownerMention = resolveOwnerMention(suspension, members);
+    const card = await buildCard(suspension);
+
+    // Mention pings and the admin-notes/violation-description asides need to be
+    // real message content, not baked into the image, so they still
+    // render/ping normally. The full plain-text layout is only used as a
+    // fallback when the card can't render. violation_description is
+    // custom-suspension-only -- the card's own bottom line shows rule_broken,
+    // but the fuller free-text description belongs here, not squeezed onto it.
+    const content = card
+      ? [
+          `Owner: ${ownerMention}`,
+          isCustom(suspension) && suspension.violation_description ? `> ${suspension.violation_description}` : null,
+          suspension.admin_notes ? `> Note: ${suspension.admin_notes}` : null,
+        ].filter(Boolean).join('\n')
+      : buildMessage(suspension, ownerMention);
+
+    message = await channel.send({
+      content,
+      embeds: card?.embeds ?? [],
+      files: card?.files ?? [],
+      flags: card ? undefined : MessageFlags.SuppressEmbeds,
+      allowedMentions: { users: ownerMention.startsWith('<@') ? [ownerMention.slice(2, -1)] : [] },
+    });
+  } catch (err) {
+    console.error(`[SUSPENSION] send failed for ${suspension.id}, releasing claim:`, err.message);
+    await updateEntity('Suspension', suspension.id, { discord_message_id: '' }).catch(() => {});
     return false;
   }
-
-  const ownerMention = resolveOwnerMention(suspension, members);
-  const card = await buildCard(suspension);
-
-  // Mention pings and the admin-notes/violation-description asides need to be
-  // real message content, not baked into the image, so they still
-  // render/ping normally. The full plain-text layout is only used as a
-  // fallback when the card can't render. violation_description is
-  // custom-suspension-only -- the card's own bottom line shows rule_broken,
-  // but the fuller free-text description belongs here, not squeezed onto it.
-  const content = card
-    ? [
-        `Owner: ${ownerMention}`,
-        isCustom(suspension) && suspension.violation_description ? `> ${suspension.violation_description}` : null,
-        suspension.admin_notes ? `> Note: ${suspension.admin_notes}` : null,
-      ].filter(Boolean).join('\n')
-    : buildMessage(suspension, ownerMention);
-
-  const message = await channel.send({
-    content,
-    embeds: card?.embeds ?? [],
-    files: card?.files ?? [],
-    flags: card ? undefined : MessageFlags.SuppressEmbeds,
-    allowedMentions: { users: ownerMention.startsWith('<@') ? [ownerMention.slice(2, -1)] : [] },
-  });
 
   await writeBackMessageId(suspension, message);
   console.log(`[SUSPENSION] posted ${suspension.id} (${suspension.team_name}) as ${message.id}`);
