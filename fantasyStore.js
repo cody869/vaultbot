@@ -257,7 +257,7 @@ export async function cachedList(cacheKey, ttlMs = 5 * 60 * 1000, opts = {}) {
     if (Date.now() - hit.at < ttlMs) return hit.rows;
   }
 
-  const promise = listEntity(opts.entity || cacheKey, { query: opts.query || null });
+  const promise = listEntity(opts.entity || cacheKey, { query: opts.query || null, sort: opts.sort || '' });
   caches.set(cacheKey, { promise });
 
   try {
@@ -388,9 +388,19 @@ export async function getGames(season = null) {
 }
 
 export async function getWeeklyStats(season = null) {
+  // WeeklyStats is actively written to while scoring reads it (new rows land
+  // mid-week as games finish). Skip/limit pagination with no sort has no
+  // guaranteed order across pages, so a row can be silently dropped between
+  // two page fetches if the collection's natural order shifts from a
+  // concurrent insert -- confirmed live: a player's finished-game stat row
+  // existed in the table well before a scoring pass ran, yet that pass
+  // still scored them as 0/benched. Sorting by `id` (immutable, assigned
+  // once at insert) makes each page's slice stable regardless of what gets
+  // inserted elsewhere during the scroll.
   return cachedList(`WeeklyStats${season != null ? `:${season}` : ''}`, 2 * 60 * 1000, {
     entity: 'WeeklyStats',
     query: season != null ? { season_index: season } : null,
+    sort: 'id',
   });
 }
 
