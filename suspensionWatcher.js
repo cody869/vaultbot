@@ -148,9 +148,36 @@ function buildMessage(s, ownerMention) {
   return lines.join('\n');
 }
 
-/** A record is due if it's approved and nothing has claimed or posted it yet. */
+// How long a "posting:<pid>:<ts>:<rand>" claim can sit unresolved before
+// it's treated as abandoned and reclaimable. Generous: card render + send +
+// writeBackMessageId's 3 retries normally resolve in seconds, so 10 minutes
+// only ever matters when the claiming process died outright (crash, Railway
+// redeploy) between claim() and channel.send() -- the one gap the
+// release-on-failure try/catch in postOne() can't cover, since nothing runs
+// to release the claim if the process itself is gone.
+const CLAIM_STALE_MS = 10 * 60 * 1000;
+
+/**
+ * Timestamp embedded in a "posting:" claim token, or null for anything else
+ * -- including a real Discord snowflake id and the "sent:<id>" marker below.
+ * Staleness recovery must NEVER apply to either of those: a snowflake means
+ * it posted cleanly, and "sent:" means it posted but writeBackMessageId lost
+ * the id after send() already succeeded. Reclaiming either would double-post.
+ */
+function claimTimestamp(token) {
+  if (typeof token !== 'string' || !token.startsWith('posting:')) return null;
+  const ts = Number(token.split(':')[2]);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+/** A record is due if it's approved and nothing has claimed or posted it yet
+ * -- or if something claimed it long enough ago that the claim is presumed
+ * abandoned rather than still in flight. */
 function isDue(s) {
-  return s.status === 'approved' && !s.discord_message_id;
+  if (s.status !== 'approved') return false;
+  if (!s.discord_message_id) return true;
+  const claimedAt = claimTimestamp(s.discord_message_id);
+  return claimedAt != null && Date.now() - claimedAt > CLAIM_STALE_MS;
 }
 
 /**
@@ -312,6 +339,15 @@ async function postOne(client, suspension, members) {
     await updateEntity('Suspension', suspension.id, { discord_message_id: '' }).catch(() => {});
     return false;
   }
+
+  // The message is live in Discord now -- irreversibly. Record that fact
+  // immediately, before writeBackMessageId's slower retried write, so a
+  // crash between here and there leaves a "sent:" marker (never reclaimed)
+  // instead of a "posting:" token that isDue()'s staleness check would
+  // otherwise eventually treat as abandoned and repost.
+  await updateEntity('Suspension', suspension.id, { discord_message_id: `sent:${message.id}` }).catch((err) => {
+    console.error(`[SUSPENSION] sent-marker write failed for ${suspension.id}:`, err.message);
+  });
 
   await writeBackMessageId(suspension, message);
   console.log(`[SUSPENSION] posted ${suspension.id} (${suspension.team_name}) as ${message.id}`);
