@@ -152,6 +152,9 @@ export async function list(entity, filter = {}, opts = {}) {
     }
     if (opts.sort) url.searchParams.set("sort", opts.sort);
     if (opts.limit) url.searchParams.set("limit", String(opts.limit));
+    // "skip", not "offset" -- confirmed against the Base44 SDK's own
+    // entities module (see fantasyStore.js's listEntity for the same note).
+    if (opts.skip) url.searchParams.set("skip", String(opts.skip));
     return fetch(url, { headers: authHeaders() });
   };
 

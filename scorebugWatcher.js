@@ -98,15 +98,43 @@ function gameKey(g) {
   return `${g.season_number ?? "?"}-${g.week ?? "?"}-${g.awayTeam ?? "?"}-${g.homeTeam ?? "?"}`;
 }
 
+// ScorebugPost accumulates (at least) two rows per final game, all season,
+// and never shrinks. A single list() call is capped by the platform
+// regardless of the limit argument passed -- the same class of bug that
+// silently truncated the fantasy leaderboard and the season usage-rules
+// rollup elsewhere in this app (see fantasyStore.js's getWeeklyStats). Once
+// this collection outgrew that per-call cap, loadState() stopped seeing
+// older weeks' "posted" rows at all, so the watcher decided those games had
+// never been posted and ran them back through the full pending -> post
+// pipeline -- confirmed live: several already-posted weeks' scorebug cards
+// reposted to #league-news in a batch. Sort by `id` (immutable, assigned
+// once at insert, so it can't tie) rather than `created_date` -- a shared-
+// millisecond batch write ties on created_date, and a tied sort key makes
+// skip/limit pagination lose or duplicate rows across pages (same fix,
+// same reasoning, as fantasyStore.js's getWeeklyStats).
+const SCOREBUG_POST_PAGE_SIZE = 500;
+async function fetchAllScorebugPosts() {
+  const all = [];
+  let skip = 0;
+  for (let i = 0; i < 50; i++) {
+    const page = await list("ScorebugPost", {}, { sort: "id", limit: SCOREBUG_POST_PAGE_SIZE, skip });
+    if (!page.length) break;
+    all.push(...page);
+    if (page.length < SCOREBUG_POST_PAGE_SIZE) break;
+    skip += page.length;
+  }
+  return all;
+}
+
 // Pull every ScorebugPost row into a per-key {pending, posted} view. Two rows
 // can legitimately exist for the same game_key -- see claim()'s comment below
 // for why this entity is never updated, only ever created -- so this groups
 // them: `posted` is any row that already carries a discord_message_id,
 // `pending` is the earliest row that doesn't (the sync-delay clock). Backed
-// by Base44, one broad read per tick.
+// by Base44, one broad (now fully paginated) read per tick.
 async function loadState() {
   try {
-    const rows = await pollCached('scorebug:posts', 55_000, () => list("ScorebugPost", {}, { limit: 5000 }));
+    const rows = await pollCached('scorebug:posts', 55_000, fetchAllScorebugPosts);
     const byKey = new Map();
     for (const r of rows) {
       if (!r.game_key) continue;
