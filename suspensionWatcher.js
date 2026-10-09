@@ -44,7 +44,7 @@ import { list, getLeagueMembers, memberDisplayName, updateEntity, pollCached } f
 import { isRateLimited } from './base44Pacer.js';
 import { withFileLock } from './fileLock.js';
 import { renderSuspensionCard } from './suspensionCard.js';
-import { abbrFromName } from './emoji.js';
+import { abbrFromName, teamEmojiByName } from './emoji.js';
 
 const CHANNEL_ID = process.env.SUSPENSIONS_CHANNEL_ID;
 // A suspension is posted after a human committee/admin decision already
@@ -91,6 +91,53 @@ function resolveOwnerMention(suspension, members) {
 }
 
 const isCustom = (s) => s.suspension_type === 'custom';
+const isUsage3227 = (s) => s.suspension_type === 'usage_32_27';
+
+// Mirrors RULE_LIMIT/usage3227Tiers.js's rule table -- Deno/app code can't
+// import from this repo (and this repo can't import from the app's src/),
+// so the three share this ladder by convention, not by code.
+const USAGE_RULE_LIMIT = { wr_te_reception: 32, rb_reception: 27, carry: 75 };
+const USAGE_RULE_LABEL = {
+  wr_te_reception: 'WR/TE reception share',
+  rb_reception: 'RB reception share',
+  carry: 'carry share',
+};
+
+/**
+ * The explanatory paragraph staff asked to have on every 32/27 & 75/25 post
+ * -- mirrors the old standalone bot's verbiage verbatim in substance: the
+ * flagged team isn't forced to bench the player this week, but staying over
+ * the limit by the NEXT checkpoint escalates the suspension to that week's
+ * tier (see TIER_BY_CHECKPOINT_WEEK in generateUsage3227Suspensions), and the
+ * same applies independently to any other player who crosses a threshold in
+ * a later checkpoint week.
+ */
+function usage3227Explainer(s) {
+  const limit = USAGE_RULE_LIMIT[s.violation_rule];
+  return (
+    `_Remember, you do not have to sit the player this week, but they must be ` +
+    `under ${limit != null ? `${limit}%` : 'the limit'} by next week or the suspension goes up. ` +
+    `If any other players go over 32%/75%/27% in a future week, they will receive the ` +
+    `suspension that corresponds to the week they're caught._`
+  );
+}
+
+/** "Post Week N — X-game suspension" + the violation stat line, used both in
+ * the plain-text fallback and alongside the card (which has no room for the
+ * full paragraph). `withPlayerLine` is skipped when the card is already
+ * showing the player/team, to avoid saying it twice. */
+function usage3227Block(s, { withPlayerLine = true } = {}) {
+  const ruleLabel = USAGE_RULE_LABEL[s.violation_rule] || 'usage rule';
+  const player = (s.suspended_player_names || [])[0] || 'Unknown player';
+  const lines = [
+    `**Post Week ${s.violation_checkpoint_week} — ${s.suspension_games}-game suspension**`,
+    '',
+    `**${s.violation_percent}%** ${ruleLabel}${s.repeat_violation ? ' · repeat violation' : ''}`,
+  ];
+  if (withPlayerLine) lines.push(`${teamEmojiByName(s.team_name)} ${player}`);
+  lines.push('', usage3227Explainer(s));
+  return lines.join('\n');
+}
 
 /**
  * Plain-markdown post body. Mirrors buildDiscordEmbed() in the app's
@@ -103,12 +150,30 @@ const isCustom = (s) => s.suspension_type === 'custom';
  * (the original bug here) produced "Week undefined -- **undefined%** pass
  * rate (undefined violation this season)". Branch on suspension_type instead
  * and use rule_broken/violation_description, which are custom-only.
+ *
+ * usage_32_27 is its own third branch for the same reason: it fell through
+ * to the 70/30 wording before (violation_pass_ratio/violation_number are
+ * also 70_30-only), producing "undefined% pass rate (NaNth violation this
+ * season)" instead of the 32/27 & 75/25 explanation.
  */
 function buildMessage(s, ownerMention) {
   const custom = isCustom(s);
+  const usage = isUsage3227(s);
   const title = custom
     ? `# 🚨 ${s.rule_broken || 'Suspension'} — ${s.team_name || 'Unknown Team'}`
-    : `# 🚨 70/30 Rule Violation — ${s.team_name || 'Unknown Team'}`;
+    : usage
+      ? `# 🚨 32/27 & 75/25 Rule Violation — ${s.team_name || 'Unknown Team'}`
+      : `# 🚨 70/30 Rule Violation — ${s.team_name || 'Unknown Team'}`;
+
+  if (usage) {
+    return [
+      title,
+      `Owner: ${ownerMention}`,
+      '',
+      usage3227Block(s),
+      s.admin_notes ? `> Note: ${s.admin_notes}` : null,
+    ].filter(Boolean).join('\n');
+  }
 
   const lines = [
     title,
@@ -270,6 +335,9 @@ async function buildCard(s) {
       passRatio: s.violation_pass_ratio,
       violationNumber: s.violation_number,
       ruleBroken: s.rule_broken,
+      violationPercent: s.violation_percent,
+      checkpointWeek: s.violation_checkpoint_week,
+      ruleLabel: USAGE_RULE_LABEL[s.violation_rule],
       games: s.suspension_games ?? 0,
       positions: s.suspended_positions,
       players: s.suspended_player_names,
@@ -319,10 +387,14 @@ async function postOne(client, suspension, members) {
     // fallback when the card can't render. violation_description is
     // custom-suspension-only -- the card's own bottom line shows rule_broken,
     // but the fuller free-text description belongs here, not squeezed onto it.
+    // usage_32_27's explainer paragraph is the same story: the card has no
+    // room for it, so it rides along in content instead (player/team line
+    // skipped here since the card already shows both).
     const content = card
       ? [
           `Owner: ${ownerMention}`,
           isCustom(suspension) && suspension.violation_description ? `> ${suspension.violation_description}` : null,
+          isUsage3227(suspension) ? usage3227Block(suspension, { withPlayerLine: false }) : null,
           suspension.admin_notes ? `> Note: ${suspension.admin_notes}` : null,
         ].filter(Boolean).join('\n')
       : buildMessage(suspension, ownerMention);

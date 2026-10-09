@@ -43,6 +43,9 @@ const violationLabel = (n) => VIOLATION_LABELS[n] || `${n}th`;
  * @param {number} [s.passRatio] - violation_pass_ratio (%), 70/30-type only
  * @param {number} [s.violationNumber] - 70/30-type only
  * @param {string} [s.ruleBroken] - rule_broken, custom-type only
+ * @param {number} [s.violationPercent] - violation_percent (%), usage_32_27-type only
+ * @param {number} [s.checkpointWeek] - violation_checkpoint_week, usage_32_27-type only
+ * @param {string} [s.ruleLabel] - e.g. "WR/TE reception share", usage_32_27-type only
  * @param {number} s.games - suspension_games; 0 means warning-only
  * @param {string[]} [s.positions]
  * @param {string[]} [s.players]
@@ -159,6 +162,8 @@ async function renderSuspensionCard(s) {
               s.passRatio != null && `${s.passRatio}% pass rate`,
               s.violationNumber != null && `${violationLabel(s.violationNumber)} violation this season`,
               s.ruleBroken,
+              s.violationPercent != null && `${s.violationPercent}% ${s.ruleLabel || 'usage'}`,
+              s.checkpointWeek != null && `checkpoint week ${s.checkpointWeek}`,
               s.appliesToWeek != null && !isWarning && `applies to week ${s.appliesToWeek}`,
             ].filter(Boolean).join(' · '),
           },
