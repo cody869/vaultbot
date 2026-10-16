@@ -10,6 +10,7 @@ import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { startScheduleWatcher } from "./scheduleWatcher.js";
 import { startSuspensionWatcher } from "./suspensionWatcher.js";
+import { startAbilityWatcher } from "./playerAbilityWatcher.js";
 import { startVegasWatcher } from "./vegasWatcher.js";
 import {
   suggestVegasLines,
@@ -160,6 +161,9 @@ client.once(Events.ClientReady, async (c) => {
   // admin publishes a WeeklyDigest in the app. Polls slowly (default 5 min)
   // -- published rarely, by a human, no live event to track.
   setTimeout(() => startWeeklyDigestWatcher(c), 20_000);
+  // Posts every player's ability-rating changes from each roster import to
+  // ABILITY_CHANGES_CHANNEL_ID, one message per player. No-ops if unset.
+  setTimeout(() => startAbilityWatcher(c), 22_000);
   // Keeps the EA tokens alive (the refresh chain dies after ~10 days idle)
   // and, if EA_AUTO_EXPORT=true, exports when the league actually changes.
   startEAWatcher();
