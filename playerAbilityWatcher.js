@@ -1,9 +1,12 @@
 // playerAbilityWatcher.js
 //
 // Polls Base44 for PlayerAbilityChangePost rows (one per player per roster
-// import whose Madden ability ratings changed -- written by maddenWebhook,
-// see base44/functions/maddenWebhook/entry.ts's abilityPostsToCreate) and
-// posts each one exactly once to a dedicated Discord channel.
+// import or manual edit who gained, lost, or had a rank change on a
+// signature X-Factor/Superstar ability -- Steamroller, Armbar, etc. NOT the
+// numeric Madden ratings, which are tracked in PlayerEventLog history only
+// and never posted here. Written by maddenWebhook/logPlayerChanges, see
+// base44/functions/maddenWebhook/entry.ts's abilityPostsToCreate) and posts
+// each one exactly once to a dedicated Discord channel.
 //
 // Mirrors suspensionWatcher.js's claim pattern (that file has the fullest
 // writeup of why each piece exists -- see its header comment):
@@ -115,22 +118,26 @@ async function claim(post) {
   });
 }
 
-function fmtDelta(d) {
-  const n = Number(d) || 0;
-  return n > 0 ? `+${n}` : String(n);
+// post.changes entries are signature X-Factor/Superstar abilities (Steamroller,
+// Armbar, etc.) -- see PlayerAbilityChangePost's schema description. `kind`
+// is 'gained' | 'lost' | 'rank_change'; older rows written before `kind`
+// existed won't have it, so fall back to inferring from the values.
+function describeChange(c) {
+  const kind = c.kind || (!c.old_value || c.old_value === '(none)' ? 'gained'
+    : (!c.new_value || c.new_value === '(lost)') ? 'lost' : 'rank_change');
+  if (kind === 'gained') return `🆕 **${c.label}**${c.new_value ? ` (${c.new_value})` : ''}`;
+  if (kind === 'lost') return `❌ **${c.label}**${c.old_value ? ` (was ${c.old_value})` : ''}`;
+  return `🔼 **${c.label}**: ${c.old_value || 'Unranked'} → ${c.new_value || 'Unranked'}`;
 }
 
 function buildEmbed(post) {
   const changes = Array.isArray(post.changes) ? post.changes : [];
   const MAX_LINES = 40;
-  const lines = changes.slice(0, MAX_LINES).map((c) => {
-    const delta = c.delta != null ? ` (${fmtDelta(c.delta)})` : '';
-    return `**${c.label}**: ${c.old_value} → ${c.new_value}${delta}`;
-  });
+  const lines = changes.slice(0, MAX_LINES).map(describeChange);
   if (changes.length > MAX_LINES) lines.push(`...and ${changes.length - MAX_LINES} more`);
 
   const teamEmoji = post.team_name ? teamEmojiByName(post.team_name) : '';
-  const title = `🔧 Ability Changes — ${post.player_fullName}`;
+  const title = `✨ Ability Changes — ${post.player_fullName}`;
   const subtitle = [post.player_position, post.team_name].filter(Boolean).join(' · ');
 
   return new EmbedBuilder()
