@@ -478,7 +478,14 @@ async function tick(client) {
     for (const s of due) {
       handled.add(s.id); // fast in-process guard; the record claim is the real lock
       try {
-        await postOne(client, s, members);
+        const posted = await postOne(client, s, members);
+        // postOne returns false (lost claim race, claim write failed, send
+        // failed-and-released) without throwing -- leaving it in `handled`
+        // on a false return would permanently blacklist the record for the
+        // rest of this process's life, silently defeating isDue()'s
+        // CLAIM_STALE_MS recovery on every later tick. Only a true post
+        // should stick.
+        if (!posted) handled.delete(s.id);
       } catch (err) {
         console.error(`[SUSPENSION] post failed for ${s.id}:`, err.message);
         handled.delete(s.id); // let a later tick retry

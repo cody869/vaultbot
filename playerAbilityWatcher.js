@@ -221,7 +221,13 @@ async function tick(client) {
     for (const p of due) {
       handled.add(p.id);
       try {
-        await postOne(client, p);
+        const posted = await postOne(client, p);
+        // Same fix as suspensionWatcher.js: postOne can return false (lost
+        // claim race, claim write failed, send failed-and-released) without
+        // throwing. Leaving it in `handled` on a false return would
+        // permanently blacklist the record for this process's lifetime,
+        // defeating isDue()'s CLAIM_STALE_MS recovery on every later tick.
+        if (!posted) handled.delete(p.id);
       } catch (err) {
         console.error(`[ABILITY] post failed for ${p.id}:`, err.message);
         handled.delete(p.id);
