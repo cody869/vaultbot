@@ -44,7 +44,7 @@ const DIRECT = EXPORT_MODE === "direct";
  * the primary export to MADDEN_EXPORT_URL.
  */
 const EXTRA_EXPORT_URLS = [
-  "https://xcfl.vercel.app/api/export",
+  "https://www.xcfl.tv/api/ingest",
 ];
 
 /*
