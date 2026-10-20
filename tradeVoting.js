@@ -16,6 +16,7 @@ import {
   getAllTrades,
   getTradeById,
   getPlayersByNames,
+  lookupPlayerForTrade,
   getMemberByDiscordId,
   findMemberByIdentity,
   findMemberByTeam,
@@ -179,7 +180,7 @@ export function tradeMessage(
       return lines;
     }
     for (const n of playerNames) {
-      lines.push(playerLine(n, players.get(String(n).toLowerCase())));
+      lines.push(playerLine(n, lookupPlayerForTrade(players, n, teamName)));
     }
     for (const p of picks) lines.push(`> Pick: **${p}**`);
     return lines;
@@ -496,7 +497,7 @@ export function approvalMessage(trade, players = new Map(), { owners = [] } = {}
       return lines;
     }
     for (const n of playerNames) {
-      lines.push(playerLine(n, players.get(String(n).toLowerCase())));
+      lines.push(playerLine(n, lookupPlayerForTrade(players, n, teamName)));
     }
     for (const p of picks) lines.push(`> Pick: **${p}**`);
     return lines;

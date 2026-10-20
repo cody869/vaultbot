@@ -1237,6 +1237,18 @@ export async function getCycleTeams() {
 // A team's players in the current cycle, joined to Player for position/OVR
 // and sorted by OVR. Shared by /submit_trade so it can't drift from /team.
 // Returns [{ name, position, ovr }].
+//
+// Joins on madden_roster_id (the rosterId from the Madden export JSON, folded
+// onto both Roster and Player at import time -- the same id weekly stats are
+// already matched on), not player_fullName: names are not unique. The app's
+// own trade tool (src/lib/playerLookup.js) carries a comment documenting the
+// real incident this caused there -- M27 has two "Justin Jefferson" rows (a
+// Vikings WR and a Raiders MIKE), and a plain name->Player map picked
+// whichever row loaded first, attaching the wrong OVR/position (and once,
+// the wrong player's trade value) regardless of which team the name actually
+// belonged to. getAllPlayers() returns every player in the cycle, not just
+// this team's, so the same collision is reachable here. Falls back to a
+// team-scoped name match only for the rare Roster row with no roster id.
 export async function getTeamRosterPlayers(teamName) {
   const cycle = await getCurrentCycle();
   const roster = await list("Roster", {}, { limit: 10000 });
@@ -1248,14 +1260,20 @@ export async function getTeamRosterPlayers(teamName) {
 
   // getAllPlayers is already cycle-filtered and cached.
   const players = await getAllPlayers();
-  const byName = new Map();
+  const byRosterId = new Map();
+  const byNameOnTeam = new Map();
   for (const p of players) {
-    if (p.player_fullName) byName.set(p.player_fullName.toLowerCase(), p);
+    if (p.madden_roster_id != null) byRosterId.set(p.madden_roster_id, p);
+    if (p.player_fullName && teamMatches(p.team_name, teamName)) {
+      byNameOnTeam.set(p.player_fullName.toLowerCase(), p);
+    }
   }
 
   return mine
     .map((r) => {
-      const p = byName.get(String(r.player_fullName ?? "").toLowerCase());
+      const p =
+        (r.madden_roster_id != null && byRosterId.get(r.madden_roster_id)) ||
+        byNameOnTeam.get(String(r.player_fullName ?? "").toLowerCase());
       return {
         name: r.player_fullName,
         position: p?.player_position || r.player_position || "?",
@@ -1385,7 +1403,23 @@ export async function getCommitteeMembers() {
   return members.filter((m) => m.is_committee);
 }
 
+// Team-qualified key, same scheme as the app's own trade tool
+// (src/lib/playerLookup.js) uses to resolve a name to the right Player row.
+const teamNick = (team) => {
+  const parts = String(team ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : "";
+};
+export const teamQualifiedKey = (name, team) =>
+  `${String(name ?? "").trim().toLowerCase()}|team:${teamNick(team)}`;
+
 // Look up players by name for enriching a trade message (current cycle).
+// Indexed both by bare lowercased name (fallback) and by name+team: names
+// are not unique -- the app's own trade tool carries a comment documenting
+// the real incident this caused there (M27 has two "Justin Jefferson" rows,
+// a Vikings WR and a Raiders MIKE; a bare-name map picked whichever one
+// loaded last, attaching the wrong OVR/position/contract to the trade
+// regardless of which team the traded player actually belonged to). Use
+// lookupPlayerForTrade() below to read this map with team context.
 export async function getPlayersByNames(names = []) {
   if (!names.length) return new Map();
   const players = await getAllPlayers();
@@ -1393,9 +1427,19 @@ export async function getPlayersByNames(names = []) {
   const out = new Map();
   for (const p of players) {
     const key = String(p.player_fullName ?? "").toLowerCase();
-    if (wanted.has(key)) out.set(key, p);
+    if (!wanted.has(key)) continue;
+    out.set(key, p);
+    if (p.team_name) out.set(teamQualifiedKey(p.player_fullName, p.team_name), p);
   }
   return out;
+}
+
+// Read a getPlayersByNames() map with team context, same resolution order as
+// the app's trade tool: team-qualified key first, bare name as a fallback
+// (e.g. a player traded away since the map was built, or FA).
+export function lookupPlayerForTrade(map, name, team) {
+  if (!map || !name) return null;
+  return map.get(teamQualifiedKey(name, team)) || map.get(String(name).trim().toLowerCase()) || null;
 }
 
 // All trade submissions, newest first (used by the approval announcer).
