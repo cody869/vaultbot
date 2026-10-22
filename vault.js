@@ -280,7 +280,27 @@ export async function getStandings(seasonNumber) {
     /* names just won't show */
   }
 
-  const rows = [...latestByTeam.values()]
+  // A real franchise can carry more than one team_id within the same
+  // season -- confirmed live: Tampa Bay alone has 5 distinct TeamMap rows
+  // on record, minted across several EA reconnects, and two of those ids
+  // (776863750 and 775421958) both posted TeamStat rows for season 86 --
+  // one stuck at week 3 (3-0) after its reconnect superseded it, the other
+  // current through week 5 (5-0). Deduping only by team_id above can't
+  // catch that (both ids are each "latest for themselves"), which is
+  // exactly what put Tampa Bay on the board twice with two different
+  // records. Collapse again by the NAME team_id resolves to, keeping
+  // whichever id reached the later week.
+  const latestByName = new Map();
+  for (const s of latestByTeam.values()) {
+    const info = nameById[s.team_id] ?? {};
+    const key = (info.team_name || info.team_abbrName || String(s.team_id)).toLowerCase();
+    const prev = latestByName.get(key);
+    if (!prev || (s.week_index ?? 0) > (prev.week_index ?? 0)) {
+      latestByName.set(key, s);
+    }
+  }
+
+  const rows = [...latestByName.values()]
     .map((s) => {
       const info = nameById[s.team_id] ?? {};
       return {
