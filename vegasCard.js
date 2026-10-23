@@ -222,6 +222,17 @@ function marketRow(label, left, right) {
                   children: `@${b.owner}`,
                 },
               },
+              // Against-the-spread record, spread row only (see renderOddsCard).
+              // Season-to-date, not this specific line -- how the team has
+              // done against the market generally, not a prediction for
+              // tonight's number.
+              b.ats && {
+                type: 'div',
+                props: {
+                  style: { display: 'flex', color: 'rgba(255,255,255,0.45)', fontFamily: 'Barlow', fontSize: 13 },
+                  children: `${b.ats} ATS`,
+                },
+              },
             ].filter(Boolean),
           },
         },
@@ -413,6 +424,8 @@ function buildHero({ away, home, awayAbbr, homeAbbr, awayPlayer, homePlayer, awa
  * @param {number} line.minBet
  * @param {number} line.maxBet
  * @param {string} [line.cutoffLabel] - pre-formatted human string
+ * @param {string} [line.homeAts] - home team's season ATS record, e.g. "11-5" or "11-5-1"
+ * @param {string} [line.awayAts] - away team's season ATS record
  * @returns {Promise<Buffer>} PNG bytes
  */
 async function renderOddsCard(line) {
@@ -480,8 +493,8 @@ async function renderOddsCard(line) {
               ),
               marketRow(
                 'POINT SPREAD',
-                { title: `${away.name || line.awayAbbr} ${spreadAwayValue > 0 ? '+' : ''}${spreadAwayValue ?? '—'}`, odds: americanOdds(line.spreadAwayOdds), owner: awayOwner },
-                { title: `${home.name || line.homeAbbr} ${line.spreadHome > 0 ? '+' : ''}${line.spreadHome ?? '—'}`, odds: americanOdds(line.spreadHomeOdds), owner: homeOwner }
+                { title: `${away.name || line.awayAbbr} ${spreadAwayValue > 0 ? '+' : ''}${spreadAwayValue ?? '—'}`, odds: americanOdds(line.spreadAwayOdds), owner: awayOwner, ats: line.awayAts },
+                { title: `${home.name || line.homeAbbr} ${line.spreadHome > 0 ? '+' : ''}${line.spreadHome ?? '—'}`, odds: americanOdds(line.spreadHomeOdds), owner: homeOwner, ats: line.homeAts }
               ),
               marketRow(
                 'TOTAL',

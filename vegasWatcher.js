@@ -20,7 +20,7 @@
 //   VEGAS_POLL_SECONDS   optional — default 60
 
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
-import { list, updateEntity, invokeFunction, pollCached } from "./vault.js";
+import { list, updateEntity, invokeFunction, pollCached, getTeamAtsRecords } from "./vault.js";
 import { isRateLimited } from "./base44Pacer.js";
 import { withFileLock } from "./fileLock.js";
 import { renderOddsCard, renderSettlementCard } from "./vegasCard.js";
@@ -46,6 +46,25 @@ function formatCutoff(cutoffAt) {
   });
 }
 
+// "11-5" or "11-5-1" with a push, or null for a team with no settled spread
+// lines yet this season. Same formatting as Vegas.jsx's fmtAts.
+function formatAts(rec) {
+  if (!rec) return null;
+  const { wins = 0, losses = 0, pushes = 0 } = rec;
+  if (!wins && !losses && !pushes) return null;
+  return pushes ? `${wins}-${losses}-${pushes}` : `${wins}-${losses}`;
+}
+
+async function teamAts(line) {
+  try {
+    const records = await getTeamAtsRecords(line.season_number);
+    return { homeAts: formatAts(records[line.home_team]), awayAts: formatAts(records[line.away_team]) };
+  } catch (err) {
+    console.error("[VEGAS] ATS record lookup failed, omitting from card:", err.message);
+    return { homeAts: null, awayAts: null };
+  }
+}
+
 async function postLine(client, line) {
   const homeAbbr = abbrFromName(line.home_team);
   const awayAbbr = abbrFromName(line.away_team);
@@ -54,6 +73,7 @@ async function postLine(client, line) {
     return;
   }
 
+  const { homeAts, awayAts } = await teamAts(line);
   const png = await renderOddsCard({
     matchNumber: line.match_number,
     week: line.week,
@@ -70,6 +90,8 @@ async function postLine(client, line) {
     minBet: line.min_bet ?? 100,
     maxBet: line.max_bet ?? 1000,
     cutoffLabel: formatCutoff(line.cutoff_at),
+    homeAts,
+    awayAts,
   });
   const filename = `vegas-${awayAbbr}-${homeAbbr}-wk${line.week ?? "x"}.png`;
   const file = new AttachmentBuilder(png, { name: filename });
@@ -216,6 +238,7 @@ async function checkLineMovement(client, line) {
     const message = await channel.messages.fetch(line.discord_message_id).catch(() => null);
     if (!message) return;
 
+    const { homeAts, awayAts } = await teamAts(line);
     const png = await renderOddsCard({
       matchNumber: line.match_number,
       week: line.week,
@@ -232,6 +255,8 @@ async function checkLineMovement(client, line) {
       minBet: line.min_bet ?? 100,
       maxBet: line.max_bet ?? 1000,
       cutoffLabel: formatCutoff(line.cutoff_at),
+      homeAts,
+      awayAts,
     });
     const filename = `vegas-${awayAbbr}-${homeAbbr}-wk${line.week ?? "x"}.png`;
     await message.edit({ files: [new AttachmentBuilder(png, { name: filename })] });
