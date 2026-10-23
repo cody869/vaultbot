@@ -782,8 +782,19 @@ async function cmdMatchup(interaction) {
     const home = teamLabel(byId.get(m.home_team_id));
     const away = teamLabel(byId.get(m.away_team_id));
     if (m.status === 'scheduled') return `${away} at ${home}`;
-    const hw = m.winner_team_id === m.home_team_id;
-    return `${away} **${fmtPts(m.away_points)}** ${hw ? '' : '✓'} at ${home} **${fmtPts(m.home_points)}** ${hw ? '✓' : ''}`.trim();
+    // winner_team_id is only set once a week finalizes (see fantasyLeague.js's
+    // finalizeMatchups: a live/in_progress week writes it as null on purpose,
+    // since nothing is settled until every game is in). Falling back to
+    // winner_team_id === home_team_id alone made every still-in-progress
+    // matchup compare null to an id -- always false -- which put the
+    // checkmark on the away team unconditionally, regardless of who was
+    // actually ahead. Compare points directly whenever there's no decided
+    // winner yet, so a live week marks whoever's currently leading instead.
+    const hw = m.winner_team_id != null
+      ? m.winner_team_id === m.home_team_id
+      : Number(m.home_points) > Number(m.away_points);
+    const tied = m.winner_team_id == null && Number(m.home_points) === Number(m.away_points);
+    return `${away} **${fmtPts(m.away_points)}** ${!tied && !hw ? '✓' : ''} at ${home} **${fmtPts(m.home_points)}** ${!tied && hw ? '✓' : ''}`.trim();
   });
 
   return interaction.editReply({
@@ -1246,8 +1257,14 @@ export async function announceWeek(client, league, week, result) {
   const lines = matchups.map((m) => {
     const home = teamLabel(byId.get(m.home_team_id));
     const away = teamLabel(byId.get(m.away_team_id));
-    const hw = m.winner_team_id === m.home_team_id;
-    return `${away} ${fmtPts(m.away_points)} ${hw ? '' : '✓'} — ${hw ? '✓' : ''} ${home} ${fmtPts(m.home_points)}`.replace(/\s+/g, ' ');
+    // Same fallback as cmdMatchup: winner_team_id is null until a week
+    // finalizes, so compare points directly rather than treating "not the
+    // home team" as "away won" unconditionally.
+    const hw = m.winner_team_id != null
+      ? m.winner_team_id === m.home_team_id
+      : Number(m.home_points) > Number(m.away_points);
+    const tied = m.winner_team_id == null && Number(m.home_points) === Number(m.away_points);
+    return `${away} ${fmtPts(m.away_points)} ${!tied && !hw ? '✓' : ''} — ${!tied && hw ? '✓' : ''} ${home} ${fmtPts(m.home_points)}`.replace(/\s+/g, ' ');
   });
 
   const high = [...result.results].sort((a, b) => b.total - a.total)[0];
