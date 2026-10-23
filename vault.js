@@ -1406,18 +1406,25 @@ export async function invokeFunction(name, data = {}) {
   return body;
 }
 
-// Each team's against-the-spread record for a season, computed by the same
-// getAtsRecords Base44 function the Vault app's Vegas page calls — shared
-// rather than duplicated so the two surfaces can never disagree on a team's
-// record. Cached: this is called on every line post/repost/movement tick,
-// and the underlying record only changes when a line settles (at most a
-// handful of times a week), not every poll.
+// Each team's against-the-spread record, computed by the same getAtsRecords
+// Base44 function the Vault app's Vegas page calls — shared rather than
+// duplicated so the two surfaces can never disagree on a team's record.
+// Cached: this is called on every line post/repost/movement tick, and the
+// underlying record only changes when a line settles (at most a handful of
+// times a week), not every poll.
+//
+// Pass { allTime: true } for every settled line ever, regardless of season
+// (season_number is then ignored). Omit seasonNumber with allTime false/
+// unset to fall back to the function's own AppConfig-current-season default.
 const ATS_CACHE_MS = 10 * 60 * 1000;
-export async function getTeamAtsRecords(seasonNumber) {
+export async function getTeamAtsRecords(seasonNumber, { allTime = false } = {}) {
   const body = await pollCached(
-    `vegas-ats:${seasonNumber ?? "current"}`,
+    `vegas-ats:${allTime ? "all-time" : seasonNumber ?? "current"}`,
     ATS_CACHE_MS,
-    () => invokeFunction("getAtsRecords", seasonNumber != null ? { season_number: seasonNumber } : {})
+    () => invokeFunction(
+      "getAtsRecords",
+      allTime ? { all_time: true } : seasonNumber != null ? { season_number: seasonNumber } : {}
+    )
   );
   return body?.records || {};
 }

@@ -57,11 +57,19 @@ function formatAts(rec) {
 
 async function teamAts(line) {
   try {
-    const records = await getTeamAtsRecords(line.season_number);
-    return { homeAts: formatAts(records[line.home_team]), awayAts: formatAts(records[line.away_team]) };
+    const [seasonRecords, allTimeRecords] = await Promise.all([
+      getTeamAtsRecords(line.season_number),
+      getTeamAtsRecords(null, { allTime: true }),
+    ]);
+    return {
+      homeAts: formatAts(seasonRecords[line.home_team]),
+      awayAts: formatAts(seasonRecords[line.away_team]),
+      homeAllTimeAts: formatAts(allTimeRecords[line.home_team]),
+      awayAllTimeAts: formatAts(allTimeRecords[line.away_team]),
+    };
   } catch (err) {
     console.error("[VEGAS] ATS record lookup failed, omitting from card:", err.message);
-    return { homeAts: null, awayAts: null };
+    return { homeAts: null, awayAts: null, homeAllTimeAts: null, awayAllTimeAts: null };
   }
 }
 
@@ -73,7 +81,7 @@ async function postLine(client, line) {
     return;
   }
 
-  const { homeAts, awayAts } = await teamAts(line);
+  const { homeAts, awayAts, homeAllTimeAts, awayAllTimeAts } = await teamAts(line);
   const png = await renderOddsCard({
     matchNumber: line.match_number,
     week: line.week,
@@ -92,6 +100,8 @@ async function postLine(client, line) {
     cutoffLabel: formatCutoff(line.cutoff_at),
     homeAts,
     awayAts,
+    homeAllTimeAts,
+    awayAllTimeAts,
   });
   const filename = `vegas-${awayAbbr}-${homeAbbr}-wk${line.week ?? "x"}.png`;
   const file = new AttachmentBuilder(png, { name: filename });
@@ -238,7 +248,7 @@ async function checkLineMovement(client, line) {
     const message = await channel.messages.fetch(line.discord_message_id).catch(() => null);
     if (!message) return;
 
-    const { homeAts, awayAts } = await teamAts(line);
+    const { homeAts, awayAts, homeAllTimeAts, awayAllTimeAts } = await teamAts(line);
     const png = await renderOddsCard({
       matchNumber: line.match_number,
       week: line.week,
@@ -257,6 +267,8 @@ async function checkLineMovement(client, line) {
       cutoffLabel: formatCutoff(line.cutoff_at),
       homeAts,
       awayAts,
+      homeAllTimeAts,
+      awayAllTimeAts,
     });
     const filename = `vegas-${awayAbbr}-${homeAbbr}-wk${line.week ?? "x"}.png`;
     await message.edit({ files: [new AttachmentBuilder(png, { name: filename })] });

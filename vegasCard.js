@@ -223,14 +223,16 @@ function marketRow(label, left, right) {
                 },
               },
               // Against-the-spread record, spread row only (see renderOddsCard).
-              // Season-to-date, not this specific line -- how the team has
+              // Season-to-date (and optionally all-time) -- how the team has
               // done against the market generally, not a prediction for
               // tonight's number.
-              b.ats && {
+              (b.ats || b.allTimeAts) && {
                 type: 'div',
                 props: {
                   style: { display: 'flex', color: 'rgba(255,255,255,0.45)', fontFamily: 'Barlow', fontSize: 13 },
-                  children: `${b.ats} ATS`,
+                  children: [b.ats && `${b.ats} ATS`, b.allTimeAts && `(${b.allTimeAts} all-time)`]
+                    .filter(Boolean)
+                    .join(' '),
                 },
               },
             ].filter(Boolean),
@@ -426,6 +428,8 @@ function buildHero({ away, home, awayAbbr, homeAbbr, awayPlayer, homePlayer, awa
  * @param {string} [line.cutoffLabel] - pre-formatted human string
  * @param {string} [line.homeAts] - home team's season ATS record, e.g. "11-5" or "11-5-1"
  * @param {string} [line.awayAts] - away team's season ATS record
+ * @param {string} [line.homeAllTimeAts] - home team's all-time ATS record
+ * @param {string} [line.awayAllTimeAts] - away team's all-time ATS record
  * @returns {Promise<Buffer>} PNG bytes
  */
 async function renderOddsCard(line) {
@@ -493,8 +497,8 @@ async function renderOddsCard(line) {
               ),
               marketRow(
                 'POINT SPREAD',
-                { title: `${away.name || line.awayAbbr} ${spreadAwayValue > 0 ? '+' : ''}${spreadAwayValue ?? '—'}`, odds: americanOdds(line.spreadAwayOdds), owner: awayOwner, ats: line.awayAts },
-                { title: `${home.name || line.homeAbbr} ${line.spreadHome > 0 ? '+' : ''}${line.spreadHome ?? '—'}`, odds: americanOdds(line.spreadHomeOdds), owner: homeOwner, ats: line.homeAts }
+                { title: `${away.name || line.awayAbbr} ${spreadAwayValue > 0 ? '+' : ''}${spreadAwayValue ?? '—'}`, odds: americanOdds(line.spreadAwayOdds), owner: awayOwner, ats: line.awayAts, allTimeAts: line.awayAllTimeAts },
+                { title: `${home.name || line.homeAbbr} ${line.spreadHome > 0 ? '+' : ''}${line.spreadHome ?? '—'}`, odds: americanOdds(line.spreadHomeOdds), owner: homeOwner, ats: line.homeAts, allTimeAts: line.homeAllTimeAts }
               ),
               marketRow(
                 'TOTAL',
