@@ -47,6 +47,17 @@ const SKIP_WORDS = (process.env.STREAM_SKIP_WORDS || "cfb,college,ncaa,fnsl,nba,
 const TRUSTED_LOGINS = new Set((process.env.STREAM_TRUSTED_LOGINS || "boomerbaby21")
   .split(",").map((w) => w.trim().toLowerCase()).filter(Boolean));
 const POSITIVE_RE = /\b(xcfl|madden|m2\d|franchise|cfm)\b/i;
+// Only the league's own name is decisive enough, on its own, to skip the
+// kickoff-time check for a RECOGNIZED member's stream -- "madden"/
+// "franchise"/"cfm"/"m2<digit>" are generic Madden-franchise terminology any
+// league's broadcast could use. Confirmed live: esstee99 (a recognized
+// member) went live titled "Madden 27" for a DIFFERENT league's game
+// entirely; POSITIVE_RE's bare "madden" match was treated as sufficient
+// confirmation, skipping the kickoff check and posting a false positive to
+// Week Central. POSITIVE_RE itself stays as-is for the title-only-match
+// branch below, which isn't vulnerable the same way: gameFromTitle()
+// requires an actual team name in the title regardless of this regex.
+const STRONG_POSITIVE_RE = /\bxcfl\b/i;
 const MAX_POST_AGE_MS = 6 * 60 * 60 * 1000;   // ignore edits to old posts
 const NEW_SESSION_MS = 4 * 60 * 60 * 1000;    // same streamer + game after this = a new go-live
 const CONTEXT_TTL_MS = 2 * 60 * 1000;
@@ -264,7 +275,7 @@ async function handleStreamMessage(message) {
       // positive or negative signal from the title itself, so fall back to
       // either the opponent already being confirmed live for this exact
       // game, or the kickoff-time proximity check.
-      if (game && !titleTeams.size && !POSITIVE_RE.test(post.title) && post.title && !(await opponentConfirmed(game, team))) {
+      if (game && !titleTeams.size && !STRONG_POSITIVE_RE.test(post.title) && post.title && !(await opponentConfirmed(game, team))) {
         const sg = ctx.scheduled.find((s) => s.game_id === game.id) ||
           ctx.scheduled.find((s) => [nickOf(s.team_a), nickOf(s.team_b)].sort().join("|") ===
             [nickOf(game.homeTeam), nickOf(game.awayTeam)].sort().join("|"));
