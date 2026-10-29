@@ -28,6 +28,8 @@
 //   STREAMS_CHANNEL_ID   channel to watch (default: XCFL's #twitch-streams)
 //   STREAM_SKIP_WORDS    comma-separated title words that mean "not an XCFL
 //                        game" (default below)
+//   STREAM_TRUSTED_LOGINS  comma-separated twitch logins exempt from the skip
+//                        words (default: boomerbaby21)
 //
 // Needs the Message Content intent (already on for scheduleWatcher).
 
@@ -39,6 +41,11 @@ import { TEAMS } from "./teamLogos.js";
 const CHANNEL_ID = process.env.STREAMS_CHANNEL_ID || "477632618205151242";
 const SKIP_WORDS = (process.env.STREAM_SKIP_WORDS || "cfb,college,ncaa,fnsl,nba,2k,mlb,nhl,fortnite,warzone,cod")
   .split(",").map((w) => w.trim().toLowerCase()).filter(Boolean);
+// Twitch logins whose stream titles don't follow the usual pattern but are
+// always XCFL games (e.g. Zethious titles every XCFL stream "CFB"). The
+// skip-word check is not applied to them; the kickoff-time check still is.
+const TRUSTED_LOGINS = new Set((process.env.STREAM_TRUSTED_LOGINS || "boomerbaby21")
+  .split(",").map((w) => w.trim().toLowerCase()).filter(Boolean));
 const POSITIVE_RE = /\b(xcfl|madden|m2\d|franchise|cfm)\b/i;
 const MAX_POST_AGE_MS = 6 * 60 * 60 * 1000;   // ignore edits to old posts
 const NEW_SESSION_MS = 4 * 60 * 60 * 1000;    // same streamer + game after this = a new go-live
@@ -206,7 +213,7 @@ async function handleStreamMessage(message) {
   const post = parsePost(message);
   if (!post) return;
   const titleLower = post.title.toLowerCase();
-  if (SKIP_WORDS.some((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(titleLower))) {
+  if (!TRUSTED_LOGINS.has(post.login) && SKIP_WORDS.some((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(titleLower))) {
     console.log(`[STREAMS] skip ${post.login}: title "${post.title}" looks like another game/league`);
     return;
   }
