@@ -199,6 +199,20 @@ function gameFromTitle(abbrs, weekGames) {
   return hits.length === 1 ? hits[0] : null;
 }
 
+// True if the OTHER team in this game already has its own confident
+// (non-title-only) GameStream row for it. Two different owners both going
+// live for the same real matchup is strong corroboration on its own -- used
+// to relax the title/kickoff heuristics below, which exist precisely to
+// catch the opposite case (a recognized member streaming something else
+// entirely, not their XCFL game).
+async function opponentConfirmed(game, team) {
+  if (!game || !team) return false;
+  const opponent = [game.homeTeam, game.awayTeam].find((t) => nickOf(t) !== nickOf(team));
+  if (!opponent) return false;
+  const rows = await list("GameStream", {}, { limit: 500 }).catch(() => []);
+  return rows.some((s) => s.game_id === game.id && s.matched_by !== "title" && nickOf(s.team_name) === nickOf(opponent));
+}
+
 // ── Handler ──
 const inFlight = new Set();
 
@@ -237,13 +251,20 @@ async function handleStreamMessage(message) {
       by = who.by;
       if (game && titleTeams.size &&
           ![game.homeTeam, game.awayTeam].some((t) => titleTeams.has(abbrFromName(t)))) {
-        // The title names other teams (another league, last week's game): not this one.
+        // The title explicitly names OTHER teams -- real evidence this post
+        // is about a different game, not just an absence of evidence for
+        // this one. Not something opponentConfirmed below should override:
+        // the opponent being live elsewhere doesn't make this contradiction
+        // go away.
         console.log(`[STREAMS] skip ${post.login}: "${post.title}" names teams outside ${team}'s game`);
         return;
       }
-      if (game && !titleTeams.size && !POSITIVE_RE.test(post.title) && post.title) {
-        // Matched by name only and the title says nothing either way: only count
-        // it if the game is scheduled close to now (or has no time to compare).
+      // Matched by name only and the title says nothing either way -- this is
+      // the genuinely ambiguous case the opponent check below is for: no
+      // positive or negative signal from the title itself, so fall back to
+      // either the opponent already being confirmed live for this exact
+      // game, or the kickoff-time proximity check.
+      if (game && !titleTeams.size && !POSITIVE_RE.test(post.title) && post.title && !(await opponentConfirmed(game, team))) {
         const sg = ctx.scheduled.find((s) => s.game_id === game.id) ||
           ctx.scheduled.find((s) => [nickOf(s.team_a), nickOf(s.team_b)].sort().join("|") ===
             [nickOf(game.homeTeam), nickOf(game.awayTeam)].sort().join("|"));
