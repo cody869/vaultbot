@@ -9,6 +9,7 @@ import { handleTradeVote, startTradeWatcher } from "./tradeVoting.js";
 import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { startScheduleWatcher } from "./scheduleWatcher.js";
+import { startStreamWatcher } from "./streamWatcher.js";
 import { startSuspensionWatcher } from "./suspensionWatcher.js";
 import { startAbilityWatcher } from "./playerAbilityWatcher.js";
 import { startVegasWatcher } from "./vegasWatcher.js";
@@ -151,6 +152,9 @@ client.once(Events.ClientReady, async (c) => {
   setTimeout(() => startNewsWatcher(c), 5_000);
   setTimeout(() => startScorebugWatcher(c), 10_000);
   startScheduleWatcher(c); // event-driven only (message listeners), no seed read
+  // Marks games "In progress" on Week Central from #twitch-streams go-live
+  // posts. Event-driven only, no seed read.
+  startStreamWatcher(c);
   // Posts approved 70/30 Rule suspensions to SUSPENSIONS_CHANNEL_ID once each,
   // tagging the affected owner. No-ops if that env var is unset.
   setTimeout(() => startSuspensionWatcher(c), 15_000);
