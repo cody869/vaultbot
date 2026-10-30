@@ -1314,22 +1314,30 @@ export async function updateEntity(entity, id, data) {
   const url = `${SERVER}/api/apps/${APP_ID}/entities/${entity}/${id}`;
   const verbs = _writeVerb ? [_writeVerb] : ["PUT", "PATCH", "POST"];
 
+  await pace();
   let lastErr = null;
   for (const method of verbs) {
     try {
-      let res = await fetch(url, {
+      const doFetch = () => fetch(url, {
         method,
         headers: authHeaders(),
         body: JSON.stringify(data),
       });
+      let res = await doFetch();
       if ((res.status === 401 || res.status === 403) &&
           (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
         await botLogin();
-        res = await fetch(url, {
-          method,
-          headers: authHeaders(),
-          body: JSON.stringify(data),
-        });
+        res = await doFetch();
+      }
+      // A single bounded retry on a rate limit, same as list()'s read path --
+      // this write path had none, so a 429 skipped straight to "wrong verb,
+      // try the next one" / failure instead of waiting Base44's suggested gap.
+      if (res.status === 429) {
+        const body = await res.text().catch(() => "");
+        const waitMs = recordRetryAfter(body);
+        console.warn(`[WRITE] 429 updating ${entity}/${id}, retrying in ${waitMs}ms`);
+        await sleep(waitMs);
+        res = await doFetch();
       }
       if (res.ok) {
         if (!_writeVerb) {
@@ -1358,10 +1366,22 @@ export async function createEntity(entity, data) {
 
   let res;
   try {
+    await pace();
     res = await doFetch();
     if ((res.status === 401 || res.status === 403) &&
         (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
       await botLogin();
+      res = await doFetch();
+    }
+    // A single bounded retry on a rate limit, same as list()'s read path --
+    // this one had none at all, so a 429 on, say, a suspension write-back
+    // failed outright instead of waiting the few seconds Base44 itself asked
+    // for.
+    if (res.status === 429) {
+      const body = await res.text().catch(() => "");
+      const waitMs = recordRetryAfter(body);
+      console.warn(`[WRITE] 429 creating ${entity}, retrying in ${waitMs}ms`);
+      await sleep(waitMs);
       res = await doFetch();
     }
   } catch (err) {
@@ -1379,7 +1399,15 @@ export async function createEntity(entity, data) {
 
 // Invoke a Base44 backend function by name. Same auth/retry shape as
 // updateEntity/createEntity — POST verb, retry once on 401/403 after a
-// re-login.
+// re-login, and once on 429 after Base44's own suggested wait.
+//
+// Confirmed live: a user's /bet place died with "Couldn't reach the Vault to
+// place that bet" while Base44 itself was returning 429s to unrelated
+// read-only calls made moments later — this function had no pace() call and
+// no 429 retry at all (unlike list(), which has both), so a transient rate
+// limit on the single most consequential write path in the bot (placing a
+// real-money bet) failed outright and forced the user to redo the whole
+// wizard, instead of self-healing like every read already does.
 export async function invokeFunction(name, data = {}) {
   const url = `${SERVER}/api/apps/${APP_ID}/functions/${name}`;
   const doFetch = () =>
@@ -1387,10 +1415,18 @@ export async function invokeFunction(name, data = {}) {
 
   let res;
   try {
+    await pace();
     res = await doFetch();
     if ((res.status === 401 || res.status === 403) &&
         (process.env.BOT_EMAIL || process.env.BASE44_TOKEN)) {
       await botLogin();
+      res = await doFetch();
+    }
+    if (res.status === 429) {
+      const body = await res.text().catch(() => "");
+      const waitMs = recordRetryAfter(body);
+      console.warn(`[FUNC] 429 invoking ${name}, retrying in ${waitMs}ms`);
+      await sleep(waitMs);
       res = await doFetch();
     }
   } catch (err) {
