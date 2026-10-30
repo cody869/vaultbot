@@ -539,7 +539,14 @@ export async function announceApproval(client, trade) {
   // trade the app already processed is a harmless no-op.
   try {
     const result = await invokeFunction("processApprovedTrade", { trade_id: trade.id });
-    if (result?.result?.warnings?.length) {
+    // invokeFunction now returns a structured {error} rejection instead of
+    // throwing (see its own comment) -- this call site predates that and
+    // only ever checked result.result.warnings, so a rejection would have
+    // silently logged as "roster synced" with no warnings. Check error
+    // explicitly rather than assume success just because nothing threw.
+    if (result?.error) {
+      console.error(`[TRADE VOTE] roster sync rejected for ${trade.id}: ${result.error}`);
+    } else if (result?.result?.warnings?.length) {
       console.warn(`[TRADE VOTE] roster move for ${trade.id} had warnings:`, result.result.warnings);
     } else {
       console.log(`[TRADE VOTE] roster synced for approved trade ${trade.id}.`);

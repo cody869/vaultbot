@@ -51,7 +51,14 @@ export const vegasCommand = [
 ];
 
 async function openLines() {
-  return list("VegasLine", { status: "open" }, { limit: 100, sort: "-created_date" });
+  const lines = await list("VegasLine", { status: "open" }, { limit: 100, sort: "-created_date" });
+  // status stays "open" until the linked game goes final (settleVegasLine) --
+  // nothing flips it at cutoff_at, so a line whose betting window already
+  // closed stayed selectable here and placeBetOnLine rejected every attempt
+  // with "Betting has closed for this line" no matter how many times the
+  // user retried. Filter it out at the source instead of only at the
+  // (now correctly surfaced, but still a dead end) placeBetOnLine rejection.
+  return lines.filter((l) => !l.cutoff_at || new Date(l.cutoff_at) > new Date());
 }
 
 export async function suggestVegasLines(focused) {

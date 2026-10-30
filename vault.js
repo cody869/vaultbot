@@ -1401,13 +1401,19 @@ export async function createEntity(entity, data) {
 // updateEntity/createEntity — POST verb, retry once on 401/403 after a
 // re-login, and once on 429 after Base44's own suggested wait.
 //
-// Confirmed live: a user's /bet place died with "Couldn't reach the Vault to
-// place that bet" while Base44 itself was returning 429s to unrelated
-// read-only calls made moments later — this function had no pace() call and
-// no 429 retry at all (unlike list(), which has both), so a transient rate
-// limit on the single most consequential write path in the bot (placing a
-// real-money bet) failed outright and forced the user to redo the whole
-// wizard, instead of self-healing like every read already does.
+// A non-2xx response is NOT automatically an infrastructure failure: these
+// functions (placeBetOnLine, settleVegasLine, castTradeVote, ...) use plain
+// REST status codes for legitimate, structured business-logic answers --
+// placeBetOnLine returns 409 + {error: "Betting has closed for this line"}
+// for a cutoff that's already passed, 409 for "you already have this exact
+// bet", 404 for "no wallet found", etc. Confirmed live: a user's /bet place
+// kept failing with the generic "Couldn't reach the Vault" message on every
+// retry (never changing, because the real cause -- the line's cutoff_at had
+// passed hours earlier -- doesn't change on retry either); this function was
+// throwing on ANY !res.ok, discarding that specific, correct, already-
+// user-facing error message from the body and replacing it with a useless
+// generic one. Only throw when the body isn't actually a parseable
+// {error: string} -- a real infra/5xx failure, not a structured rejection.
 export async function invokeFunction(name, data = {}) {
   const url = `${SERVER}/api/apps/${APP_ID}/functions/${name}`;
   const doFetch = () =>
@@ -1434,12 +1440,18 @@ export async function invokeFunction(name, data = {}) {
     throw new Error(`Could not reach the Vault: ${err.message}`);
   }
 
-  const body = await res.json().catch(() => ({}));
+  const body = await res.json().catch(() => null);
   if (!res.ok) {
+    if (body && typeof body.error === "string") {
+      // A legitimate structured rejection -- hand it back to the caller
+      // (which already checks result?.error) instead of throwing it away.
+      console.warn(`[FUNC] ${name} rejected: HTTP ${res.status} ${body.error}`);
+      return body;
+    }
     console.error(`[FUNC] ${name} failed: HTTP ${res.status}`, body);
-    throw new Error(`${name} failed: HTTP ${res.status} ${body?.error ?? ""}`);
+    throw new Error(`${name} failed: HTTP ${res.status}`);
   }
-  return body;
+  return body ?? {};
 }
 
 // Each team's against-the-spread record, computed by the same getAtsRecords
