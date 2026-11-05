@@ -13,7 +13,6 @@ import {
   updateEntity,
   invalidate,
 } from './fantasyStore.js';
-
 import { isRateLimited } from './base44Pacer.js';
 
 import {
@@ -111,7 +110,8 @@ export async function generateSchedule(league, teams) {
 // ---------------------------------------------------------------------------
 
 /**
- * Score a week.
+ * Score a week. Idempotent — re-running overwrites the same rows rather than
+ * duplicating.
  *
  * `live` scores a week that is still in progress: totals reflect whatever has
  * been played so far, rows are marked games_complete:false, and matchups are
@@ -135,10 +135,10 @@ export async function scoreWeek(league, week, { force = false, live = false } = 
   const teams = await getTeams(league.id);
   if (!teams.length) return { ok: false, reason: 'no_teams' };
 
+  const scoring = resolveScoring(league);
   const statRows = await getWeeklyStats(season);
   const { byName, byNameTeam, defenseByTeam } = indexWeeklyStats(statRows, { season, week });
   const paByTeam = pointsAllowedByTeam(games, { season, week });
-  const scoring = resolveScoring(league);
 
   const existingScores = await getWeekScores(league.id, week);
   const scoreByTeam = new Map(existingScores.map((s) => [s.fantasy_team_id, s]));
@@ -209,32 +209,64 @@ export async function scoreWeek(league, week, { force = false, live = false } = 
   return { ok: true, week, results, finalized, written, live: !completion.complete, ...completion };
 }
 
+/** Matchup rows scored by a given week. */
+export async function matchupsForScoringWeek(league, week) {
+  // The final is a single week now, so a week maps to its own matchups with
+  // no special case. Kept as a function so callers do not change.
+  return getMatchups(league.id, week);
+}
+
 /** Write weekly totals onto the matchups and decide winners. */
 async function finalizeMatchups(league, week, totalsByTeam, { complete = true } = {}) {
-  const matchups = await getMatchups(league.id, week);
+  const matchups = await matchupsForScoringWeek(league, week);
   const finalized = [];
 
+  // Playoff ties are broken on regular-season points for. A bracket game has
+  // to produce a winner, and points_for is the natural measure: it is already
+  // computed by recalcStandings, counts ONLY regular-season matchups, and is
+  // the same number the standings are sorted by. Regular-season ties are left
+  // as genuine ties (teams carry a `ties` count).
+  let teamsById = null;
+  async function breakTie(m) {
+    if (m.round === 'regular') return null;
+    if (!teamsById) {
+      const rows = await getTeams(league.id);
+      teamsById = new Map(rows.map((t) => [t.id, t]));
+    }
+    const hp = Number(teamsById.get(m.home_team_id)?.points_for) || 0;
+    const ap = Number(teamsById.get(m.away_team_id)?.points_for) || 0;
+    if (hp === ap) return null; // genuinely inseparable — leave undecided
+    const winnerId = hp > ap ? m.home_team_id : m.away_team_id;
+    console.log(
+      `[fantasy] ${m.round} week ${week} tied on points; ` +
+      `broken on regular-season points for (${round2(hp)} vs ${round2(ap)})`
+    );
+    return winnerId;
+  }
+
   for (const m of matchups) {
-    // The two-week final accumulates across weeks 16 and 17.
-    const isFinalLeg2 = m.round === 'FINAL' && week === (league.final_week_end ?? LEAGUE_DEFAULTS.final_week_end);
-    const priorHome = isFinalLeg2 ? Number(m.home_points) || 0 : 0;
-    const priorAway = isFinalLeg2 ? Number(m.away_points) || 0 : 0;
+    const home = round2(totalsByTeam.get(m.home_team_id) || 0);
+    const away = round2(totalsByTeam.get(m.away_team_id) || 0);
 
-    const home = round2(priorHome + (totalsByTeam.get(m.home_team_id) || 0));
-    const away = round2(priorAway + (totalsByTeam.get(m.away_team_id) || 0));
-
-    // Leg 1 of the final stays "in_progress" so it isn't treated as decided.
-    // A live (partial) week is in_progress for the same reason: the points so
-    // far are real, but nothing is settled until every game is in.
-    const stillRunning =
-      !complete ||
-      (m.round === 'FINAL' && week === (league.final_week_start ?? LEAGUE_DEFAULTS.final_week_start));
-    const winner = home === away ? null : (home > away ? m.home_team_id : m.away_team_id);
+    // A live (partial) week is in_progress: the points so far are real, but
+    // nothing is settled until every game is in. The final is a single week,
+    // so it has no extra "leg 1" case.
+    const stillRunning = !complete;
+    let winner = home === away ? null : (home > away ? m.home_team_id : m.away_team_id);
+    // Only resolve a tie once the result actually counts.
+    if (winner === null && home === away && !stillRunning) {
+      winner = await breakTie(m);
+    }
     const nextStatus = stillRunning ? 'in_progress' : 'final';
 
     // Skip untouched rows. The live pass revisits every matchup on every tick,
     // and the read/write budget is shared with the rest of the Vault.
-    if (Number(m.home_points) === home && Number(m.away_points) === away && m.status === nextStatus) {
+    if (
+      Number(m.home_points) === home &&
+      Number(m.away_points) === away &&
+      m.status === nextStatus &&
+      (m.winner_team_id || null) === (stillRunning ? null : winner)
+    ) {
       finalized.push(m);
       continue;
     }
@@ -305,29 +337,35 @@ export function rankTeams(teams) {
 }
 
 // ---------------------------------------------------------------------------
-// Playoffs — 6 teams, weeks 14-17
-//   wk 14  R1:   3v6, 4v5           (seeds 1-2 bye)
-//   wk 15  SEMI: 1 vs lowest alive, 2 vs other
-//   wk 16-17 FINAL: two-week aggregate
+// Playoffs -- top 4, two weeks
+//   wk 14  SEMI:  1v4, 2v3
+//   wk 15  FINAL: semi winners, single week
+//
+// There is no R1 round and no bye: with four teams everyone alive plays in
+// week 14. The final is ONE week, so unlike the old two-week format its row
+// carries that week's points only and is decided as soon as the week is final.
 // ---------------------------------------------------------------------------
 
 export async function seedPlayoffs(league) {
   const teams = await getTeams(league.id);
-  const ranked = rankTeams(teams).slice(0, league.playoff_teams ?? LEAGUE_DEFAULTS.playoff_teams);
+  const count = league.playoff_teams ?? LEAGUE_DEFAULTS.playoff_teams;
+  const ranked = rankTeams(teams).slice(0, count);
+  if (ranked.length < 4) return { created: 0, reason: 'not_enough_teams', ranked };
 
   for (let i = 0; i < ranked.length; i += 1) {
     await updateEntity(ENTITIES.team, ranked[i].id, { seed: i + 1 });
   }
 
   const week = league.playoff_start_week ?? LEAGUE_DEFAULTS.playoff_start_week;
-  const existing = (await getMatchups(league.id, week)).filter((m) => m.round === 'R1');
+  const existing = (await getMatchups(league.id, week)).filter((m) => m.round === 'SEMI');
   if (existing.length) return { created: 0, ranked };
 
+  // 1v4 and 2v3, higher seed as home.
   const payloads = [
-    { home_team_id: ranked[2].id, away_team_id: ranked[5].id },
-    { home_team_id: ranked[3].id, away_team_id: ranked[4].id },
+    { home_team_id: ranked[0].id, away_team_id: ranked[3].id },
+    { home_team_id: ranked[1].id, away_team_id: ranked[2].id },
   ].map((p) => ({
-    league_id: league.id, week, round: 'R1',
+    league_id: league.id, week, round: 'SEMI',
     home_points: 0, away_points: 0, status: 'scheduled', ...p,
   }));
 
@@ -337,91 +375,35 @@ export async function seedPlayoffs(league) {
   return { created: payloads.length, ranked };
 }
 
-export async function buildSemis(league) {
-  const teams = await getTeams(league.id);
-  const seedOf = new Map(teams.map((t) => [t.id, t.seed || 99]));
-  const week = (league.playoff_start_week ?? LEAGUE_DEFAULTS.playoff_start_week) + 1;
-
-  const existing = (await getMatchups(league.id, week)).filter((m) => m.round === 'SEMI');
-  if (existing.length) return { created: 0 };
-
-  const r1 = (await getMatchups(league.id, week - 1)).filter((m) => m.round === 'R1' && m.status === 'final');
-  if (r1.length < 2) return { created: 0, reason: 'r1_not_final' };
-
-  const survivors = r1.map((m) => m.winner_team_id).filter(Boolean);
-  survivors.sort((a, b) => (seedOf.get(a) || 99) - (seedOf.get(b) || 99));
-
-  const one = teams.find((t) => t.seed === 1);
-  const two = teams.find((t) => t.seed === 2);
-  if (!one || !two || survivors.length < 2) return { created: 0, reason: 'missing_seeds' };
-
-  const lowest = survivors[survivors.length - 1];
-  const other = survivors.find((s) => s !== lowest);
-
-  const payloads = [
-    { home_team_id: one.id, away_team_id: lowest },
-    { home_team_id: two.id, away_team_id: other },
-  ].map((p) => ({
-    league_id: league.id, week, round: 'SEMI',
-    home_points: 0, away_points: 0, status: 'scheduled', ...p,
-  }));
-
-  await bulkCreateEntity(ENTITIES.matchup, payloads);
-  invalidate(ENTITIES.matchup);
-  return { created: payloads.length };
-}
-
 export async function buildFinal(league) {
-  const semiWeek = (league.playoff_start_week ?? LEAGUE_DEFAULTS.playoff_start_week) + 1;
-  const startWeek = league.final_week_start ?? LEAGUE_DEFAULTS.final_week_start;
+  const teams = await getTeams(league.id);
+  const semiWeek = league.playoff_start_week ?? LEAGUE_DEFAULTS.playoff_start_week;
+  const week = league.final_week_start ?? LEAGUE_DEFAULTS.final_week_start;
 
-  const existing = (await getMatchups(league.id, startWeek)).filter((m) => m.round === 'FINAL');
+  const existing = (await getMatchups(league.id, week)).filter((m) => m.round === 'FINAL');
   if (existing.length) return { created: 0 };
 
   const semis = (await getMatchups(league.id, semiWeek)).filter((m) => m.round === 'SEMI' && m.status === 'final');
-  if (semis.length < 2) return { created: 0, reason: 'semis_not_final' };
+  if (semis.length < 2) return { created: 0, reason: 'semis_incomplete' };
 
-  const teams = await getTeams(league.id);
   const seedOf = new Map(teams.map((t) => [t.id, t.seed || 99]));
   const winners = semis.map((m) => m.winner_team_id).filter(Boolean);
   if (winners.length < 2) return { created: 0, reason: 'no_winners' };
   winners.sort((a, b) => (seedOf.get(a) || 99) - (seedOf.get(b) || 99));
 
-  // One FINAL row spanning weeks 16-17; points accumulate across both legs.
   await createEntity(ENTITIES.matchup, {
     league_id: league.id,
-    week: startWeek,
+    week,
     round: 'FINAL',
     home_team_id: winners[0],
     away_team_id: winners[1],
     home_points: 0,
     away_points: 0,
     status: 'scheduled',
-    two_week: true,
   });
-
   invalidate(ENTITIES.matchup);
   return { created: 1 };
 }
-
-/**
- * The two-week final is stored as ONE matchup row on week 16. Week 17's
- * scoring pass needs to find it, so we clone the row reference forward by
- * looking it up on the start week whenever we score the end week.
- */
-export async function matchupsForScoringWeek(league, week) {
-  const endWeek = league.final_week_end ?? LEAGUE_DEFAULTS.final_week_end;
-  const startWeek = league.final_week_start ?? LEAGUE_DEFAULTS.final_week_start;
-  if (week === endWeek) {
-    const final = (await getMatchups(league.id, startWeek)).filter((m) => m.round === 'FINAL');
-    if (final.length) return final;
-  }
-  return getMatchups(league.id, week);
-}
-
-// ---------------------------------------------------------------------------
-// Advancement — call after each week is scored
-// ---------------------------------------------------------------------------
 
 export async function advanceLeague(league) {
   const regEnd = league.regular_season_end_week ?? LEAGUE_DEFAULTS.regular_season_end_week;
@@ -429,17 +411,12 @@ export async function advanceLeague(league) {
   const matchups = await getMatchups(league.id);
   const regWeekGames = matchups.filter((m) => m.round === 'regular' && m.week === regEnd);
   const regDone = regWeekGames.length > 0 && regWeekGames.every((m) => m.status === 'final');
-  const r1Done = matchups.filter((m) => m.round === 'R1').length > 0
-    && matchups.filter((m) => m.round === 'R1').every((m) => m.status === 'final');
-  const semiDone = matchups.filter((m) => m.round === 'SEMI').length > 0
-    && matchups.filter((m) => m.round === 'SEMI').every((m) => m.status === 'final');
+  const semis = matchups.filter((m) => m.round === 'SEMI');
+  const semiDone = semis.length > 0 && semis.every((m) => m.status === 'final');
 
   const actions = [];
-  if (regDone && !matchups.some((m) => m.round === 'R1')) {
+  if (regDone && !semis.length) {
     actions.push({ step: 'seedPlayoffs', result: await seedPlayoffs(league) });
-  }
-  if (r1Done && !matchups.some((m) => m.round === 'SEMI')) {
-    actions.push({ step: 'buildSemis', result: await buildSemis(league) });
   }
   if (semiDone && !matchups.some((m) => m.round === 'FINAL')) {
     actions.push({ step: 'buildFinal', result: await buildFinal(league) });
@@ -485,7 +462,7 @@ export async function runScoringPass({ onWeekScored } = {}) {
   const reconciled = [];
   for (const [week, rows] of scoresByWeek) {
     if (!rows.length || !rows.every((s) => s.games_complete)) continue;
-    const matchups = await getMatchups(league.id, week);
+    const matchups = await matchupsForScoringWeek(league, week);
     const pending = matchups.filter((m) => m.status !== 'final');
     if (!pending.length) continue;
 

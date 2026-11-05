@@ -13,9 +13,9 @@ export const LEAGUE_DEFAULTS = {
   scoring_start_week: 5,
   regular_season_end_week: 13,
   playoff_start_week: 14,
-  final_week_start: 16,
-  final_week_end: 17,
-  playoff_teams: 6,
+  final_week_start: 15,
+  final_week_end: 15,
+  playoff_teams: 4,
   pick_clock_minutes: 480, // 8h. Canonical clock field — minutes so short
                            // clocks (a live 90-second draft) are expressible.
   pick_clock_hours: 8,     // legacy; read only if minutes is unset
