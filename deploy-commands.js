@@ -107,6 +107,20 @@ export const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName("teamstats")
+    .setDescription("A team's season stats — offense, defense, situational — with league ranks")
+    .addStringOption((o) =>
+      o
+        .setName("team")
+        .setDescription("Team name or abbreviation (defaults to your own linked team)")
+        .setRequired(false)
+        .setAutocomplete(true)
+    )
+    .addIntegerOption((o) =>
+      o.setName("season").setDescription("Season number (defaults to latest)")
+    ),
+
+  new SlashCommandBuilder()
     .setName("rivalry")
     .setDescription("All-time head-to-head record between two league members")
     .addStringOption((o) =>

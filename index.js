@@ -50,6 +50,7 @@ import {
   getPlayerWeeklyStats,
   getPlayerSeasonStats,
   getTeamOverview,
+  getTeamStats,
   getRivalry,
   getMemberByDiscordId,
   getMemberByIdOrUsername,
@@ -82,6 +83,7 @@ import {
   scoresEmbed,
   compareEmbed,
   teamEmbed,
+  teamStatsEmbed,
   rivalryEmbed,
   notLinkedEmbed,
 } from "./embeds.js";
@@ -344,7 +346,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.respond([]);
         } catch {}
       }
-    } else if (interaction.commandName === "team") {
+    } else if (interaction.commandName === "team" || interaction.commandName === "teamstats") {
       try {
         const focused = String(interaction.options.getFocused() ?? "");
         await interaction.respond(await suggestTeams(focused, 25));
@@ -698,6 +700,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const data = await getTeamOverview(query);
         await interaction.editReply(teamEmbed(data));
+        break;
+      }
+      case "teamstats": {
+        let query = interaction.options.getString("team");
+        const season = interaction.options.getInteger("season") ?? undefined;
+        if (!query) {
+          // Same fallback as /team: the caller's own linked team.
+          const member = await getMemberByDiscordId(interaction.user.id);
+          if (!member) {
+            await interaction.editReply(notLinkedEmbed(interaction.user.tag));
+            break;
+          }
+          if (!member.team_name) {
+            await interaction.editReply(
+              `**${memberDisplayName(member)}** isn't assigned to a team right now.`
+            );
+            break;
+          }
+          query = member.team_name;
+        }
+        console.log(`[TEAMSTATS] ${interaction.user.tag} -> ${query}${season ? ` (S${season})` : ""}`);
+        const data = await getTeamStats(query, season);
+        await interaction.editReply(teamStatsEmbed(data));
         break;
       }
       case "rivalry": {

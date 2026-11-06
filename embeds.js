@@ -1041,3 +1041,80 @@ export function notLinkedEmbed(discordTag) {
   ];
   return { content: out.join("\n"), embeds: [], components: [] };
 }
+
+// /teamstats -- season team stats with league ranks. Plain message content
+// like the /team card so the team emoji renders in the header.
+export function teamStatsEmbed(data) {
+  if (!data.found) {
+    const out = [`# No team matching "${data.query}"`, ""];
+    if (data.teams?.length) {
+      out.push("**Try one of these:**");
+      out.push(data.teams.map((t) => `${teamEmojiByName(t)} ${t}`).join("\n").slice(0, 1500));
+    }
+    return { content: out.join("\n"), embeds: [], components: [] };
+  }
+
+  const { teamName, season, stats: s, ranks = {}, teamCount } = data;
+  const header = `# ${teamEmojiByName(teamName)} ${teamName} — Team Stats`;
+  if (data.empty) {
+    const when = season != null ? `Season ${season}` : "this season";
+    return {
+      content: `${header}\nNo regular-season team stats for ${when} yet.`,
+      embeds: [],
+      components: [],
+    };
+  }
+
+  const n1 = (v) => (v == null ? "—" : v.toFixed(1));
+  const p0 = (v) => (v == null ? "—" : `${Math.round(v)}%`);
+  const rk = (stat) => (ranks[stat] ? ` *(#${ranks[stat]})*` : "");
+  const signed = (v) => (v > 0 ? `+${v}` : `${v}`);
+  const frac = (made, att) => `${made}/${att}`;
+
+  const rec = `${s.wins}-${s.losses}${s.ties ? `-${s.ties}` : ""}`;
+  const seed = s.seed ? ` · #${s.seed} seed` : "";
+  const gamesOnRecord = s.wins + s.losses + s.ties;
+  const out = [header, `### ${rec}${seed} · Season ${season}`];
+
+  out.push("", "**Offense**");
+  out.push(`> **${n1(s.ppg)}** pts/g${rk("ppg")} · **${n1(s.ypg)}** yds/g${rk("ypg")}`);
+  out.push(`> Pass **${n1(s.passYpg)}**/g${rk("passYpg")} · Rush **${n1(s.rushYpg)}**/g${rk("rushYpg")}`);
+  out.push(
+    `> TDs **${s.sums.off_pass_tds}** pass · **${s.sums.off_rush_tds}** rush · ` +
+      `1st downs ${n1(s.firstDownsPg)}/g · Sacked ${s.sacksAllowed}${rk("sacksAllowed")}`
+  );
+
+  out.push("", "**Defense**");
+  out.push(`> **${n1(s.papg)}** pts allowed/g${rk("papg")} · **${n1(s.yapg)}** yds allowed/g${rk("yapg")}`);
+  out.push(`> Pass **${n1(s.passApg)}**/g${rk("passApg")} · Rush **${n1(s.rushApg)}**/g${rk("rushApg")}`);
+  out.push(
+    `> Sacks **${s.sacks}**${rk("sacks")} · INTs **${s.sums.def_ints_rec}** · ` +
+      `FF ${s.sums.def_forced_fum} · FR ${s.sums.def_fum_rec}`
+  );
+
+  out.push("", "**Situational**");
+  out.push(
+    `> 3rd down **${p0(s.thirdPct)}**${rk("thirdPct")} (${frac(s.sums.off_3rd_down_conv, s.sums.off_3rd_down_att)})` +
+      ` · 4th down ${p0(s.fourthPct)} (${frac(s.sums.off_4th_down_conv, s.sums.off_4th_down_att)})`
+  );
+  out.push(
+    `> Red zone **${p0(s.rzPct)}**${rk("rzPct")} (${s.sums.off_red_zone_tds} TD · ${s.sums.off_red_zone_fgs} FG` +
+      ` in ${s.sums.off_red_zones})` +
+      ` · RZ defense **${p0(s.defRzPct)}**${rk("defRzPct")}`
+  );
+
+  out.push("", "**Turnovers & Penalties**");
+  out.push(
+    `> Takeaways **${s.takeaways}**${rk("takeaways")} · Giveaways **${s.giveaways}**${rk("giveaways")}` +
+      ` · Diff **${signed(s.toDiff)}**${rk("toDiff")}`
+  );
+  out.push(`> Penalties ${n1(s.penPg)}/g · ${n1(s.penYpg)} yds/g${rk("penYpg")}`);
+
+  out.push("");
+  const notes = [`Ranks out of ${teamCount} teams`, "regular season"];
+  // Per-game rows can lag the record (a game whose stats never imported).
+  if (s.games < gamesOnRecord) notes.push(`totals from ${s.games} of ${gamesOnRecord} games`);
+  out.push(`-# ${notes.join(" · ")} · [View on XCFL Vault](<${teamUrl(teamName)}>)`);
+
+  return { content: out.join("\n").slice(0, 2000), embeds: [], components: [] };
+}

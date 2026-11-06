@@ -1557,3 +1557,226 @@ export async function findMemberByTeam(teamName) {
   const members = await getLeagueMembers();
   return members.find((m) => m.team_name && teamMatches(m.team_name, teamName)) ?? null;
 }
+
+// --- /teamstats -------------------------------------------------------------
+//
+// Season team stats from TeamStat, with league ranks.
+//
+// TeamStat holds one row per team per game. Most fields are that game's own
+// numbers (yards, TDs, sacks, 3rd downs...) and are summed here. A few are
+// running season figures -- total_wins/losses/ties, seed, off/def_pts_per_game
+// -- and those reflect the moment the row was IMPORTED, not its week:
+// confirmed live, a week-1 row re-imported during week 15 carries the
+// week-14 record. So the current record comes from the row with the most
+// games played, never the highest week_index.
+//
+// Madden re-issues team_ids on every franchise re-export, so one team's
+// season can be split across several ids, sometimes with the same week under
+// two of them. Rows are grouped by the TeamMap NAME and deduped to one row
+// per week (latest import wins) -- the same rule the site's
+// src/lib/teamStatIdentity.js uses.
+
+const TEAMSTAT_SUM_FIELDS = [
+  "off_pass_yds", "off_rush_yds", "off_pass_tds", "off_rush_tds", "off_1st_downs",
+  "off_sacks", "off_3rd_down_att", "off_3rd_down_conv", "off_4th_down_att",
+  "off_4th_down_conv", "off_red_zones", "off_red_zone_tds", "off_red_zone_fgs", "off_2pt_att",
+  "off_2pt_conv", "off_fum_lost", "off_ints_lost",
+  "def_pass_yds", "def_rush_yds", "def_sacks", "def_ints_rec", "def_forced_fum",
+  "def_fum_rec", "def_red_zones", "def_red_zone_tds", "def_red_zone_fgs",
+  "to_giveaways", "to_takeaways", "penalties", "penalty_yds",
+];
+
+// Stats that get a league rank. `low: true` means smaller is better.
+export const TEAMSTAT_RANKED = {
+  ppg: {}, ypg: {}, passYpg: {}, rushYpg: {}, thirdPct: {}, rzPct: {},
+  papg: { low: true }, yapg: { low: true }, passApg: { low: true },
+  rushApg: { low: true }, sacks: {}, takeaways: {}, toDiff: {},
+  defRzPct: { low: true }, sacksAllowed: { low: true }, giveaways: { low: true },
+  penYpg: { low: true },
+};
+
+function gamesPlayed(r) {
+  return (r.total_wins ?? 0) + (r.total_losses ?? 0) + (r.total_ties ?? 0);
+}
+
+function newerImport(a, b) {
+  const ca = a?.created_date || "";
+  const cb = b?.created_date || "";
+  if (ca !== cb) return ca > cb;
+  return (a?.stat_id ?? 0) > (b?.stat_id ?? 0);
+}
+
+function pct(made, att) {
+  return att > 0 ? (made / att) * 100 : null;
+}
+
+function summarizeTeamRows(rows) {
+  const sums = Object.fromEntries(TEAMSTAT_SUM_FIELDS.map((f) => [f, 0]));
+  for (const r of rows) {
+    for (const f of TEAMSTAT_SUM_FIELDS) sums[f] += Number(r[f]) || 0;
+  }
+  // Record/seed/points-per-game: the row with the most games behind it.
+  const latest = rows.reduce((best, r) => {
+    if (!best) return r;
+    const g = gamesPlayed(r), gb = gamesPlayed(best);
+    if (g !== gb) return g > gb ? r : best;
+    return newerImport(r, best) ? r : best;
+  }, null);
+
+  const n = rows.length; // games we actually have per-game rows for
+  const per = (v) => (n ? v / n : null);
+  return {
+    games: n,
+    wins: latest?.total_wins ?? 0,
+    losses: latest?.total_losses ?? 0,
+    ties: latest?.total_ties ?? 0,
+    seed: latest?.seed ?? null,
+    sums,
+    ppg: latest?.off_pts_per_game ?? null,
+    papg: latest?.def_pts_per_game ?? null,
+    ypg: per(sums.off_pass_yds + sums.off_rush_yds),
+    passYpg: per(sums.off_pass_yds),
+    rushYpg: per(sums.off_rush_yds),
+    firstDownsPg: per(sums.off_1st_downs),
+    yapg: per(sums.def_pass_yds + sums.def_rush_yds),
+    passApg: per(sums.def_pass_yds),
+    rushApg: per(sums.def_rush_yds),
+    thirdPct: pct(sums.off_3rd_down_conv, sums.off_3rd_down_att),
+    fourthPct: pct(sums.off_4th_down_conv, sums.off_4th_down_att),
+    // Red zone % is SCORING % (TD + FG) per trip -- Madden's own definition,
+    // confirmed against its off_red_zone_pct (2 TD + 1 FG in 6 trips = 50).
+    rzPct: pct(sums.off_red_zone_tds + sums.off_red_zone_fgs, sums.off_red_zones),
+    defRzPct: pct(sums.def_red_zone_tds + sums.def_red_zone_fgs, sums.def_red_zones),
+    sacks: sums.def_sacks,
+    sacksAllowed: sums.off_sacks,
+    takeaways: sums.to_takeaways,
+    giveaways: sums.to_giveaways,
+    toDiff: sums.to_takeaways - sums.to_giveaways,
+    penPg: per(sums.penalties),
+    penYpg: per(sums.penalty_yds),
+  };
+}
+
+// Standard competition ranking ("1, 2, 2, 4") of every team on each stat.
+function rankTeamSummaries(byTeam) {
+  const ranks = new Map([...byTeam.keys()].map((k) => [k, {}]));
+  for (const [stat, { low }] of Object.entries(TEAMSTAT_RANKED)) {
+    const vals = [...byTeam.entries()]
+      .filter(([, s]) => s[stat] != null && Number.isFinite(s[stat]))
+      .map(([k, s]) => [k, s[stat]]);
+    for (const [k, v] of vals) {
+      const better = vals.filter(([, o]) => (low ? o < v : o > v)).length;
+      ranks.get(k)[stat] = better + 1;
+    }
+  }
+  return ranks;
+}
+
+// A season is ~500 rows, so when the server honors the season filter one
+// read is complete. Base44 filters aren't always honored, though, and an
+// ignored filter would return an arbitrary capped slice of the whole table
+// -- non-empty, so listMatching() would accept it and silently drop rows.
+// Only trust the narrow read when every row really is from that season;
+// otherwise page through the table newest-season-first.
+async function fetchSeasonTeamStats(season) {
+  const PAGE = 5000;
+  const match = (r) => r.season_index === season;
+  try {
+    const narrow = await list("TeamStat", { season_index: season }, { limit: PAGE });
+    if (narrow.length && narrow.length < PAGE && narrow.every(match)) return narrow;
+  } catch (err) {
+    console.error("[TEAMSTATS] narrow read failed:", err.message);
+  }
+  const out = [];
+  for (let page = 0; page < 20; page++) {
+    const rows = await list("TeamStat", {}, { sort: "-season_index", limit: PAGE, skip: page * PAGE });
+    out.push(...rows.filter(match));
+    if (rows.length < PAGE) break;
+    // Sorted newest season first: once a page ends before this season, done.
+    if ((rows[rows.length - 1]?.season_index ?? 0) < season) break;
+  }
+  return out;
+}
+
+async function latestTeamStatSeason() {
+  const rows = await list("TeamStat", {}, { sort: "-season_index", limit: 1 });
+  return rows[0]?.season_index ?? null;
+}
+
+export async function getTeamStats(teamQuery, seasonNumber) {
+  const teamMap = await pollCached("teamstats:TeamMap", 10 * 60_000, () =>
+    list("TeamMap", {}, { limit: 1000 })
+  );
+
+  // Resolve the query: exact name/abbr first, then the loose match /team uses.
+  const q = String(teamQuery ?? "").trim().toLowerCase();
+  const mapped =
+    teamMap.find(
+      (t) =>
+        String(t.team_name ?? "").toLowerCase() === q ||
+        String(t.team_abbrName ?? "").toLowerCase() === q
+    ) ??
+    teamMap.find(
+      (t) => teamMatches(t.team_name, teamQuery) || teamMatches(t.team_abbrName, teamQuery)
+    );
+  if (!mapped) {
+    const names = [...new Set(teamMap.map((t) => t.team_name).filter(Boolean))].sort();
+    return { found: false, query: teamQuery, teams: names };
+  }
+
+  // team_id -> canonical name key, preferring rows that carry an abbr (the
+  // current cycle's import), the same rule as the site's buildTeamIdToName.
+  const keyById = new Map();
+  const displayByKey = new Map();
+  for (const t of teamMap) {
+    if (t?.team_id == null || !t.team_name) continue;
+    const key = String(t.team_name).trim().toLowerCase();
+    const id = Number(t.team_id);
+    if (!keyById.has(id) || t.team_abbrName) keyById.set(id, key);
+    if (!displayByKey.has(key) || t.team_abbrName) {
+      displayByKey.set(key, { name: t.team_name, abbr: t.team_abbrName ?? "" });
+    }
+  }
+  const teamKey = String(mapped.team_name).trim().toLowerCase();
+
+  const season = seasonNumber ?? (await latestTeamStatSeason());
+  if (season == null) return { found: true, empty: true, season: null, ...displayByKey.get(teamKey) };
+
+  const seasonRows = await pollCached(`teamstats:season:${season}`, 2 * 60_000, () =>
+    fetchSeasonTeamStats(season)
+  );
+
+  // Regular season only. Preseason (stage_index 0) is junk the site already
+  // cleans up; any other stage is kept out so playoff games don't skew
+  // regular-season averages and ranks.
+  const byTeamWeek = new Map();
+  for (const r of seasonRows) {
+    if (r.stage_index != null && r.stage_index !== 1) continue;
+    const key = keyById.get(Number(r.team_id));
+    if (!key) continue;
+    if (!byTeamWeek.has(key)) byTeamWeek.set(key, new Map());
+    const weeks = byTeamWeek.get(key);
+    const prev = weeks.get(r.week_index);
+    if (!prev || newerImport(r, prev)) weeks.set(r.week_index, r);
+  }
+
+  const summaries = new Map();
+  for (const [key, weeks] of byTeamWeek) summaries.set(key, summarizeTeamRows([...weeks.values()]));
+  const ranks = rankTeamSummaries(summaries);
+  const display = displayByKey.get(teamKey) ?? { name: mapped.team_name, abbr: mapped.team_abbrName ?? "" };
+
+  const stats = summaries.get(teamKey);
+  if (!stats) {
+    return { found: true, empty: true, season, teamName: display.name, abbr: display.abbr };
+  }
+  return {
+    found: true,
+    empty: false,
+    season,
+    teamName: display.name,
+    abbr: display.abbr,
+    stats,
+    ranks: ranks.get(teamKey),
+    teamCount: summaries.size,
+  };
+}
