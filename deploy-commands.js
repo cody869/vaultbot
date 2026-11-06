@@ -5,6 +5,7 @@ import { REST, Routes, SlashCommandBuilder } from "discord.js";
 import { fantasyCommand } from "./fantasyDeployCommands.js";
 import { adminCommandBuilder } from "./adminCommands.js";
 import { vegasCommand } from "./vegasCommands.js";
+import { TEAM_STAT_CATEGORIES } from "./teamStatCategories.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -108,13 +109,18 @@ export const commands = [
 
   new SlashCommandBuilder()
     .setName("teamstats")
-    .setDescription("A team's season stats — offense, defense, situational — with league ranks")
+    .setDescription("Team stat leaders — teams ranked on a season stat")
     .addStringOption((o) =>
       o
-        .setName("team")
-        .setDescription("Team name or abbreviation (defaults to your own linked team)")
-        .setRequired(false)
-        .setAutocomplete(true)
+        .setName("category")
+        .setDescription("Which team stat")
+        .setRequired(true)
+        .addChoices(
+          ...Object.entries(TEAM_STAT_CATEGORIES).map(([value, c]) => ({ name: c.label, value }))
+        )
+    )
+    .addIntegerOption((o) =>
+      o.setName("count").setDescription("How many teams to show (default 10, max 32)")
     )
     .addIntegerOption((o) =>
       o.setName("season").setDescription("Season number (defaults to latest)")

@@ -5,6 +5,7 @@ import {
   StringSelectMenuBuilder,
 } from "discord.js";
 import { teamEmoji, teamEmojiByName, abbrFromName, devEmoji } from "./emoji.js";
+import { TEAM_STAT_CATEGORIES, formatTeamStat } from "./teamStatCategories.js";
 
 const VAULT_COLOR = 0x1d4ed8; // XCFL blue
 const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
@@ -1042,79 +1043,65 @@ export function notLinkedEmbed(discordTag) {
   return { content: out.join("\n"), embeds: [], components: [] };
 }
 
-// /teamstats -- season team stats with league ranks. Plain message content
-// like the /team card so the team emoji renders in the header.
-export function teamStatsEmbed(data) {
-  if (!data.found) {
-    const out = [`# No team matching "${data.query}"`, ""];
-    if (data.teams?.length) {
-      out.push("**Try one of these:**");
-      out.push(data.teams.map((t) => `${teamEmojiByName(t)} ${t}`).join("\n").slice(0, 1500));
-    }
-    return { content: out.join("\n"), embeds: [], components: [] };
+// /teamstats -- teams ranked on one season stat: a team-level /leaders card
+// with the same layout and a category dropdown. The dropdown's custom id
+// carries the season and count so switching categories keeps both.
+function teamStatsViewRow(category, season, count) {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`teamstats_view:${season ?? ""}:${count}`)
+    .setPlaceholder(TEAM_STAT_CATEGORIES[category]?.label ?? "Pick a category")
+    .addOptions(
+      Object.entries(TEAM_STAT_CATEGORIES).map(([value, c]) => ({
+        label: c.label,
+        value,
+        default: value === category,
+      }))
+    );
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+export function teamStatLeadersView({ category, label, fmt, season, rows, teamCount }, count = 10) {
+  const components = [teamStatsViewRow(category, season, count)];
+  const out = [`# ${label} — Team Leaders`, `### Season ${season ?? "?"} · Regular season`];
+
+  if (!rows.length) {
+    out.push("", "> No team stats on file for this season yet.");
+    return { content: out.join("\n"), embeds: [], components };
   }
 
-  const { teamName, season, stats: s, ranks = {}, teamCount } = data;
-  const header = `# ${teamEmojiByName(teamName)} ${teamName} — Team Stats`;
-  if (data.empty) {
-    const when = season != null ? `Season ${season}` : "this season";
-    return {
-      content: `${header}\nNo regular-season team stats for ${when} yet.`,
-      embeds: [],
-      components: [],
-    };
-  }
-
-  const n1 = (v) => (v == null ? "—" : v.toFixed(1));
-  const p0 = (v) => (v == null ? "—" : `${Math.round(v)}%`);
-  const rk = (stat) => (ranks[stat] ? ` *(#${ranks[stat]})*` : "");
-  const signed = (v) => (v > 0 ? `+${v}` : `${v}`);
-  const frac = (made, att) => `${made}/${att}`;
-
-  const rec = `${s.wins}-${s.losses}${s.ties ? `-${s.ties}` : ""}`;
-  const seed = s.seed ? ` · #${s.seed} seed` : "";
-  const gamesOnRecord = s.wins + s.losses + s.ties;
-  const out = [header, `### ${rec}${seed} · Season ${season}`];
-
-  out.push("", "**Offense**");
-  out.push(`> **${n1(s.ppg)}** pts/g${rk("ppg")} · **${n1(s.ypg)}** yds/g${rk("ypg")}`);
-  out.push(`> Pass **${n1(s.passYpg)}**/g${rk("passYpg")} · Rush **${n1(s.rushYpg)}**/g${rk("rushYpg")}`);
-  out.push(
-    `> TDs **${s.sums.off_pass_tds}** pass · **${s.sums.off_rush_tds}** rush · ` +
-      `1st downs ${n1(s.firstDownsPg)}/g · Sacked ${s.sacksAllowed}${rk("sacksAllowed")}`
-  );
-
-  out.push("", "**Defense**");
-  out.push(`> **${n1(s.papg)}** pts allowed/g${rk("papg")} · **${n1(s.yapg)}** yds allowed/g${rk("yapg")}`);
-  out.push(`> Pass **${n1(s.passApg)}**/g${rk("passApg")} · Rush **${n1(s.rushApg)}**/g${rk("rushApg")}`);
-  out.push(
-    `> Sacks **${s.sacks}**${rk("sacks")} · INTs **${s.sums.def_ints_rec}** · ` +
-      `FF ${s.sums.def_forced_fum} · FR ${s.sums.def_fum_rec}`
-  );
-
-  out.push("", "**Situational**");
-  out.push(
-    `> 3rd down **${p0(s.thirdPct)}**${rk("thirdPct")} (${frac(s.sums.off_3rd_down_conv, s.sums.off_3rd_down_att)})` +
-      ` · 4th down ${p0(s.fourthPct)} (${frac(s.sums.off_4th_down_conv, s.sums.off_4th_down_att)})`
-  );
-  out.push(
-    `> Red zone **${p0(s.rzPct)}**${rk("rzPct")} (${s.sums.off_red_zone_tds} TD · ${s.sums.off_red_zone_fgs} FG` +
-      ` in ${s.sums.off_red_zones})` +
-      ` · RZ defense **${p0(s.defRzPct)}**${rk("defRzPct")}`
-  );
-
-  out.push("", "**Turnovers & Penalties**");
-  out.push(
-    `> Takeaways **${s.takeaways}**${rk("takeaways")} · Giveaways **${s.giveaways}**${rk("giveaways")}` +
-      ` · Diff **${signed(s.toDiff)}**${rk("toDiff")}`
-  );
-  out.push(`> Penalties ${n1(s.penPg)}/g · ${n1(s.penYpg)} yds/g${rk("penYpg")}`);
+  const shown = rows.slice(0, count);
+  // Two lines per team (with a bar) for short lists; one line when showing
+  // most of the league so it still fits Discord's 2000-character limit.
+  const compact = shown.length > 16;
+  const medals = ["\u{1F947}", "\u{1F948}", "\u{1F949}"];
+  const vals = rows.map((r) => r.value);
+  const best = vals[0];
+  const worst = vals[vals.length - 1];
 
   out.push("");
-  const notes = [`Ranks out of ${teamCount} teams`, "regular season"];
-  // Per-game rows can lag the record (a game whose stats never imported).
-  if (s.games < gamesOnRecord) notes.push(`totals from ${s.games} of ${gamesOnRecord} games`);
-  out.push(`-# ${notes.join(" · ")} · [View on XCFL Vault](<${teamUrl(teamName)}>)`);
+  for (const r of shown) {
+    const rank = r.rank <= 3 ? medals[r.rank - 1] : `\`${String(r.rank).padStart(2)}\``;
+    const helmet = r.abbr ? teamEmoji(r.abbr) : teamEmojiByName(r.teamName);
+    const rec = `${r.wins}-${r.losses}${r.ties ? `-${r.ties}` : ""}`;
+    const val = formatTeamStat(fmt, r.value);
+    const extra = r.detail ? ` · ${r.detail}` : "";
+    if (compact) {
+      out.push(`${rank} ${helmet} **${val}** ${r.teamName} *(${rec})*`);
+    } else {
+      out.push(`${rank} ${helmet} **${val}** ${r.teamName} *(${rec})*`);
+      // Bar scaled from the league's worst (empty) to best (full), so it
+      // works for "fewest" stats and negative turnover margins alike.
+      const span = best - worst;
+      const frac = span ? (r.value - worst) / span : 1;
+      const filled = Math.round(Math.max(0, Math.min(1, frac)) * 10);
+      out.push(`-# \`${"\u2588".repeat(filled)}${"\u2591".repeat(10 - filled)}\`${extra}`);
+    }
+  }
 
-  return { content: out.join("\n").slice(0, 2000), embeds: [], components: [] };
+  out.push("");
+  out.push(`-# ${teamCount} teams ranked · [View on XCFL Vault](<${VAULT_URL}${ROUTES.leaders}>)`);
+
+  let content = out.join("\n");
+  if (content.length > 2000) content = content.slice(0, 1997) + "\u2026";
+  return { content, embeds: [], components };
 }

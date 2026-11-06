@@ -5,6 +5,7 @@
 import { abbrFromName, normalizeAbbr } from "./emoji.js";
 import { TEAMS as TEAM_META } from "./teamLogos.js";
 import { pace, recordRetryAfter } from "./base44Pacer.js";
+import { TEAM_STAT_CATEGORIES, DEFAULT_TEAM_STAT_CATEGORY } from "./teamStatCategories.js";
 
 const APP_ID = process.env.BASE44_APP_ID;
 const SERVER = process.env.BASE44_SERVER_URL || "https://base44.app";
@@ -1560,7 +1561,7 @@ export async function findMemberByTeam(teamName) {
 
 // --- /teamstats -------------------------------------------------------------
 //
-// Season team stats from TeamStat, with league ranks.
+// Teams ranked on a season stat from TeamStat (a team-level /leaders).
 //
 // TeamStat holds one row per team per game. Most fields are that game's own
 // numbers (yards, TDs, sacks, 3rd downs...) and are summed here. A few are
@@ -1585,15 +1586,6 @@ const TEAMSTAT_SUM_FIELDS = [
   "def_fum_rec", "def_red_zones", "def_red_zone_tds", "def_red_zone_fgs",
   "to_giveaways", "to_takeaways", "penalties", "penalty_yds",
 ];
-
-// Stats that get a league rank. `low: true` means smaller is better.
-export const TEAMSTAT_RANKED = {
-  ppg: {}, ypg: {}, passYpg: {}, rushYpg: {}, thirdPct: {}, rzPct: {},
-  papg: { low: true }, yapg: { low: true }, passApg: { low: true },
-  rushApg: { low: true }, sacks: {}, takeaways: {}, toDiff: {},
-  defRzPct: { low: true }, sacksAllowed: { low: true }, giveaways: { low: true },
-  penYpg: { low: true },
-};
 
 function gamesPlayed(r) {
   return (r.total_wins ?? 0) + (r.total_losses ?? 0) + (r.total_ties ?? 0);
@@ -1657,21 +1649,6 @@ function summarizeTeamRows(rows) {
   };
 }
 
-// Standard competition ranking ("1, 2, 2, 4") of every team on each stat.
-function rankTeamSummaries(byTeam) {
-  const ranks = new Map([...byTeam.keys()].map((k) => [k, {}]));
-  for (const [stat, { low }] of Object.entries(TEAMSTAT_RANKED)) {
-    const vals = [...byTeam.entries()]
-      .filter(([, s]) => s[stat] != null && Number.isFinite(s[stat]))
-      .map(([k, s]) => [k, s[stat]]);
-    for (const [k, v] of vals) {
-      const better = vals.filter(([, o]) => (low ? o < v : o > v)).length;
-      ranks.get(k)[stat] = better + 1;
-    }
-  }
-  return ranks;
-}
-
 // A season is ~500 rows, so when the server honors the season filter one
 // read is complete. Base44 filters aren't always honored, though, and an
 // ignored filter would return an arbitrary capped slice of the whole table
@@ -1703,26 +1680,12 @@ async function latestTeamStatSeason() {
   return rows[0]?.season_index ?? null;
 }
 
-export async function getTeamStats(teamQuery, seasonNumber) {
+// Every team's regular-season summary for one season, keyed by canonical
+// (lowercased TeamMap) name, plus display names/abbreviations.
+async function getSeasonTeamSummaries(season) {
   const teamMap = await pollCached("teamstats:TeamMap", 10 * 60_000, () =>
     list("TeamMap", {}, { limit: 1000 })
   );
-
-  // Resolve the query: exact name/abbr first, then the loose match /team uses.
-  const q = String(teamQuery ?? "").trim().toLowerCase();
-  const mapped =
-    teamMap.find(
-      (t) =>
-        String(t.team_name ?? "").toLowerCase() === q ||
-        String(t.team_abbrName ?? "").toLowerCase() === q
-    ) ??
-    teamMap.find(
-      (t) => teamMatches(t.team_name, teamQuery) || teamMatches(t.team_abbrName, teamQuery)
-    );
-  if (!mapped) {
-    const names = [...new Set(teamMap.map((t) => t.team_name).filter(Boolean))].sort();
-    return { found: false, query: teamQuery, teams: names };
-  }
 
   // team_id -> canonical name key, preferring rows that carry an abbr (the
   // current cycle's import), the same rule as the site's buildTeamIdToName.
@@ -1737,10 +1700,6 @@ export async function getTeamStats(teamQuery, seasonNumber) {
       displayByKey.set(key, { name: t.team_name, abbr: t.team_abbrName ?? "" });
     }
   }
-  const teamKey = String(mapped.team_name).trim().toLowerCase();
-
-  const season = seasonNumber ?? (await latestTeamStatSeason());
-  if (season == null) return { found: true, empty: true, season: null, ...displayByKey.get(teamKey) };
 
   const seasonRows = await pollCached(`teamstats:season:${season}`, 2 * 60_000, () =>
     fetchSeasonTeamStats(season)
@@ -1761,22 +1720,46 @@ export async function getTeamStats(teamQuery, seasonNumber) {
   }
 
   const summaries = new Map();
-  for (const [key, weeks] of byTeamWeek) summaries.set(key, summarizeTeamRows([...weeks.values()]));
-  const ranks = rankTeamSummaries(summaries);
-  const display = displayByKey.get(teamKey) ?? { name: mapped.team_name, abbr: mapped.team_abbrName ?? "" };
-
-  const stats = summaries.get(teamKey);
-  if (!stats) {
-    return { found: true, empty: true, season, teamName: display.name, abbr: display.abbr };
+  for (const [key, weeks] of byTeamWeek) {
+    summaries.set(key, {
+      ...summarizeTeamRows([...weeks.values()]),
+      ...(displayByKey.get(key) ?? { name: key, abbr: "" }),
+    });
   }
-  return {
-    found: true,
-    empty: false,
-    season,
-    teamName: display.name,
-    abbr: display.abbr,
-    stats,
-    ranks: ranks.get(teamKey),
-    teamCount: summaries.size,
-  };
+  return summaries;
+}
+
+/**
+ * Teams ranked on one /teamstats category, best first. Ties share a rank
+ * ("1, 2, 2, 4"). Returns every team with data (count only limits display).
+ */
+export async function getTeamStatLeaders(category, seasonNumber) {
+  const cat = TEAM_STAT_CATEGORIES[category] ?? TEAM_STAT_CATEGORIES[DEFAULT_TEAM_STAT_CATEGORY];
+  const season = seasonNumber ?? (await latestTeamStatSeason());
+  if (season == null) return { category, label: cat.label, season: null, rows: [] };
+
+  const summaries = await getSeasonTeamSummaries(season);
+  const scored = [...summaries.values()]
+    .map((s) => ({ s, v: cat.value(s) }))
+    .filter(({ v }) => v != null && Number.isFinite(v))
+    .sort((a, b) => (cat.low ? a.v - b.v : b.v - a.v) || a.s.name.localeCompare(b.s.name));
+
+  const rows = scored.map(({ s, v }, i) => {
+    let rank = i + 1;
+    if (i > 0 && scored[i - 1].v === v) rank = undefined; // filled below
+    return {
+      rank,
+      value: v,
+      teamName: s.name,
+      abbr: s.abbr,
+      wins: s.wins,
+      losses: s.losses,
+      ties: s.ties,
+      games: s.games,
+      detail: cat.detail ? cat.detail(s) : null,
+    };
+  });
+  for (let i = 0; i < rows.length; i++) if (rows[i].rank == null) rows[i].rank = rows[i - 1].rank;
+
+  return { category, label: cat.label, fmt: cat.fmt, season, rows, teamCount: summaries.size };
 }

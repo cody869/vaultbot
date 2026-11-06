@@ -3,6 +3,7 @@ import "dotenv/config";
 import { Client, GatewayIntentBits, Events, AttachmentBuilder, EmbedBuilder } from "discord.js";
 import { loadEmoji } from "./emoji.js";
 import { registerCommands } from "./deploy-commands.js";
+import { DEFAULT_TEAM_STAT_CATEGORY } from "./teamStatCategories.js";
 import { startScheduler } from "./scheduler.js";
 import { startTradeFlow, handleTradeComponent, suggestTeams } from "./tradeflow.js";
 import { handleTradeVote, startTradeWatcher } from "./tradeVoting.js";
@@ -50,7 +51,7 @@ import {
   getPlayerWeeklyStats,
   getPlayerSeasonStats,
   getTeamOverview,
-  getTeamStats,
+  getTeamStatLeaders,
   getRivalry,
   getMemberByDiscordId,
   getMemberByIdOrUsername,
@@ -83,7 +84,7 @@ import {
   scoresEmbed,
   compareEmbed,
   teamEmbed,
-  teamStatsEmbed,
+  teamStatLeadersView,
   rivalryEmbed,
   notLinkedEmbed,
 } from "./embeds.js";
@@ -252,6 +253,28 @@ async function handleLeadersViewSelect(interaction) {
   }
 }
 
+// The category dropdown under a /teamstats card. Its custom id carries the
+// season and count the card was opened with: "teamstats_view:<season>:<count>".
+async function handleTeamStatsViewSelect(interaction) {
+  await interaction.deferUpdate();
+  try {
+    const [, seasonRaw, countRaw] = interaction.customId.split(":");
+    const season = seasonRaw ? Number(seasonRaw) : undefined;
+    const count = Math.max(1, Math.min(Number(countRaw) || 10, 32));
+    const category = interaction.values?.[0] ?? DEFAULT_TEAM_STAT_CATEGORY;
+    const data = await withTimeout(getTeamStatLeaders(category, season), 20_000, "Team stats");
+    await interaction.editReply(teamStatLeadersView(data, count));
+  } catch (err) {
+    console.error("Team stats view error:", err);
+    try {
+      await interaction.followUp({
+        content: `${err.message || "Could not switch categories."}`,
+        ephemeral: true,
+      });
+    } catch {}
+  }
+}
+
 // The Overview / Full Ratings / Weekly / Season dropdown under a player card.
 async function handlePlayerViewSelect(interaction) {
   // Edit the existing message in place rather than posting a new one.
@@ -346,7 +369,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.respond([]);
         } catch {}
       }
-    } else if (interaction.commandName === "team" || interaction.commandName === "teamstats") {
+    } else if (interaction.commandName === "team") {
       try {
         const focused = String(interaction.options.getFocused() ?? "");
         await interaction.respond(await suggestTeams(focused, 25));
@@ -441,6 +464,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     interaction.customId.startsWith("player_view:")
   ) {
     await handlePlayerViewSelect(interaction);
+    return;
+  }
+
+  // Team stat leaders (/teamstats) category switcher.
+  if (
+    interaction.isStringSelectMenu() &&
+    interaction.customId.startsWith("teamstats_view:")
+  ) {
+    await handleTeamStatsViewSelect(interaction);
     return;
   }
 
@@ -703,26 +735,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         break;
       }
       case "teamstats": {
-        let query = interaction.options.getString("team");
+        const category = interaction.options.getString("category") ?? DEFAULT_TEAM_STAT_CATEGORY;
+        const count = Math.max(1, Math.min(interaction.options.getInteger("count") ?? 10, 32));
         const season = interaction.options.getInteger("season") ?? undefined;
-        if (!query) {
-          // Same fallback as /team: the caller's own linked team.
-          const member = await getMemberByDiscordId(interaction.user.id);
-          if (!member) {
-            await interaction.editReply(notLinkedEmbed(interaction.user.tag));
-            break;
-          }
-          if (!member.team_name) {
-            await interaction.editReply(
-              `**${memberDisplayName(member)}** isn't assigned to a team right now.`
-            );
-            break;
-          }
-          query = member.team_name;
-        }
-        console.log(`[TEAMSTATS] ${interaction.user.tag} -> ${query}${season ? ` (S${season})` : ""}`);
-        const data = await getTeamStats(query, season);
-        await interaction.editReply(teamStatsEmbed(data));
+        const data = await withTimeout(getTeamStatLeaders(category, season), 25_000, "Team stats");
+        await interaction.editReply(teamStatLeadersView(data, count));
         break;
       }
       case "rivalry": {
