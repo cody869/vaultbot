@@ -550,7 +550,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // reply ephemerally instead of posting into the shared channel.
   const EPHEMERAL_SUBCOMMANDS = {
     fantasy: new Set(["queue", "setup", "config", "pause", "resume", "start", "score-week", "doctor"]),
-    admin: new Set(["bug-status", "resolve-bug"]),
+    admin: new Set(["bug-status", "resolve-bug", "hof-plaques"]),
   };
   const ephemeralSubs = EPHEMERAL_SUBCOMMANDS[interaction.commandName];
   const isEphemeral = ephemeralSubs?.has(interaction.options.getSubcommand(false));

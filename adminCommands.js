@@ -10,7 +10,8 @@
 // import, so a team that changed hands or a player who just joined could be
 // stale or missing there. EA's own data can't be stale — it's the save file.
 
-import { SlashCommandBuilder } from "discord.js";
+import { SlashCommandBuilder, ChannelType } from "discord.js";
+import { handleHofPlaques } from "./hofPlaques.js";
 import { getConnectedClient } from "./eaTokenStore.js";
 import { startExportFlow, handleEaStatus } from "./eaCommands.js";
 import bugReportCommands from "./bugReport.js";
@@ -140,6 +141,18 @@ export const adminCommandBuilder = new SlashCommandBuilder()
           .setName("resolution")
           .setDescription("How was this bug fixed?")
           .setRequired(true)
+      )
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName("hof-plaques")
+      .setDescription("Download every image posted in a channel (old HOF plaques) as zip files — only you see them")
+      .addChannelOption((o) =>
+        o
+          .setName("channel")
+          .setDescription("The Hall of Fame channel")
+          .setRequired(true)
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.PublicThread)
       )
   );
 
@@ -371,6 +384,10 @@ export async function handleAdminCommand(interaction) {
       }
       case "resolve-bug": {
         await bugReportCommands.resolveBug.execute(interaction);
+        break;
+      }
+      case "hof-plaques": {
+        await handleHofPlaques(interaction);
         break;
       }
     }
