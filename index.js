@@ -21,6 +21,7 @@ import {
   handleVegasSideButton,
   handleVegasStakeModal,
 } from "./vegasCommands.js";
+import { suggestSurvivorTeams, handleSurvivorCommand } from "./survivorCommands.js";
 import { startWeeklyDigestWatcher } from "./weeklyDigestWatcher.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams, handleForceWinButton } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
@@ -426,6 +427,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.respond([]);
         } catch {}
       }
+    } else if (interaction.commandName === "survivor") {
+      try {
+        const focused = String(interaction.options.getFocused() ?? "");
+        await interaction.respond(suggestSurvivorTeams(focused));
+      } catch (err) {
+        console.error("[AUTOCOMPLETE] survivor failed:", err.message);
+        try {
+          await interaction.respond([]);
+        } catch {}
+      }
     } else if (interaction.commandName === "fantasy") {
       // Serves /fantasy pick and /fantasy queue from the cached draft pool.
       // A cold pool build can take longer than Discord's 3s autocomplete
@@ -542,6 +553,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // generic deferReply below, same reasoning as submit_trade.
   if (interaction.commandName === "bet") {
     await handleBetCommand(interaction);
+    return;
+  }
+
+  // /survivor pick|mine replies for itself (its own deferred ephemeral
+  // reply), same reasoning as bet/submit_trade.
+  if (interaction.commandName === "survivor") {
+    await handleSurvivorCommand(interaction);
     return;
   }
 

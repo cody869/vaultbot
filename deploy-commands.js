@@ -6,6 +6,7 @@ import { fantasyCommand } from "./fantasyDeployCommands.js";
 import { adminCommandBuilder } from "./adminCommands.js";
 import { vegasCommand } from "./vegasCommands.js";
 import { TEAM_STAT_CATEGORIES } from "./teamStatCategories.js";
+import { survivorCommand } from "./survivorCommands.js";
 
 export const commands = [
   new SlashCommandBuilder()
@@ -237,6 +238,9 @@ export const commands = [
 
   // /bet place|mine (in-house Vegas sportsbook).
   ...vegasCommand,
+
+  // /survivor pick|mine (weekly Survivor Pool).
+  ...survivorCommand,
 ].map((c) => c.toJSON());
 
 // Registers the current command set with Discord. Safe to call on every
