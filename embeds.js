@@ -10,7 +10,7 @@ import { TEAM_STAT_CATEGORIES, formatTeamStat } from "./teamStatCategories.js";
 const VAULT_COLOR = 0x1d4ed8; // XCFL blue
 const VAULT_URL = process.env.VAULT_PUBLIC_URL || "https://xcfl-companion.com";
 
-function fmtMoney(m) {
+export function fmtMoney(m) {
   if (m == null) return "—";
   const n = Number(m);
   // Values arrive in raw dollars (e.g. 1130000) — show as $1.13M.
@@ -361,7 +361,7 @@ export function tradesEmbed(trades) {
 // `#` heading and block-quoted sections, matching the snallabot look.
 
 // Every rating we know how to show: [label, data key].
-const ALL_RATINGS = [
+export const ALL_RATINGS = [
   ["Speed", "spd"], ["Accel", "acc"], ["Agility", "agi"], ["Awareness", "awa"],
   ["Injury", "inj"], ["Break Tackle", "breakTackle"], ["Carrying", "carry"],
   ["BC Vision", "ballCarryVision"], ["Truck", "trucking"], ["Stiff Arm", "stiffArm"],
@@ -399,7 +399,7 @@ function positionGroup(posRaw) {
   if (pos === "TE") return "TE";
   if (["LT", "LG", "C", "RG", "RT", "OL", "OT", "OG"].includes(pos)) return "OL";
   if (["LE", "RE", "DT", "DE", "EDGE", "LEDGE", "REDGE", "DL"].includes(pos)) return "DL";
-  if (["MLB", "LOLB", "ROLB", "OLB", "ILB", "LB"].includes(pos)) return "LB";
+  if (["MLB", "LOLB", "ROLB", "OLB", "ILB", "LB", "MIKE", "SAM", "WILL"].includes(pos)) return "LB";
   if (pos === "CB") return "CB";
   if (["FS", "SS", "S"].includes(pos)) return "S";
   if (["K", "P"].includes(pos)) return "K";
@@ -408,7 +408,7 @@ function positionGroup(posRaw) {
 
 // Ratings to show on the Overview tab: position-relevant only, and only the
 // ones this player actually has. Falls back to the first 14 present.
-function relevantRatings(p) {
+export function relevantRatings(p) {
   const group = positionGroup(p.player_position);
   const keys = group ? POSITION_RATINGS[group] : null;
   if (keys) {
@@ -442,7 +442,7 @@ const VIEW_LABELS = {
 };
 
 // The Overview / Full Ratings / Weekly / Season picker under the card.
-function playerViewRow(playerId, view) {
+export function playerViewRow(playerId, view) {
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`player_view:${playerId}`)
     .setPlaceholder(VIEW_LABELS[view] ?? "Overview")
@@ -485,7 +485,7 @@ function playerHeader(p, teamName) {
 }
 
 // One stat line from a WeeklyStats row — only the categories with activity.
-function weeklyStatLine(w) {
+export function weeklyStatLine(w) {
   const parts = [];
   if (w.pass_att || w.pass_yds || w.pass_tds) {
     parts.push(
@@ -508,7 +508,7 @@ function weeklyStatLine(w) {
 
 // Season-total lines for one merged season row:
 // { season, gamesPlayed, passing?, rushing?, receiving?, defense? }
-function seasonStatLines(row) {
+export function seasonStatLines(row) {
   const parts = [];
   const pass = row.passing;
   const rush = row.rushing;

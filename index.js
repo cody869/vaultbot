@@ -71,6 +71,7 @@ import {
   warmProspectCache,
 } from "./draftProspects.js";
 import { renderProspectCard } from "./prospectCard.js";
+import { renderPlayerCard } from "./playerCard.js";
 import {
   standingsEmbed,
   playoffPictureEmbed,
@@ -80,6 +81,8 @@ import {
   tradeBlockNoTeamEmbed,
   tradesEmbed,
   playerEmbed,
+  playerUrl,
+  playerViewRow,
   playerChoicesEmbed,
   scoresEmbed,
   compareEmbed,
@@ -212,12 +215,26 @@ async function renderPlayerView(player, team, view) {
     );
     console.log(`[PLAYER] season rows: ${Array.isArray(data.season) ? data.season.length : 0}`);
   }
-  const payload = playerEmbed(player, team, view, data);
-  console.log(
-    `[PLAYER] built "${view}" view — ${payload.content.length} chars, ` +
-      `${payload.components?.length ?? 0} component row(s)`
-  );
-  return payload;
+  // The card image, with the view dropdown under it. If rendering fails for
+  // any reason, fall back to the text card so /player still answers.
+  try {
+    const png = await withTimeout(renderPlayerCard(player, team, view, data), 20_000, "Player card");
+    const filename = `player-${player.id}-${view}.png`;
+    console.log(`[PLAYER] rendered "${view}" card for ${player.player_fullName}`);
+    return {
+      content: `-# [View on XCFL Vault](<${playerUrl(player.player_fullName)}>)`,
+      embeds: [],
+      // attachments: [] drops the previous view's image when the dropdown
+      // edits the message in place.
+      attachments: [],
+      files: [new AttachmentBuilder(png, { name: filename })],
+      components: [playerViewRow(player.id, view)],
+    };
+  } catch (err) {
+    console.error(`[PLAYER] card render failed, using text card: ${err.message}`);
+    const payload = playerEmbed(player, team, view, data);
+    return { ...payload, attachments: [] };
+  }
 }
 
 // Remembers each user's requested leaderboard size so switching categories
