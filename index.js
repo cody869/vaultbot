@@ -1,6 +1,6 @@
 // index.js — the XCFL Vault Discord bot.
 import "dotenv/config";
-import { Client, GatewayIntentBits, Events, AttachmentBuilder, EmbedBuilder } from "discord.js";
+import { Client, GatewayIntentBits, Events, AttachmentBuilder } from "discord.js";
 import { loadEmoji } from "./emoji.js";
 import { registerCommands } from "./deploy-commands.js";
 import { DEFAULT_TEAM_STAT_CATEGORY } from "./teamStatCategories.js";
@@ -68,7 +68,6 @@ import {
   getProspectById,
   findProspect,
   getGateLevel,
-  getProspectStories,
   warmProspectCache,
 } from "./draftProspects.js";
 import { renderProspectCard } from "./prospectCard.js";
@@ -680,15 +679,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           prospect = matches[0];
         }
 
-        const [gate, stories] = await Promise.all([
-          withTimeout(getGateLevel(prospect.draft_class_season), 15_000, "Scouting gate lookup"),
-          withTimeout(getProspectStories(prospect.id), 15_000, "Prospect stories lookup").catch(() => []),
-        ]);
-        const png = await renderProspectCard(prospect, gate, stories);
+        const gate = await withTimeout(
+          getGateLevel(prospect.draft_class_season),
+          15_000,
+          "Scouting gate lookup"
+        );
+        const png = await renderProspectCard(prospect, gate);
         const filename = `prospect-${prospect.id}.png`;
+        // Plain attachment, not an embed image: Discord shrinks embed images,
+        // and this card is meant to be seen at full size.
         await interaction.editReply({
           files: [new AttachmentBuilder(png, { name: filename })],
-          embeds: [new EmbedBuilder().setColor(0xd4a843).setImage(`attachment://${filename}`)],
         });
         console.log(`[PROSPECT] reply sent for ${prospect.player_fullName}`);
         break;
