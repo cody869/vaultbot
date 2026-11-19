@@ -419,11 +419,42 @@ export async function availableAssets(league, poolOverride = null) {
  * Record a pick and advance the clock. Guards against double-picks by
  * re-reading current_pick_number and refusing if it moved.
  */
-export async function makePick(league, team, asset, { auto = false, expectedPickNumber = null } = {}) {
+// Every pick in this process runs one at a time. A manual /fantasy pick and
+// the clock-expiry autopick can land in the same second on a short live
+// clock; both used to read the same cached league row, both passed the
+// expectedPickNumber check (it compared against that same stale row), and
+// both wrote a FantasyPick for one slot -- the duplicate-row case the Vault's
+// draft board has to paper over. Serializing + re-reading fresh state inside
+// the lock closes that. (Two containers overlapping during a Railway redeploy
+// are still not covered; don't redeploy mid-draft.)
+let pickChain = Promise.resolve();
+
+export function makePick(league, team, asset, opts = {}) {
+  const run = pickChain.then(() => makePickLocked(league, team, asset, opts));
+  pickChain = run.catch(() => {});
+  return run;
+}
+
+async function makePickLocked(staleLeague, staleTeam, asset, { auto = false, expectedPickNumber = null } = {}) {
+  invalidate(ENTITIES.league);
+  invalidate(ENTITIES.pick);
+  invalidate(ENTITIES.team);
+  const fresh = await getLeague();
+  const league = fresh && fresh.id === staleLeague.id ? fresh : staleLeague;
+  if (league.draft_status !== 'in_progress') {
+    return { ok: false, reason: 'The draft is not running.' };
+  }
+
   const pickNumber = league.current_pick_number || 1;
   if (expectedPickNumber != null && expectedPickNumber !== pickNumber) {
     return { ok: false, reason: 'The clock moved — that pick was already made.' };
   }
+
+  const [existingPicks, teams] = await Promise.all([getPicks(league.id), getTeams(league.id)]);
+  if (existingPicks.some((p) => p.player_key === asset.key)) {
+    return { ok: false, reason: `${asset.name} was just taken.` };
+  }
+  const team = teams.find((t) => t.id === staleTeam.id) || staleTeam;
 
   const roster = Array.isArray(team.roster) ? [...team.roster] : [];
   const legality = canDraft(roster, asset.position, league);

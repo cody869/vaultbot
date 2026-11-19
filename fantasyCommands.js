@@ -19,6 +19,7 @@ import {
   getWeeklyStats,
   getGames,
   createEntity,
+  listEntity,
   updateEntity,
   invalidate,
 } from './fantasyStore.js';
@@ -402,9 +403,29 @@ async function cmdSetup(interaction) {
     return interaction.editReply({ content: `A league already exists: **${existing.name}** (${existing.status}).`, ...PLAIN });
   }
 
+  // Carry the format forward from the most recent season instead of the
+  // hard-coded LEAGUE_DEFAULTS (season 84, 14 teams, 12 rounds, 8h clock),
+  // which none of these fields can be changed from afterwards in Discord.
+  // Every season since S84 had to be hand-corrected in Base44 after setup.
+  const allLeagues = await listEntity(ENTITIES.league).catch(() => []);
+  const prev = [...allLeagues].sort((a, b) => (Number(b.season_number) || 0) - (Number(a.season_number) || 0))[0] || null;
+  const CARRY = [
+    'name', 'cycle', 'team_slots', 'roster_size', 'roster_min', 'scoring_start_week',
+    'regular_season_end_week', 'playoff_start_week', 'final_week_start', 'final_week_end',
+    'playoff_teams', 'pick_clock_minutes', 'pick_clock_hours', 'quiet_start_hour',
+    'quiet_end_hour', 'timezone_offset_hours',
+  ];
+  const carried = {};
+  if (prev) {
+    for (const k of CARRY) if (prev[k] != null) carried[k] = prev[k];
+    for (const [k, v] of Object.entries(prev)) if (k.startsWith('score_') && v != null) carried[k] = v;
+    carried.season_number = (Number(prev.season_number) || LEAGUE_DEFAULTS.season_number) + 1;
+  }
+
   const league = await createEntity(ENTITIES.league, {
     ...LEAGUE_DEFAULTS,
-    cycle: process.env.FANTASY_CYCLE || null,
+    ...carried,
+    cycle: process.env.FANTASY_CYCLE || carried.cycle || null,
     status: 'setup',
     draft_status: 'pending',
     draft_paused: false,
@@ -551,7 +572,7 @@ async function cmdStart(interaction) {
   return interaction.editReply({
     content: [
       hasSetOrder ? '# Draft started — reusing the existing order' : '# Draft order set',
-      `Snake, ${league.roster_size} rounds, ${league.pick_clock_hours}h per pick (clock pauses ${league.quiet_start_hour}:00–${league.quiet_end_hour}:00).`,
+      `Snake, ${league.roster_size} rounds, ${fmtClock(clockMinutes(league))} per pick${league.quiet_start_hour === league.quiet_end_hour ? "" : ` (clock pauses ${league.quiet_start_hour}:00–${league.quiet_end_hour}:00)`}.`,
       '',
       ...lines,
       '',
