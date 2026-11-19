@@ -21,7 +21,7 @@ import {
   handleVegasSideButton,
   handleVegasStakeModal,
 } from "./vegasCommands.js";
-import { suggestSurvivorTeams, handleSurvivorCommand } from "./survivorCommands.js";
+import { handleSurvivorCommand, handleSurvivorComponent } from "./survivorCommands.js";
 import { startWeeklyDigestWatcher } from "./weeklyDigestWatcher.js";
 import { handleAdminCommand, suggestForceWinGames, suggestAdminTeams, handleForceWinButton } from "./adminCommands.js";
 import { startEAWatcher, stopEAWatcher } from "./eaWatcher.js";
@@ -443,16 +443,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.respond([]);
         } catch {}
       }
-    } else if (interaction.commandName === "survivor") {
-      try {
-        const focused = String(interaction.options.getFocused() ?? "");
-        await interaction.respond(suggestSurvivorTeams(focused));
-      } catch (err) {
-        console.error("[AUTOCOMPLETE] survivor failed:", err.message);
-        try {
-          await interaction.respond([]);
-        } catch {}
-      }
     } else if (interaction.commandName === "fantasy") {
       // Serves /fantasy pick and /fantasy queue from the cached draft pool.
       // A cold pool build can take longer than Discord's 3s autocomplete
@@ -547,6 +537,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith("vegas:stake:")) {
     await handleVegasStakeModal(interaction);
+    return;
+  }
+
+  // /survivor pick's matchup dropdown, team buttons and Back button.
+  if (
+    (interaction.isButton() || interaction.isStringSelectMenu()) &&
+    interaction.customId.startsWith("survivor:")
+  ) {
+    await handleSurvivorComponent(interaction);
     return;
   }
 
