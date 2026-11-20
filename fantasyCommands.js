@@ -482,6 +482,13 @@ async function cmdJoin(interaction) {
     discord_username: interaction.user.username,
     display_name: displayName,
     league_member_id: member?.id || null,
+    // Auth user id of the owner. FantasyTeam UPDATE RLS only lets the owner
+    // (owner_user_id == user.id), the commissioner or an admin edit a roster.
+    // The Vault's stampFantasyOwner workflow was meant to fill this in, but
+    // until Nov 2026 it never did (bad trigger mapping), and the S87 draft
+    // room's roster writes were all refused. Stamp it here at creation so it
+    // doesn't depend on the workflow.
+    owner_user_id: member?.linked_user_id || null,
     draft_slot: null,
     roster: [],
     queue: [],
