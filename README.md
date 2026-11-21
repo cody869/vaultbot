@@ -121,6 +121,35 @@ Example: post standings + scores every Monday at 10am Pacific →
 `AUTOPOST_CHANNEL_ID=...`, `AUTOPOST_DAY=1`, `AUTOPOST_HOUR=10`,
 `AUTOPOST_CONTENT=standings,scores`, `TZ=America/Los_Angeles`.
 
+## Live scores on the game broadcast (optional)
+
+While the league broadcast is on air, the bot reads the Madden scorebug off
+each live game's Twitch stream about once a minute and writes the score to the
+Vault (`LiveScore`), where the game broadcast overlay shows it in the ticker,
+rail and scoreboards.
+
+It **only runs while the broadcast is live**: the host flips **Live scores** on
+in the Vault host panel (`/broadcast/game/host`), and that page keeps a
+heartbeat going while it is open. Switch it off or close the panel and the bot
+stops reading streams within a few minutes. Otherwise it does nothing (one
+cached Vault read per minute, no Twitch or Anthropic calls).
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Claude API key used to read the scorebug. **Without it the feature stays off.** | (off) |
+| `LIVE_SCORE_MODEL` | Claude model for the reads, e.g. `claude-haiku-5-5` for a much cheaper read | `claude-opus-5-5` |
+| `LIVE_SCORE_POLL_SECONDS` | Seconds between reads | `60` |
+| `LIVE_SCORE_DISABLED` | `true` turns the feature off entirely | (on when the key is set) |
+| `FFMPEG_PATH` | Use this ffmpeg instead of the bundled one | bundled |
+
+Frames come from Twitch's public web-player endpoints (not an official API).
+The bot keeps one viewing session per stream and never reads ad segments: during
+an ad break the last score just stays up. A reading that doesn't add up (a
+score going down, a jump of more than 8, the quarter going backwards) is held
+until the next read confirms it.
+
+Check the reader on a screenshot: `node scorebugReader.js frame.png`
+
 ## Customizing
 
 - **Add a command:** add a builder in `deploy-commands.js`, a data function in

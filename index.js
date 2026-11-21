@@ -11,6 +11,7 @@ import { startNewsWatcher, handleNews } from "./news.js";
 import { startScorebugWatcher } from "./scorebugWatcher.js";
 import { startScheduleWatcher } from "./scheduleWatcher.js";
 import { startStreamWatcher } from "./streamWatcher.js";
+import { startLiveScoreWatcher } from "./liveScoreWatcher.js";
 import { startSuspensionWatcher } from "./suspensionWatcher.js";
 import { startAbilityWatcher } from "./playerAbilityWatcher.js";
 import { startVegasWatcher } from "./vegasWatcher.js";
@@ -161,6 +162,10 @@ client.once(Events.ClientReady, async (c) => {
   // Marks games "In progress" on Week Central from #twitch-streams go-live
   // posts. Event-driven only, no seed read.
   startStreamWatcher(c);
+  // Live in-game scores off the Madden scorebug of each live stream, ONLY
+  // while the game broadcast host panel has live scores on (heartbeat).
+  // Off air a tick is one cached read. Needs ANTHROPIC_API_KEY.
+  setTimeout(() => startLiveScoreWatcher(), 24_000);
   // Posts approved 70/30 Rule suspensions to SUSPENSIONS_CHANNEL_ID once each,
   // tagging the affected owner. No-ops if that env var is unset.
   setTimeout(() => startSuspensionWatcher(c), 15_000);
