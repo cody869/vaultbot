@@ -22,7 +22,8 @@
 // GameStream fields written: game_id, season_number, week, team_name, url,
 // platform, display_name, source='discord', live_started_at, twitch_login,
 // stream_title, discord_message_id, matched_by. Week Central treats a game as
-// in progress for 4 hours after live_started_at, or until it goes final.
+// in progress for 1 hour after live_started_at (about a game's length), or
+// until it goes final.
 //
 // Environment:
 //   STREAMS_CHANNEL_ID   channel to watch (default: XCFL's #twitch-streams)
@@ -59,7 +60,7 @@ const POSITIVE_RE = /\b(xcfl|madden|m2\d|franchise|cfm)\b/i;
 // requires an actual team name in the title regardless of this regex.
 const STRONG_POSITIVE_RE = /\bxcfl\b/i;
 const MAX_POST_AGE_MS = 6 * 60 * 60 * 1000;   // ignore edits to old posts
-const NEW_SESSION_MS = 4 * 60 * 60 * 1000;    // same streamer + game after this = a new go-live
+const NEW_SESSION_MS = 60 * 60 * 1000;        // same streamer + game after this = a new go-live (matches the 1h live window)
 const CONTEXT_TTL_MS = 2 * 60 * 1000;
 
 const URL_RE = /https?:\/\/(?:www\.|m\.)?(twitch\.tv|kick\.com|youtube\.com|youtu\.be)\/[^\s>)"]+/i;

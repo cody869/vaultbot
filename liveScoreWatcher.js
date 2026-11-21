@@ -11,7 +11,7 @@
 //
 // While on, each tick:
 //   1. this week's games (earliest week with an unplayed game, as Week Central)
-//   2. their GameStream rows that went live in the last 4 hours (streamWatcher)
+//   2. their GameStream rows that went live in the last hour (streamWatcher)
 //   3. per unfinished game, newest stream first: grab a frame (twitchFrame.js),
 //      read the scorebug (scorebugReader.js), judge it (liveScoreLogic.js)
 //   4. write the LiveScore row for that game (create once, then update)
@@ -32,7 +32,7 @@ import { judgeReading } from "./liveScoreLogic.js";
 
 const POLL_MS = Number(process.env.LIVE_SCORE_POLL_SECONDS || 60) * 1000;
 const HEARTBEAT_MAX_MS = 6 * 60 * 1000;
-const LIVE_WINDOW_MS = 4 * 60 * 60 * 1000; // same rule as Week Central / streamWatcher
+const LIVE_WINDOW_MS = 60 * 60 * 1000; // a game takes about an hour; same rule as Week Central / streamWatcher
 const CONCURRENCY = 3;
 
 // Per-game memory: last accepted reading and any reading held for confirmation.
